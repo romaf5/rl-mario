@@ -1,0 +1,14 @@
+venv/
+runs/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.eggs/
+*.so
+dist/
+build/
+.cache/
+*.log
+/tmp/
+.claude/

@@ -1,0 +1,9 @@
+torch
+torchvision
+rl-games
+gym-super-mario-bros
+opencv-python
+tensorboard
+ray
+numpy
+PyYAML
