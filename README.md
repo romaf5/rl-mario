@@ -50,7 +50,7 @@ tensorboard --logdir runs --bind_all --port 6006
 
 Latest training (epoch 2000, full-game curriculum):
 
-![Mario Demo](videos/demo_v3.gif)
+<video src="https://github.com/romaf5/rl-mario/raw/master/videos/demo_hd.mp4" controls autoplay loop muted width="768"></video>
 
 ## Key Constraints
 
