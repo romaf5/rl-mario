@@ -50,7 +50,7 @@ tensorboard --logdir runs --bind_all --port 6006
 
 Latest training (epoch 2000, full-game curriculum):
 
-<video src="https://github.com/romaf5/rl-mario/raw/master/videos/demo_hd.mp4" controls autoplay loop muted width="768"></video>
+[![Watch Demo](https://img.shields.io/badge/Watch-Demo%20Video-red?style=for-the-badge)](https://github.com/romaf5/rl-mario/releases/download/v0.1/demo_hd.mp4)
 
 ## Key Constraints
 
