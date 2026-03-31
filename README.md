@@ -50,7 +50,7 @@ tensorboard --logdir runs --bind_all --port 6006
 
 Latest training (epoch 2000, full-game curriculum):
 
-![Mario Demo](videos/demo_v2.gif)
+![Mario Demo](videos/demo_v3.gif)
 
 ## Key Constraints
 
