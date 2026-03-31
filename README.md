@@ -52,6 +52,10 @@ Latest training (epoch 2000, full-game curriculum):
 
 [![Watch Demo](https://img.shields.io/badge/Watch-Demo%20Video-red?style=for-the-badge)](https://github.com/romaf5/rl-mario/releases/download/v0.1/demo_hd.mp4)
 
+
+https://github.com/user-attachments/assets/18a551a7-9bb2-48a8-b9aa-7e22a6401b74
+
+
 ## Key Constraints
 
 - numpy < 2.0 (nes_py uint8 overflow)
