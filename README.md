@@ -48,9 +48,9 @@ tensorboard --logdir runs --bind_all --port 6006
 
 ## Demo
 
-Latest training video (epoch 2000, full-game curriculum):
+Latest training (epoch 2000, full-game curriculum):
 
-[videos/demo_epoch_2000.mp4](videos/demo_epoch_2000.mp4)
+![Mario Demo](videos/demo.gif)
 
 ## Key Constraints
 
