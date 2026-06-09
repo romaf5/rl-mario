@@ -41,7 +41,7 @@ params:
         gain: 1.41421356237
 
   config:
-    name: Mario_Curriculum_v2
+    name: Mario_GrowReward
     env_name: mario_custom
     score_to_win: 100000
     normalize_value: True
@@ -64,7 +64,7 @@ params:
     minibatch_size: 1024
     mini_epochs: 4
     critic_coef: 0.5
-    max_epochs: 20000
+    max_epochs: 5000
     use_diagnostics: True
     save_frequency: 500
     save_best_after: 500
@@ -79,6 +79,7 @@ params:
       stage_bonus: 500
       idle_penalty: 0.5
       idle_threshold: 10
+      progress_reward: 0.001
       skip: 4
       sticky_actions: 0.0
 

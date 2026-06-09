@@ -199,16 +199,9 @@ class MarioObserver(AlgoObserver):
             model.train()
 
             if len(frames) > 4:
-                original_count = len(frames)
-                max_frames = 300
-                if len(frames) > max_frames:
-                    indices = np.linspace(0, len(frames) - 1, max_frames, dtype=int)
-                    frames = [frames[i] for i in indices]
-
-                # Real-time: each original step = 4/60s ≈ 67ms
-                # Scale duration to preserve total playback time after subsampling
-                real_time_ms = original_count * 67
-                duration_per_gif_frame = max(20, real_time_ms // len(frames))
+                # 67ms per frame = real time (NES 60fps, frame skip 4)
+                gif_duration = 67
+                mp4_fps = 15
 
                 # Save MP4 to disk
                 run_dir = os.path.dirname(os.path.dirname(
@@ -216,7 +209,6 @@ class MarioObserver(AlgoObserver):
                 video_dir = os.path.join(run_dir, 'videos')
                 os.makedirs(video_dir, exist_ok=True)
                 mp4_path = os.path.join(video_dir, f'epoch_{epoch_num}.mp4')
-                mp4_fps = max(1, len(frames) * 1000 // real_time_ms)
                 imageio.mimsave(mp4_path, frames, fps=mp4_fps)
 
                 # Write PIL animated GIF to TensorBoard Images tab
@@ -224,7 +216,7 @@ class MarioObserver(AlgoObserver):
                 gif_path = tempfile.NamedTemporaryFile(suffix='.gif', delete=False).name
                 pil_frames[0].save(gif_path, save_all=True,
                                    append_images=pil_frames[1:],
-                                   duration=duration_per_gif_frame,
+                                   duration=gif_duration,
                                    loop=0, optimize=False)
                 with open(gif_path, 'rb') as f:
                     gif_bytes = f.read()

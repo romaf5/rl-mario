@@ -38,11 +38,12 @@ class MarioProgressWrapper(gym.Wrapper):
     - Tracks overall game progress as a metric
     """
     def __init__(self, env, stage_bonus=500.0, idle_penalty=0.5,
-                 idle_threshold=10, progress_scale=1.0):
+                 idle_threshold=10, progress_reward=0.001, progress_scale=1.0):
         gym.Wrapper.__init__(self, env)
         self.stage_bonus = stage_bonus
         self.idle_penalty = idle_penalty
         self.idle_threshold = idle_threshold
+        self.progress_reward = progress_reward
         self.progress_scale = progress_scale
         self._prev_flag_get = False
         self._prev_x_pos = 0
@@ -68,15 +69,21 @@ class MarioProgressWrapper(gym.Wrapper):
             reward += self.stage_bonus
         self._prev_flag_get = flag_get
 
-        # Idle penalty: only after idle_threshold consecutive idle steps
-        # Brief pauses (jumping, waiting for enemies) are fine
+        # Growing progress reward: forward movement scaled by position
+        # At x=0 bonus is ~0, at x=2000 bonus is +2 per step of forward movement
+        # Cap x_delta to avoid spike on episode reset (episode_life resets
+        # _prev_x_pos to 0 but env continues from death position)
         x_pos = info.get('x_pos', 0)
-        if x_pos <= self._prev_x_pos:
+        x_delta = x_pos - self._prev_x_pos
+        if x_delta > 0:
+            x_delta = min(x_delta, 20)  # cap to normal per-step movement
+            reward += x_delta * self.progress_reward * x_pos
+            self._idle_steps = 0
+        else:
+            # Idle penalty: only after idle_threshold consecutive idle steps
             self._idle_steps += 1
             if self._idle_steps > self.idle_threshold:
                 reward -= self.idle_penalty
-        else:
-            self._idle_steps = 0
         self._prev_x_pos = x_pos
 
         # Track stage progress (world 1-8, stage 1-4 -> 0-31)
@@ -241,6 +248,7 @@ def create_mario_env(**kwargs):
         stage_bonus: reward for completing a stage (default: 500)
         idle_penalty: per-step penalty after idle_threshold consecutive idle steps (default: 0.5)
         idle_threshold: steps of no progress before penalty kicks in (default: 10)
+        progress_reward: growing bonus multiplier for forward movement (default: 0.001)
         skip: frame skip (default: 4)
         sticky_actions: probability of repeating previous action (default: 0)
         random_stages: list of stages to randomize, e.g. ['1-1','1-2','1-3','1-4']
@@ -256,6 +264,7 @@ def create_mario_env(**kwargs):
     stage_bonus = kwargs.pop('stage_bonus', 500.0)
     idle_penalty = kwargs.pop('idle_penalty', 0.5)
     idle_threshold = kwargs.pop('idle_threshold', 10)
+    progress_reward = kwargs.pop('progress_reward', 0.001)
     skip = kwargs.pop('skip', 4)
     sticky_prob = kwargs.pop('sticky_actions', 0.0)
     random_stages = kwargs.pop('random_stages', None)
@@ -276,7 +285,8 @@ def create_mario_env(**kwargs):
         env = EpisodicLifeMarioEnv(env)
 
     env = MarioProgressWrapper(env, stage_bonus=stage_bonus, idle_penalty=idle_penalty,
-                               idle_threshold=idle_threshold)
+                               idle_threshold=idle_threshold,
+                               progress_reward=progress_reward)
     env = MaxAndSkipEnv(env, skip=skip)
     env = WarpFrame(env, width=84, height=84, grayscale=True)
     env = ScaledFloatFrame(env)
