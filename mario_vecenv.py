@@ -1,4 +1,10 @@
-"""Vectorized environments for Mario training without Ray dependency."""
+"""Vectorized environments for Mario training (stable-retro backend).
+
+Copy of mario_vecenv.py with the worker importing mario_env instead of
+mario_env. A separate file because the originals must stay untouched while a
+training run is in flight. Note: stable-retro allows only ONE emulator per
+process, so the one-env-per-process layout here is required, not just faster.
+"""
 
 import numpy as np
 import multiprocessing as mp
@@ -37,12 +43,8 @@ def _worker(remote, parent_remote, env_kwargs):
         pass
 
 
-class MarioVecEnv(IVecEnv):
-    """Multiprocessing vectorized environment for Mario.
-
-    Each environment runs in a separate process for true parallelism,
-    which significantly improves throughput over synchronous stepping.
-    """
+class MarioRetroVecEnv(IVecEnv):
+    """Multiprocessing vectorized environment for Mario (retro backend)."""
 
     def __init__(self, config_name, num_actors, **kwargs):
         self.num_actors = num_actors
@@ -118,10 +120,10 @@ class MarioVecEnv(IVecEnv):
 
 
 def register_mario_vecenv():
-    """Register the MARIO vecenv type with rl_games."""
+    """Register the MARIO_RETRO vecenv type with rl_games."""
     vecenv.register(
-        'MARIO',
-        lambda config_name, num_actors, **kwargs: MarioVecEnv(
+        'MARIO_RETRO',
+        lambda config_name, num_actors, **kwargs: MarioRetroVecEnv(
             config_name, num_actors, **kwargs
         ),
     )

@@ -1,0 +1,13 @@
+{
+  "done": {
+    "variables": {
+      "life": {
+        "op": "equal",
+        "reference": 1000
+      }
+    }
+  },
+  "reward": {
+    "variables": {}
+  }
+}

@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
-"""Train a PPO agent on Super Mario Bros using rl_games."""
+"""Train a PPO agent on Super Mario Bros using rl_games (stable-retro backend).
+
+Copy of train.py wired to the stable-retro environment. Run from venv_retro:
+
+    source venv_retro/bin/activate
+    python train.py --config configs/mario_ppo_random_stages.yaml
+
+The periodic video recorder builds its eval env in the main process, which is
+fine under stable-retro's one-emulator-per-process limit because all training
+emulators live in vecenv worker processes.
+"""
 
 import argparse
-import os
-import sys
 
 import yaml
-from rl_games.common import env_configurations, vecenv
+from rl_games.common import env_configurations
 from rl_games.torch_runner import Runner
 
 from mario_env import create_mario_env
@@ -15,17 +23,17 @@ from callbacks import MarioObserver
 
 
 def register_mario_env():
-    """Register custom Mario environment and vecenv with rl_games."""
+    """Register custom Mario retro environment and vecenv with rl_games."""
     register_mario_vecenv()
-    env_configurations.register('mario_custom', {
-        'vecenv_type': 'MARIO',
+    env_configurations.register('mario_retro', {
+        'vecenv_type': 'MARIO_RETRO',
         'env_creator': lambda **kwargs: create_mario_env(**kwargs),
     })
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train Mario PPO agent')
-    parser.add_argument('--config', type=str, default='configs/mario_ppo.yaml',
+    parser = argparse.ArgumentParser(description='Train Mario PPO agent (retro)')
+    parser.add_argument('--config', type=str, default='configs/mario_ppo_random_stages.yaml',
                         help='Path to training config YAML')
     parser.add_argument('--checkpoint', type=str, default=None,
                         help='Path to checkpoint to resume from')
@@ -54,7 +62,7 @@ def main():
 
     print("=" * 60)
     print(f"  Training: {config['params']['config']['name']}")
-    print(f"  Environment: {config['params']['config']['env_config']['name']}")
+    print(f"  Environment: {config['params']['config']['env_config']['name']} (stable-retro)")
     print(f"  Actors: {config['params']['config']['num_actors']}")
     print(f"  Max epochs: {config['params']['config']['max_epochs']}")
     print(f"  Device: {config['params']['config']['device']}")

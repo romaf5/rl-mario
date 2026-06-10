@@ -150,6 +150,19 @@ class MarioObserver(AlgoObserver):
                     daemon=True)
                 self._video_thread.start()
 
+    def _make_eval_env(self):
+        """Build the env used for video recording. Subclasses override this
+        to swap the backend."""
+        from mario_env import create_mario_env
+        return create_mario_env(
+            name='SuperMarioBros-v0',
+            action_type='complex',
+            episode_life=False,
+            stage_bonus=0,
+            skip=4,
+            sticky_actions=0.0,
+        )
+
     def _record_video(self, epoch_num, model):
         """Record gameplay: PIL GIF to TensorBoard + MP4 to disk.
 
@@ -160,20 +173,12 @@ class MarioObserver(AlgoObserver):
             import imageio
             import tempfile
             from PIL import Image, ImageDraw, ImageFont
-            from mario_env import create_mario_env
             try:
                 from tensorboardX.proto.summary_pb2 import Summary
             except ImportError:
                 from tensorboard.compat.proto.summary_pb2 import Summary
 
-            env = create_mario_env(
-                name='SuperMarioBros-v0',
-                action_type='complex',
-                episode_life=False,
-                stage_bonus=0,
-                skip=4,
-                sticky_actions=0.0,
-            )
+            env = self._make_eval_env()
 
             frames = []
             step_stats = []

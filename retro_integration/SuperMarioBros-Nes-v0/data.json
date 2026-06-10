@@ -1,0 +1,92 @@
+{
+  "info": {
+    "xpos_hi": {
+      "address": 109,
+      "type": "|u1"
+    },
+    "xpos_lo": {
+      "address": 134,
+      "type": "|u1"
+    },
+    "life": {
+      "address": 1882,
+      "type": "|u1"
+    },
+    "world0": {
+      "address": 1887,
+      "type": "|u1"
+    },
+    "stage0": {
+      "address": 1884,
+      "type": "|u1"
+    },
+    "area0": {
+      "address": 1888,
+      "type": "|u1"
+    },
+    "time": {
+      "address": 2040,
+      "type": ">n3"
+    },
+    "score": {
+      "address": 2013,
+      "type": ">n6"
+    },
+    "coins": {
+      "address": 2029,
+      "type": ">n2"
+    },
+    "player_state": {
+      "address": 14,
+      "type": "|u1"
+    },
+    "player_status": {
+      "address": 1878,
+      "type": "|u1"
+    },
+    "y_viewport": {
+      "address": 181,
+      "type": "|u1"
+    },
+    "y_pixel": {
+      "address": 952,
+      "type": "|u1"
+    },
+    "float_state": {
+      "address": 29,
+      "type": "|u1"
+    },
+    "enemy_type0": {
+      "address": 22,
+      "type": "|u1"
+    },
+    "enemy_type1": {
+      "address": 23,
+      "type": "|u1"
+    },
+    "enemy_type2": {
+      "address": 24,
+      "type": "|u1"
+    },
+    "enemy_type3": {
+      "address": 25,
+      "type": "|u1"
+    },
+    "enemy_type4": {
+      "address": 26,
+      "type": "|u1"
+    },
+    "gameplay_mode": {
+      "address": 1904,
+      "type": "|u1"
+    },
+    "prelevel_timer": {
+      "address": 1952,
+      "type": "|u1"
+    },
+    "change_area_timer": {
+      "address": 1758,
+      "type": "|u1"
+    }
+  }
+}

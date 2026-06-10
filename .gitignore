@@ -12,3 +12,6 @@ build/
 *.log
 /tmp/
 .claude/
+venv_retro/
+retro_integration/SuperMarioBros-Nes-v0/rom.nes
+train_retro_smoke.log
