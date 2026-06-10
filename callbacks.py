@@ -143,7 +143,11 @@ class MarioObserver(AlgoObserver):
                 print(f'  [Video] Epoch {epoch_num}: skipped, previous recording '
                       f'still in progress')
             else:
-                model_copy = copy.deepcopy(self.algo.model).to('cpu')
+                # Copy the eager module, never the torch.compile wrapper:
+                # calling a compiled copy triggers dynamo tracing whose FX
+                # patching is process-global and crashes the training thread.
+                eager_model = getattr(self.algo.model, '_orig_mod', self.algo.model)
+                model_copy = copy.deepcopy(eager_model).to('cpu')
                 model_copy.eval()
                 self._video_thread = threading.Thread(
                     target=self._record_video, args=(epoch_num, model_copy),
