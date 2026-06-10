@@ -1,20 +1,24 @@
-"""stable-retro (C-core libretro) backend for Super Mario Bros.
+"""Super Mario Bros environment on stable-retro (C-core libretro NES emulation).
 
-Drop-in replacement for mario_env.create_mario_env() with ~10x throughput.
-Replicates gym_super_mario_bros semantics (reward function, RAM hacks, info
-dict) on top of stable-retro's NES core, using the custom integration in
-retro_integration/SuperMarioBros-Nes-v0 (extended data.json + generated
-Level<W>-<S>.state files for all 32 levels, see gen_states.py).
+Layout:
+    RetroMarioEnv      -- the emulator: gym_super_mario_bros-compatible reward,
+                          info dict, and RAM hacks on top of stable-retro
+    Wrapper subclasses -- EpisodicLife, reward shaping, frame preprocessing
+    create_mario_env() -- the factory that assembles the full wrapper chain;
+                          the only thing the rest of the codebase imports
 
-This module intentionally does NOT import mario_env.py (which needs old gym
-0.25 / nes_py); the frame wrappers are re-implemented verbatim on a minimal
-Wrapper base so the file runs inside venv_retro (gymnasium only).
+Level selection uses savestates from retro_integration/SuperMarioBros-Nes-v0
+(one per level plus FullGame; regenerate with gen_states.py). The wrappers use
+a minimal local Wrapper base and the old gym step API -- reset() -> obs,
+step() -> (obs, reward, done, info) -- which is what rl_games expects.
 """
 
 import gzip
 import os
+import warnings
 from collections import defaultdict, deque
 
+import cv2
 import numpy as np
 from gymnasium import spaces
 
@@ -225,6 +229,11 @@ class RetroMarioEnv:
         return self._is_world_over or self._is_stage_over
 
     @property
+    def life(self):
+        """Lives remaining (public: used by EpisodicLife and eval tooling)."""
+        return self._cur['life']
+
+    @property
     def screen(self):
         """Current RGB frame (compat with nes_py's env.screen)."""
         return self._retro.get_screen()
@@ -283,20 +292,17 @@ class RetroMarioEnv:
             self._frame()
 
     def _did_step(self, done):
+        """Post-step RAM hacks (mirrors smb_env.py): finish the dying
+        animation immediately, skip cutscenes and black inter-life screens."""
         if done:
-            return False
-        stepped = False
+            return
         if self._is_dying:
             self._kill_mario()
-            stepped = True
         if not self.is_single_stage_env and self._is_world_over:
             self._skip_end_of_world()
-            stepped = True
         self._skip_change_area()
         if self._is_busy or self._is_world_over:
             self._skip_occupied_states()
-            stepped = True
-        return stepped
 
     # -- gym (old) API --------------------------------------------------------
 
@@ -423,7 +429,7 @@ class EpisodicLifeMarioEnv(Wrapper):
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
         self.was_real_done = done
-        lives = self.env.unwrapped._life
+        lives = self.env.unwrapped.life
         if lives < self.lives and lives > 0:
             done = True
         self.lives = lives
@@ -434,7 +440,7 @@ class EpisodicLifeMarioEnv(Wrapper):
             obs = self.env.reset(**kwargs)
         else:
             obs, _, _, _ = self.env.step(0)
-        self.lives = self.env.unwrapped._life
+        self.lives = self.env.unwrapped.life
         return obs
 
 
@@ -445,13 +451,12 @@ class MarioProgressWrapper(Wrapper):
     - Tracks overall game progress as a metric
     """
     def __init__(self, env, stage_bonus=500.0, idle_penalty=0.5,
-                 idle_threshold=10, progress_reward=0.001, progress_scale=1.0):
+                 idle_threshold=10, progress_reward=0.001):
         Wrapper.__init__(self, env)
         self.stage_bonus = stage_bonus
         self.idle_penalty = idle_penalty
         self.idle_threshold = idle_threshold
         self.progress_reward = progress_reward
-        self.progress_scale = progress_scale
         self._prev_flag_get = False
         self._prev_x_pos = 0
         self._idle_steps = 0
@@ -506,9 +511,6 @@ class MarioProgressWrapper(Wrapper):
         if x_pos > self._max_x_pos:
             self._max_x_pos = x_pos
         info['max_x_pos'] = self._max_x_pos
-
-        # Scale the base reward
-        reward *= self.progress_scale
 
         return obs, reward, done, info
 
@@ -584,7 +586,6 @@ class WarpFrame(ObservationWrapper):
                 low=0, high=255, shape=(self.height, self.width, 3), dtype=np.uint8)
 
     def observation(self, frame):
-        import cv2
         if self.grayscale:
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
         frame = cv2.resize(frame, (self.width, self.height),
@@ -639,55 +640,51 @@ def _parse_name(name):
     return None
 
 
-def create_mario_env(**kwargs):
-    """Factory function for rl_games environment registration (retro backend).
+def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
+                     episode_life=True, stage_bonus=500.0, idle_penalty=0.5,
+                     idle_threshold=10, progress_reward=0.001, skip=4,
+                     sticky_actions=0.0, random_stages=None, **unknown):
+    """Build the full Mario env wrapper chain. This is the single entry point
+    used by training, evaluation, and the vecenv workers.
 
-    Same kwargs as mario_env.create_mario_env:
-        name: environment id (default: SuperMarioBros-v0)
-        action_type: 'simple' or 'complex' (default: 'complex')
-        episode_life: treat each life as episode (default: True)
-        stage_bonus: reward for completing a stage (default: 500)
-        idle_penalty: per-step penalty after idle_threshold consecutive idle steps (default: 0.5)
-        idle_threshold: steps of no progress before penalty kicks in (default: 10)
-        progress_reward: growing bonus multiplier for forward movement (default: 0.001)
-        skip: frame skip (default: 4)
-        sticky_actions: probability of repeating previous action (default: 0)
-        random_stages: list of stages to randomize, e.g. ['1-1','1-2','1-3','1-4']
-                       if empty/None, uses the single env from 'name' (default: None)
+    Args:
+        name: 'SuperMarioBros-v0' (full game, 3 lives) or
+              'SuperMarioBros-<W>-<S>-v0' (single level)
+        action_type: 'complex' (12 actions, incl. running) or 'simple' (7)
+        episode_life: treat each life as an episode boundary (training);
+                      False for evaluation
+        stage_bonus: reward for completing a stage (flag_get)
+        idle_penalty: per-step penalty after idle_threshold consecutive
+                      no-progress steps
+        idle_threshold: idle steps tolerated before the penalty kicks in
+        progress_reward: growing forward-movement bonus multiplier
+                         (min(x_delta, 20) * progress_reward * x_pos)
+        skip: frame skip (agent acts every `skip` NES frames)
+        sticky_actions: probability of repeating the previous action
+        random_stages: list like ['1-1', '2-3'] -- each reset loads a random
+                       stage's savestate (single emulator per process, states
+                       swapped on reset). Overrides single-level `name`.
 
-    Note: unlike the nes_py backend, random_stages uses a single emulator that
-    loads a random per-level savestate on each reset (stable-retro allows only
-    one emulator per process).
+    Final observation: (84, 84, 4) float32 in [0, 1].
     """
-    name = kwargs.pop('name', 'SuperMarioBros-v0')
-    action_type = kwargs.pop('action_type', 'complex')
-    episode_life = kwargs.pop('episode_life', True)
-    stage_bonus = kwargs.pop('stage_bonus', 500.0)
-    idle_penalty = kwargs.pop('idle_penalty', 0.5)
-    idle_threshold = kwargs.pop('idle_threshold', 10)
-    progress_reward = kwargs.pop('progress_reward', 0.001)
-    skip = kwargs.pop('skip', 4)
-    sticky_prob = kwargs.pop('sticky_actions', 0.0)
-    random_stages = kwargs.pop('random_stages', None)
+    if unknown:
+        warnings.warn(f'create_mario_env: ignoring unknown kwargs {sorted(unknown)}')
 
     actions = COMPLEX_MOVEMENT if action_type == 'complex' else SIMPLE_MOVEMENT
 
     env = RetroMarioEnv(target=_parse_name(name),
                         random_stages=random_stages,
                         actions=actions)
-
-    if sticky_prob > 0:
-        env = StickyActionWrapper(env, p=sticky_prob)
-
+    if sticky_actions > 0:
+        env = StickyActionWrapper(env, p=sticky_actions)
     if episode_life:
         env = EpisodicLifeMarioEnv(env)
-
-    env = MarioProgressWrapper(env, stage_bonus=stage_bonus, idle_penalty=idle_penalty,
+    env = MarioProgressWrapper(env, stage_bonus=stage_bonus,
+                               idle_penalty=idle_penalty,
                                idle_threshold=idle_threshold,
                                progress_reward=progress_reward)
     env = MaxAndSkipEnv(env, skip=skip)
     env = WarpFrame(env, width=84, height=84, grayscale=True)
     env = ScaledFloatFrame(env)
     env = FrameStack(env, k=4)
-
     return env

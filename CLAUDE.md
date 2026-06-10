@@ -27,6 +27,9 @@ python train.py --checkpoint runs/<run_dir>/nn/<checkpoint>.pth
 # Override training params
 python train.py --config configs/mario_ppo_random_stages.yaml --num-actors 16 --max-epochs 5000 --video-freq 200
 
+# Evaluate a trained agent on the sequential full game (headless, CPU)
+python play.py runs/<run_dir>/nn/<checkpoint>.pth --games 5 --save-video eval.mp4
+
 # Re-run env backend validation (obs/reward/RAM semantics, stage states, smoke train)
 python validate_env.py
 
@@ -44,7 +47,7 @@ The project wraps rl_games' PPO implementation with custom Mario-specific compon
 - `MarioVecEnv` in `mario_vecenv.py` uses Python multiprocessing (not Ray) because rl_games' `RayVecEnv` cannot see custom env registrations across process boundaries. Each worker imports `create_mario_env` locally. This is intentional -- do not switch to Ray.
 
 **rl_games integration** (`train.py`):
-- Two registrations happen at startup: the vecenv type (`MARIO`) and the env config (`mario_retro`). Both must be registered before `Runner.load()`.
+- Two registrations happen at startup: the vecenv type (`MARIO`) and the env config (`mario`). Both must be registered before `Runner.load()`.
 - `MarioObserver` (in `callbacks.py`) extends rl_games' `AlgoObserver` to log Mario-specific TensorBoard metrics and record gameplay videos. It hooks into `process_infos()` (per-step) and `after_print_stats()` (per-epoch). Video recording runs on a background thread with a CPU deep-copy of the model (never blocks training, never touches the GPU); the eval env comes from the overridable `_make_eval_env()`.
 
 **Reward shaping** (`MarioProgressWrapper`):

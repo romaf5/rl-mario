@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""Train a PPO agent on Super Mario Bros using rl_games (stable-retro backend).
-
-Copy of train.py wired to the stable-retro environment. Run from venv_retro:
+"""Train a PPO agent on Super Mario Bros using rl_games.
 
     source venv_retro/bin/activate
     python train.py --config configs/mario_ppo_random_stages.yaml
@@ -23,16 +21,17 @@ from callbacks import MarioObserver
 
 
 def register_mario_env():
-    """Register custom Mario retro environment and vecenv with rl_games."""
+    """Register the Mario env config and vecenv type with rl_games.
+    Both must be registered before Runner.load()."""
     register_mario_vecenv()
-    env_configurations.register('mario_retro', {
-        'vecenv_type': 'MARIO_RETRO',
+    env_configurations.register('mario', {
+        'vecenv_type': 'MARIO',
         'env_creator': lambda **kwargs: create_mario_env(**kwargs),
     })
 
 
 def main():
-    parser = argparse.ArgumentParser(description='Train Mario PPO agent (retro)')
+    parser = argparse.ArgumentParser(description='Train Mario PPO agent')
     parser.add_argument('--config', type=str, default='configs/mario_ppo_random_stages.yaml',
                         help='Path to training config YAML')
     parser.add_argument('--checkpoint', type=str, default=None,
@@ -62,7 +61,7 @@ def main():
 
     print("=" * 60)
     print(f"  Training: {config['params']['config']['name']}")
-    print(f"  Environment: {config['params']['config']['env_config']['name']} (stable-retro)")
+    print(f"  Environment: {config['params']['config']['env_config']['name']}")
     print(f"  Actors: {config['params']['config']['num_actors']}")
     print(f"  Max epochs: {config['params']['config']['max_epochs']}")
     print(f"  Device: {config['params']['config']['device']}")

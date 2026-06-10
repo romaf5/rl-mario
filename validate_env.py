@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Validation suite for the stable-retro Mario backend (mario_env.py).
+"""Validation suite for the Mario environment (mario_env.py).
 
 Run from venv_retro (CPU only; never touches the GPU):
 
-    CUDA_VISIBLE_DEVICES= ./venv_retro/bin/python validate_retro.py
-    CUDA_VISIBLE_DEVICES= ./venv_retro/bin/python validate_retro.py --skip-bench-old --skip-train
+    ./venv_retro/bin/python validate_env.py
+    ./venv_retro/bin/python validate_env.py --skip-train
 
 Checks:
-    1. Single-env throughput benchmark, retro backend vs nes_py backend
-       (the nes_py env runs in a subprocess using the original venv/).
+    1. Throughput benchmark (single env + aggregate vecenv) against an
+       absolute floor.
     2. Correctness probe: obs pipeline, RAM variables, x_pos movement,
        death/life handling, EpisodicLife behavior, reward shaping math
        (progress_reward, idle_penalty, stage_bonus), flag address sanity.
@@ -27,8 +27,12 @@ import time
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OLD_PYTHON = os.path.join(HERE, 'venv', 'bin', 'python')
-NEW_PYTHON = os.path.join(HERE, 'venv_retro', 'bin', 'python')
+PYTHON = os.path.join(HERE, 'venv_retro', 'bin', 'python')
+
+# Absolute single-env throughput floor (steps/s). The C-core emulator does
+# ~500 steps/s on this machine regardless of scene complexity; dipping far
+# below that signals a performance regression in the wrapper chain.
+MIN_STEPS_PER_SEC = 300
 
 RESULTS = []
 
@@ -99,38 +103,23 @@ def run_bench(python, code):
 
 
 def bench(args):
-    print('\n=== 1. Single-env benchmark (env steps/sec; 1 env step = 4 frames) ===')
-    new_sps, new_fps = run_bench(
-        NEW_PYTHON, BENCH_CODE.format(module='mario_env',
-                                      steps=args.bench_steps))
-    check('retro benchmark ran', new_sps is not None,
-          f'{new_sps:.0f} steps/s = {new_fps:.0f} frames/s' if new_sps else '')
-
-    if args.skip_bench_old:
-        print('  (skipping nes_py benchmark)')
-        return
-    old_sps, old_fps = run_bench(
-        OLD_PYTHON, BENCH_CODE.format(module='mario_env',
-                                      steps=args.bench_steps_old))
-    check('nes_py benchmark ran', old_sps is not None,
-          f'{old_sps:.0f} steps/s = {old_fps:.0f} frames/s' if old_sps else '')
-    if new_sps and old_sps:
-        ratio = new_sps / old_sps
-        check('single-env speedup >= 5x (target)', ratio >= 5.0,
-              f'retro is {ratio:.1f}x faster')
+    print('\n=== 1. Throughput benchmark (env steps/sec; 1 env step = 4 frames) ===')
+    sps, fps = run_bench(
+        PYTHON, BENCH_CODE.format(module='mario_env', steps=args.bench_steps))
+    check('single-env benchmark ran', sps is not None,
+          f'{sps:.0f} steps/s = {fps:.0f} frames/s' if sps else '')
+    if sps:
+        check(f'single-env throughput >= {MIN_STEPS_PER_SEC} steps/s',
+              sps >= MIN_STEPS_PER_SEC, f'{sps:.0f} steps/s')
 
     if args.vec_workers > 0:
         w = args.vec_workers
-        print(f'  --- aggregate vecenv benchmark ({w} workers, informational) ---')
-        new_v, _ = run_bench(NEW_PYTHON, VEC_BENCH_CODE.format(
-            vecmod='mario_vecenv', veccls='MarioRetroVecEnv',
-            workers=w, steps=args.bench_steps))
-        old_v, _ = run_bench(OLD_PYTHON, VEC_BENCH_CODE.format(
+        vec_sps, _ = run_bench(PYTHON, VEC_BENCH_CODE.format(
             vecmod='mario_vecenv', veccls='MarioVecEnv',
-            workers=w, steps=args.bench_steps_old))
-        if new_v and old_v:
-            print(f'  vecenv aggregate: retro {new_v:.0f} steps/s vs '
-                  f'nes_py {old_v:.0f} steps/s ({new_v / old_v:.1f}x)')
+            workers=w, steps=args.bench_steps))
+        if vec_sps:
+            print(f'  vecenv aggregate ({w} workers): {vec_sps:.0f} steps/s '
+                  f'({vec_sps / sps:.1f}x single-env)' if sps else '')
 
 
 # ---------------------------------------------------------------------------
@@ -140,7 +129,7 @@ def bench(args):
 def probe():
     print('\n=== 2. Correctness probe ===')
     from mario_env import (create_mario_env, RetroMarioEnv,
-                                 MarioProgressWrapper, Wrapper)
+                           MarioProgressWrapper)
 
     # --- 2a. full pipeline obs ---
     env = create_mario_env(name='SuperMarioBros-1-1-v0')
@@ -330,7 +319,7 @@ def smoke_train():
     env = dict(os.environ, CUDA_VISIBLE_DEVICES='')
     t0 = time.perf_counter()
     out = subprocess.run(
-        [NEW_PYTHON, 'train.py',
+        [PYTHON, 'train.py',
          '--config', 'configs/mario_ppo_cpu_smoke.yaml',
          '--video-freq', '0'],
         capture_output=True, text=True, cwd=HERE, env=env, timeout=3600)
@@ -349,7 +338,7 @@ def smoke_train():
 
     # Verify all logged TensorBoard scalars (rewards, losses) are finite
     import glob
-    runs = sorted(glob.glob(os.path.join(HERE, 'runs', 'Mario_RetroCpuSmoke*')),
+    runs = sorted(glob.glob(os.path.join(HERE, 'runs', 'Mario_CpuSmoke*')),
                   key=os.path.getmtime)
     if not runs:
         record('smoke run dir found', False)
@@ -380,13 +369,10 @@ def smoke_train():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--bench-steps', type=int, default=3000,
-                        help='env steps for the retro benchmark')
-    parser.add_argument('--bench-steps-old', type=int, default=600,
-                        help='env steps for the (slow) nes_py benchmark')
+                        help='env steps for the benchmark')
     parser.add_argument('--vec-workers', type=int, default=4,
                         help='workers for the aggregate vecenv benchmark '
                              '(0 to disable)')
-    parser.add_argument('--skip-bench-old', action='store_true')
     parser.add_argument('--skip-train', action='store_true')
     args = parser.parse_args()
 

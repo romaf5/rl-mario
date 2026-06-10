@@ -1,20 +1,24 @@
-"""Vectorized environments for Mario training (stable-retro backend).
+"""Multiprocessing vectorized environment for Mario.
 
-Copy of mario_vecenv.py with the worker importing mario_env instead of
-mario_env. A separate file because the originals must stay untouched while a
-training run is in flight. Note: stable-retro allows only ONE emulator per
-process, so the one-env-per-process layout here is required, not just faster.
+One env per worker process, plain pipes for IPC. Two reasons this exists
+instead of rl_games' RayVecEnv:
+- Ray workers cannot see custom env registrations made in the main process.
+- stable-retro allows only ONE emulator per process, so one-env-per-process
+  is required, not just faster.
+
+Each worker imports create_mario_env locally and auto-resets its env when an
+episode ends, returning the first observation of the next episode.
 """
 
 import numpy as np
-import multiprocessing as mp
-from multiprocessing import Process, Pipe
-from rl_games.common.ivecenv import IVecEnv
+from multiprocessing import Pipe, Process
+
 from rl_games.common import vecenv
+from rl_games.common.ivecenv import IVecEnv
 
 
 def _worker(remote, parent_remote, env_kwargs):
-    """Worker process that runs a single environment."""
+    """Run a single environment, serving commands from the master process."""
     parent_remote.close()
     from mario_env import create_mario_env
     env = create_mario_env(**env_kwargs)
@@ -28,8 +32,7 @@ def _worker(remote, parent_remote, env_kwargs):
                     obs = env.reset()
                 remote.send((obs, reward, done, info))
             elif cmd == 'reset':
-                obs = env.reset()
-                remote.send(obs)
+                remote.send(env.reset())
             elif cmd == 'seed':
                 env.seed(data)
                 remote.send(None)
@@ -43,41 +46,30 @@ def _worker(remote, parent_remote, env_kwargs):
         pass
 
 
-class MarioRetroVecEnv(IVecEnv):
-    """Multiprocessing vectorized environment for Mario (retro backend)."""
+class MarioVecEnv(IVecEnv):
+    """rl_games IVecEnv over `num_actors` worker processes in lockstep."""
 
-    def __init__(self, config_name, num_actors, **kwargs):
+    def __init__(self, config_name, num_actors, **env_kwargs):
         self.num_actors = num_actors
-        self.waiting = False
 
-        # Start worker processes
-        self.remotes, self.work_remotes = zip(*[Pipe() for _ in range(num_actors)])
+        self.remotes, work_remotes = zip(*[Pipe() for _ in range(num_actors)])
         self.processes = []
-        for work_remote, remote in zip(self.work_remotes, self.remotes):
-            p = Process(target=_worker, args=(work_remote, remote, kwargs), daemon=True)
+        for work_remote, remote in zip(work_remotes, self.remotes):
+            p = Process(target=_worker, args=(work_remote, remote, env_kwargs),
+                        daemon=True)
             p.start()
             self.processes.append(p)
             work_remote.close()
 
-        # Get env info from first worker
         self.remotes[0].send(('get_spaces', None))
         self.observation_space, self.action_space = self.remotes[0].recv()
 
-        obs = self.reset()
-        self._obs_dtype = obs.dtype
-        self._obs_shape = obs.shape[1:]  # per-env shape
-
     def step(self, actions):
-        # Send actions to all workers
         for remote, action in zip(self.remotes, actions):
             remote.send(('step', action))
-
-        # Collect results
-        results = [remote.recv() for remote in self.remotes]
-        obs, rewards, dones, infos = zip(*results)
-
+        obs, rewards, dones, infos = zip(*[r.recv() for r in self.remotes])
         return (
-            np.array(obs, dtype=self._obs_dtype),
+            np.array(obs, dtype=self.observation_space.dtype),
             np.array(rewards, dtype=np.float32),
             np.array(dones, dtype=bool),
             list(infos),
@@ -86,8 +78,8 @@ class MarioRetroVecEnv(IVecEnv):
     def reset(self):
         for remote in self.remotes:
             remote.send(('reset', None))
-        obs = [remote.recv() for remote in self.remotes]
-        return np.array(obs)
+        return np.array([r.recv() for r in self.remotes],
+                        dtype=self.observation_space.dtype)
 
     def get_number_of_agents(self):
         return 1
@@ -120,10 +112,9 @@ class MarioRetroVecEnv(IVecEnv):
 
 
 def register_mario_vecenv():
-    """Register the MARIO_RETRO vecenv type with rl_games."""
+    """Register the MARIO vecenv type with rl_games."""
     vecenv.register(
-        'MARIO_RETRO',
-        lambda config_name, num_actors, **kwargs: MarioRetroVecEnv(
-            config_name, num_actors, **kwargs
-        ),
+        'MARIO',
+        lambda config_name, num_actors, **kwargs: MarioVecEnv(
+            config_name, num_actors, **kwargs),
     )
