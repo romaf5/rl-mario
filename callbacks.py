@@ -1,6 +1,9 @@
 """Custom AlgoObserver for Mario training with TensorBoard video logging."""
 
+import copy
 import os
+import threading
+
 import numpy as np
 import torch
 from rl_games.common.algo_observer import AlgoObserver
@@ -35,6 +38,8 @@ class MarioObserver(AlgoObserver):
 
         self.best_progress = 0
         self.best_x_pos = 0
+
+        self._video_thread = None
 
     def after_init(self, algo):
         self.algo = algo
@@ -130,16 +135,31 @@ class MarioObserver(AlgoObserver):
         self.episode_flags.clear()
         self.episode_lives.clear()
 
-        # Record video periodically
+        # Record video periodically, on a background thread so training never
+        # blocks. The thread gets a CPU copy of the model: no GPU access, and
+        # the live model keeps training undisturbed.
         if self.video_freq > 0 and epoch_num % self.video_freq == 0 and epoch_num > 0:
-            self._record_video(epoch_num)
+            if self._video_thread is not None and self._video_thread.is_alive():
+                print(f'  [Video] Epoch {epoch_num}: skipped, previous recording '
+                      f'still in progress')
+            else:
+                model_copy = copy.deepcopy(self.algo.model).to('cpu')
+                model_copy.eval()
+                self._video_thread = threading.Thread(
+                    target=self._record_video, args=(epoch_num, model_copy),
+                    daemon=True)
+                self._video_thread.start()
 
-    def _record_video(self, epoch_num):
-        """Record gameplay: PIL GIF to TensorBoard + MP4 to disk."""
+    def _record_video(self, epoch_num, model):
+        """Record gameplay: PIL GIF to TensorBoard + MP4 to disk.
+
+        Runs on a background thread with a CPU-only copy of the model, so
+        training continues undisturbed and no GPU is touched from the thread.
+        """
         try:
             import imageio
             import tempfile
-            from PIL import Image
+            from PIL import Image, ImageDraw, ImageFont
             from mario_env import create_mario_env
             try:
                 from tensorboardX.proto.summary_pb2 import Summary
@@ -156,24 +176,21 @@ class MarioObserver(AlgoObserver):
             )
 
             frames = []
+            step_stats = []
             obs = env.reset()
             done = False
             total_reward = 0
-
-            model = self.algo.model
-            model.eval()
+            info = {}
 
             is_rnn = self.algo.is_rnn
             if is_rnn:
                 # Default state is (num_layers, num_actors, hidden)
                 # For single-env eval we need (num_layers, 1, hidden)
-                rnn_states = self.algo.model.get_default_rnn_state()
-                rnn_states = [s[:, :1, :].contiguous().to(self.algo.ppo_device)
-                              for s in rnn_states]
+                rnn_states = model.get_default_rnn_state()
+                rnn_states = [s[:, :1, :].contiguous() for s in rnn_states]
 
             for step in range(self.video_max_steps):
-                obs_tensor = torch.from_numpy(obs).float().unsqueeze(0).to(
-                    self.algo.ppo_device)
+                obs_tensor = torch.from_numpy(obs).float().unsqueeze(0)
 
                 with torch.no_grad():
                     input_dict = {
@@ -192,41 +209,60 @@ class MarioObserver(AlgoObserver):
                 obs, reward, done, info = env.step(action)
                 frames.append(env.unwrapped.screen.copy())
                 total_reward += reward
+                step_stats.append((info.get('world', 1), info.get('stage', 1),
+                                   info.get('x_pos', 0), total_reward))
                 if done:
                     break
 
             env.close()
-            model.train()
 
             if len(frames) > 4:
-                # 67ms per frame = real time (NES 60fps, frame skip 4)
-                gif_duration = 67
-                mp4_fps = 15
+                # Stats strip below the frame: gameplay pixels stay untouched.
+                # 240 + 16 = 256 high, which video encoders also prefer.
+                font = ImageFont.load_default()
+                bar_h = 16
+                pil_frames = []
+                for (world, stage, x_pos, rew), f in zip(step_stats, frames):
+                    img = Image.fromarray(f)
+                    canvas = Image.new('RGB', (img.width, img.height + bar_h),
+                                       (0, 0, 0))
+                    canvas.paste(img, (0, 0))
+                    draw = ImageDraw.Draw(canvas)
+                    draw.text((4, img.height + 2),
+                              f'ep {epoch_num}  {world}-{stage}  '
+                              f'x={x_pos}  R={rew:.0f}',
+                              fill=(255, 255, 255), font=font)
+                    pil_frames.append(canvas)
 
-                # Save MP4 to disk
+                # Save MP4 to disk (15 fps = exactly the 66.67ms real frame
+                # time: 4 NES frames at 60fps)
                 run_dir = os.path.dirname(os.path.dirname(
                     self.writer.file_writer.event_writer._ev_writer._file_name))
                 video_dir = os.path.join(run_dir, 'videos')
                 os.makedirs(video_dir, exist_ok=True)
                 mp4_path = os.path.join(video_dir, f'epoch_{epoch_num}.mp4')
-                imageio.mimsave(mp4_path, frames, fps=mp4_fps)
+                imageio.mimsave(mp4_path, [np.asarray(c) for c in pil_frames],
+                                fps=15)
 
-                # Write PIL animated GIF to TensorBoard Images tab
-                pil_frames = [Image.fromarray(f) for f in frames]
+                # Write PIL animated GIF to TensorBoard Images tab. GIF delays
+                # are centisecond-quantized, so a constant 67ms is impossible;
+                # a 70/70/60 cycle averages exactly 66.67ms (real time).
+                durations = [60 if i % 3 == 2 else 70
+                             for i in range(len(pil_frames))]
                 gif_path = tempfile.NamedTemporaryFile(suffix='.gif', delete=False).name
                 pil_frames[0].save(gif_path, save_all=True,
                                    append_images=pil_frames[1:],
-                                   duration=gif_duration,
-                                   loop=0, optimize=False)
+                                   duration=durations,
+                                   loop=0, optimize=True)
                 with open(gif_path, 'rb') as f:
                     gif_bytes = f.read()
                 os.remove(gif_path)
 
-                h, w, c = frames[0].shape
+                w, h = pil_frames[0].size
                 summary = Summary(value=[Summary.Value(
                     tag='gameplay/agent',
                     image=Summary.Image(
-                        height=h, width=w, colorspace=c,
+                        height=h, width=w, colorspace=3,
                         encoded_image_string=gif_bytes),
                 )])
                 self.writer.file_writer.add_summary(summary, epoch_num)
