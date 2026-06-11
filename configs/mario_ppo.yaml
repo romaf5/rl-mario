@@ -64,7 +64,7 @@ params:
     minibatch_size: 1024
     mini_epochs: 4
     critic_coef: 0.5
-    max_epochs: 20000
+    max_epochs: 5000
     use_diagnostics: True
     save_frequency: 500
     save_best_after: 500
@@ -73,8 +73,6 @@ params:
     multi_gpu: False
 
     # Sequential full game (worlds 1-1 through 8-4, 3 lives) -- the end goal.
-    # Train on mario_ppo_random_stages.yaml first; this config is for the
-    # final sequential objective.
     env_config:
       name: SuperMarioBros-v0
       action_type: complex
