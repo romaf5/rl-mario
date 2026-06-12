@@ -498,11 +498,13 @@ class MarioProgressWrapper(Wrapper):
                 reward -= self.idle_penalty
         self._prev_x_pos = x_pos
 
-        # Track stage progress (world 1-8, stage 1-4 -> 0-31)
+        # Track stage progress (world 1-8, stage 1-4 -> 0-31). The world/stage
+        # RAM bytes hold garbage for a frame during screen transitions, so
+        # ignore out-of-range readings.
         world = info.get('world', 1)
         stage = info.get('stage', 1)
         current_progress = (world - 1) * 4 + (stage - 1)
-        if current_progress > self._stage_progress:
+        if self._stage_progress < current_progress <= 31:
             self._stage_progress = current_progress
         info['game_progress'] = self._stage_progress
         info['game_progress_pct'] = self._stage_progress / 31.0
