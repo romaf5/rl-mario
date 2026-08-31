@@ -73,6 +73,8 @@ class _Lib:
                                         ctypes.c_int, ctypes.c_int]
             lib.benv_obs.argtypes = [ctypes.c_void_p, ctypes.c_int,
                                      ctypes.c_void_p, ctypes.c_void_p]
+            lib.benv_render.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                        ctypes.c_void_p]
             cls._inst = lib
         return cls._inst
 
@@ -87,7 +89,8 @@ class MarioNativeVecEnv(IVecEnv):
                  full_game=False, reset_noops=0, x_reward='highwater',
                  loop_penalty=0.0, backtrack_penalty=0.0, novelty_bonus=0.0,
                  self_restart_prob=0.0, self_restart_cells=96,
-                 n_threads=32, seed=None, **unknown):
+                 n_threads=32, seed=None, dense_infos=False,
+                 novelty_y_band=48, **unknown):
         assert action_type == 'complex'
         n = self.num_actors = num_actors
         self.lib = _Lib()
@@ -113,6 +116,8 @@ class MarioNativeVecEnv(IVecEnv):
         self.novelty_bonus = novelty_bonus
         self.sr_prob = self_restart_prob
         self.sr_cells = self_restart_cells
+        self.dense_infos = dense_infos
+        self.novelty_y_band = novelty_y_band
 
         self.rng = np.random.RandomState(seed)
         self.obs_u8 = np.zeros((n, 84, 84), dtype=np.uint8)
@@ -321,7 +326,8 @@ class MarioNativeVecEnv(IVecEnv):
         if self.novelty_bonus > 0:
             ypix = self._field(0x3B8)
             for i in range(n):
-                cell = (int(area[i]), int(x[i]) // 64, int(ypix[i]) // 48)
+                cell = (int(area[i]), int(x[i]) // 64,
+                        int(ypix[i]) // self.novelty_y_band)
                 if cell not in self.novelty_sets[i]:
                     self.novelty_sets[i].add(cell)
                     reward[i] += self.novelty_bonus
@@ -355,7 +361,7 @@ class MarioNativeVecEnv(IVecEnv):
         infos = []
         done_pre = real_done | (life_lost if self.episode_life else False)
         for i in range(n):
-            if not done_pre[i]:
+            if not done_pre[i] and not self.dense_infos:
                 infos.append({})   # observer only reads infos of done envs
                 continue
             infos.append({
@@ -421,6 +427,37 @@ class MarioNativeVecEnv(IVecEnv):
 
     def close(self):
         self.lib.benv_destroy(self.env)
+
+
+class NativeEvalEnv:
+    """Single-env adapter over MarioNativeVecEnv for the video/eval loop
+    (old-gym API + .screen for frame capture)."""
+
+    def __init__(self, **kwargs):
+        kwargs.setdefault('n_threads', 1)
+        kwargs.setdefault('episode_life', False)
+        self.v = MarioNativeVecEnv('eval', 1, dense_infos=True, **kwargs)
+        self._buf = ctypes.create_string_buffer(240 * 224)
+
+    @property
+    def unwrapped(self):
+        return self
+
+    @property
+    def screen(self):
+        self.v.lib.benv_render(self.v.env, 0, self._buf)
+        g = np.frombuffer(self._buf, dtype=np.uint8).reshape(224, 240)
+        return np.stack([g, g, g], axis=-1)
+
+    def reset(self):
+        return self.v.reset()[0]
+
+    def step(self, action):
+        obs, r, d, infos = self.v.step([int(action)])
+        return obs[0], float(r[0]), bool(d[0]), infos[0]
+
+    def close(self):
+        self.v.close()
 
 
 def register_mario_native_vecenv():

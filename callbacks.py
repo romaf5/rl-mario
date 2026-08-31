@@ -227,6 +227,11 @@ class MarioObserver(AlgoObserver):
             sticky_actions=0.0,
         )
         kwargs.update(self.eval_env_kwargs or {})
+        if kwargs.pop('backend', 'retro') == 'native':
+            from mario_native_vecenv import NativeEvalEnv
+            kwargs.pop('name', None)
+            kwargs.pop('action_type', None)
+            return NativeEvalEnv(**kwargs)
         return create_mario_env(**kwargs)
 
     def _record_video(self, epoch_num, model):
