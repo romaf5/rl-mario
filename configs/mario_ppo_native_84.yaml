@@ -63,7 +63,7 @@ params:
       idle_threshold: 10
       progress_reward: 0.001
       skip: 4
-      sticky_actions: 0.05
+      sticky_actions: 0.1
       reset_noops: 30
       random_stages: [8-4]
       self_restart_prob: 0.3
