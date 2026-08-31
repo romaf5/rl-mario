@@ -137,6 +137,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.ep_steps = np.zeros(num_actors, dtype=np.int32)
         self.start_cell = [None] * num_actors
         self.cell_early = {}
+        self._novelty_tick = 0
         self.novelty_counts = {}    # cross-episode cell visit counts
 
         self.rng = np.random.RandomState(seed)
@@ -405,6 +406,14 @@ class MarioNativeVecEnv(IVecEnv):
 
         # ---- novelty (python sets; ~N ops/step) ----
         if self.novelty_bonus > 0:
+            # annealing: counts decay so often-visited cells slowly regain
+            # pull -- keeps a standing gradient toward the least-visited
+            # corners of a stuck frontier instead of a fully depleted map
+            self._novelty_tick += 1
+            if self.novelty_global and self._novelty_tick % 3000 == 0:
+                self.novelty_counts = {k: v * 0.5
+                                       for k, v in self.novelty_counts.items()
+                                       if v * 0.5 >= 0.1}
             ypix = self._field(0x3B8)
             for i in range(n):
                 cell = (int(area[i]), int(x[i]) // 64,
