@@ -177,6 +177,9 @@ class MarioNativeVecEnv(IVecEnv):
                 self.archive = pickle.load(f)
             print(f'[archive] loaded {len(self.archive)} cells '
                   f'from {archive_path}')
+            # win counts persist as entry[3] (backward-chaining state)
+            self.cell_wins = {c: e[3] for c, e in self.archive.items()
+                              if len(e) > 3}
         self.ep_cells = [set() for _ in range(n)]
         self._sbuf = ctypes.create_string_buffer(self.state_size)
 
@@ -218,11 +221,16 @@ class MarioNativeVecEnv(IVecEnv):
             cells = list(self.archive.keys())
             if (self.sr_frontier_prob > 0
                     and self.rng.random_sample() < self.sr_frontier_prob):
-                # frontier = the K least-practiced UNMASTERED cells. A cell
-                # leaves the frontier only once its restarts have actually
-                # produced wins -- practice count alone is not mastery.
+                # backward-chaining frontier: prefer cells PROVEN to
+                # convert (1+ wins) but not yet consolidated (<10) -- a
+                # small hot set gets dense practice; as cells graduate,
+                # the next ring outward starts converting and enters the
+                # band. Fall back to unconsolidated, then all.
                 cand = [c for c in cells
-                        if self.cell_wins.get(c, 0) < 3] or cells
+                        if 1 <= self.cell_wins.get(c, 0) < 10]
+                if not cand:
+                    cand = [c for c in cells
+                            if self.cell_wins.get(c, 0) < 10] or cells
                 cand = sorted(cand,
                               key=lambda c: self.archive[c][1]
                               )[:self.sr_frontier_k]
@@ -488,16 +496,12 @@ class MarioNativeVecEnv(IVecEnv):
                             and (len(ent) < 3 or int(t[i]) >= ent[2]
                                  or early >= 3)):
                         self.lib.benv_save(self.env, int(i), self._sbuf)
-                        ent[:] = [bytes(self._sbuf.raw), ent[1], int(t[i])]
+                        ent[:3] = [bytes(self._sbuf.raw), ent[1], int(t[i])]
                         self.cell_early.pop(cell, None)
                         self._archive_dirty += 1
         if (self.archive_path and self._archive_dirty >= 10):
             self._archive_dirty = 0
-            import pickle
-            tmp = self.archive_path + '.tmp'
-            with open(tmp, 'wb') as f:
-                pickle.dump(self.archive, f)
-            os.replace(tmp, self.archive_path)
+            self._save_archive()
 
         # ---- dones ----
         game_over = life == 0xFF
@@ -603,6 +607,14 @@ class MarioNativeVecEnv(IVecEnv):
     def _save_archive(self):
         if self.archive_path and self.archive:
             import pickle
+            # fold win counts into entries (entry[3]) so backward-chaining
+            # state survives restarts
+            for c, w in self.cell_wins.items():
+                e = self.archive.get(c)
+                if e is not None:
+                    while len(e) < 4:
+                        e.append(0)
+                    e[3] = w
             tmp = self.archive_path + '.tmp'
             with open(tmp, 'wb') as f:
                 pickle.dump(self.archive, f)
