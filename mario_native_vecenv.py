@@ -458,14 +458,22 @@ class MarioNativeVecEnv(IVecEnv):
                     self.lib.benv_save(self.env, int(i), self._sbuf)
                     self.archive[cell] = [bytes(self._sbuf.raw), 0, int(t[i])]
                     self._archive_dirty += 1
-                elif self.rng.random_sample() < 0.02:
+                else:
                     # refresh: stored states drift toward the current
                     # visitation distribution (e.g. post-reveal variants),
-                    # but never downgrade to a more timer-doomed state
+                    # but never downgrade to a more timer-doomed state.
+                    # Cells that keep killing their restarts (saved mid
+                    # enemy contact) re-roll aggressively toward a healthy
+                    # variant.
                     ent = self.archive[cell]
-                    if len(ent) < 3 or int(t[i]) >= ent[2]:
+                    early = self.cell_early.get(cell, 0)
+                    p_ref = min(0.5, 0.02 + early / max(ent[1], 1))
+                    if (self.rng.random_sample() < p_ref
+                            and (len(ent) < 3 or int(t[i]) >= ent[2]
+                                 or early >= 3)):
                         self.lib.benv_save(self.env, int(i), self._sbuf)
                         ent[:] = [bytes(self._sbuf.raw), ent[1], int(t[i])]
+                        self.cell_early.pop(cell, None)
                         self._archive_dirty += 1
         if (self.archive_path and self._archive_dirty >= 10):
             self._archive_dirty = 0
