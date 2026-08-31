@@ -393,11 +393,13 @@ class MarioNativeVecEnv(IVecEnv):
             fstate = self._field(0x1D)
             can = (fstate == 0) & ~dying & ~dead & (gmode == 1) & (t > 100)
             ypix_a = self._field(0x3B8)
+            swim_a = self.ram[:, 0x704].astype(np.int32)
             for i in np.nonzero(can)[0]:
                 # y-band in the key: standing ON a block/pipe is a different
-                # rung than the floor below it -- the ratchet needs rungs
+                # rung than the floor below it; swim flag disambiguates the
+                # water zone (same area byte + low x as the level start)
                 cell = (self.start_stage[i], int(area[i]), int(x[i]) // 128,
-                        int(ypix_a[i]) // 64)
+                        int(ypix_a[i]) // 64, int(swim_a[i]))
                 if cell in self.ep_cells[i]:
                     continue
                 self.ep_cells[i].add(cell)
