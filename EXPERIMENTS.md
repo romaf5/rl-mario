@@ -57,7 +57,10 @@
 | Native84 v15 | timer floor t>25, refresh keeps best timer | 640 | wall practiced 2800x, zero side-pipe entries |
 | Native84 v16-v17 | idle cap 15/ep; policy-prior macro explorers; doomed-cell prune | 600/620 | still zero entries; policy probe: 64/64 die at wall |
 | Native84 v18-v19 | novelty annealing; adaptive refresh by early-death rate | 600/500 | still zero -- ALL blocked by x>4000 guard (below) |
-| Native84 v20 | x-guard: debounce 2-step-persistent jumps (was: reject x>4000) | 60+ | **corridor x4152-4830 unmasked; cells 32-37 in minutes; FIRST VICTORIES ep 57 (axe grab, victory_rate ~1%)** |
+| Native84 v20 | x-guard: debounce 2-step-persistent jumps (was: reject x>4000) | 280 | **corridor x4152-4830 unmasked; cells 32-37 in minutes; FIRST VICTORIES ep 57 (axe grab, victory_rate ~1%)**; victories sporadic (corridor aged out of recency frontier) |
+| Native84 v21-v22 | least-uses frontier; post-victory zombie fix (5000-frame skip exhaust latch + nongame guard) | 280/460 | v21 fps 4700->74 (zombie envs) -> fixed; v22 victories 49/150 epochs early but DECAYED (uses != mastery) |
+| Native84 v23-v24 | mastery gate <3 wins; then win-band 1-9 + persisted wins | 440/260 | v23 still decayed (band filtered nothing); v24 win-band spread over 40 cells in post-water zones (areas 0/2, 10-49 wins/cell) then STARVED at ep 125 (10-win graduation cap) |
+| Native84 v25 | no graduation: band = all winners, least-uses first | 150+ | **59/154 victory epochs, sustained, no decay -- pipeline stable** |
 | NativeRoute v1 | 8 levels, curriculum, full toolbox | 2900 | clears: 1-1 59% 4-1 58% 8-1 52% 1-2 48% 4-2 37%; NO warps; eval undersold ~2x by cross-renderer shift (fixed: native eval adapter) |
 | NativeRoute v2 | native eval + full toolbox refresh | running | rewards recovering (3.3k) |
 
