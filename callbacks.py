@@ -24,17 +24,28 @@ class MarioObserver(AlgoObserver):
         - Videos show the full game (no episode_life) with deterministic policy
     """
 
-    def __init__(self, video_freq=500, video_max_steps=4000, video_fps=8):
+    def __init__(self, video_freq=500, video_max_steps=4000, video_fps=8,
+                 curriculum_freq=0, eval_env_kwargs=None):
         super().__init__()
         self.video_freq = video_freq
         self.video_max_steps = video_max_steps
         self.video_fps = video_fps
+        # Overrides for the video/eval env (e.g. start at the trained stage
+        # instead of the sequential 1-1 game)
+        self.eval_env_kwargs = eval_env_kwargs
+        # Every N epochs, re-weight random-stage sampling toward stages with
+        # low clear rate (0 disables).
+        self.curriculum_freq = curriculum_freq
 
         # Metrics buffers (collected across episodes within an epoch)
         self.episode_x_pos = []
         self.episode_progress = []
         self.episode_flags = []
         self.episode_lives = []
+        # start_stage -> (progress_gain, warped, victory) per finished episode
+        self.stage_records = {}
+        self.episode_victories = []
+        self._clear_ema = {}  # start_stage -> EMA of clear rate
 
         self.best_progress = 0
         self.best_x_pos = 0
@@ -44,6 +55,7 @@ class MarioObserver(AlgoObserver):
     def after_init(self, algo):
         self.algo = algo
         self.writer = algo.writer
+        self.stage_list = (algo.env_config or {}).get('random_stages')
         self.game_scores = torch_ext.AverageMeter(
             1, self.algo.games_to_track).to(self.algo.ppo_device)
 
@@ -79,6 +91,16 @@ class MarioObserver(AlgoObserver):
 
         if 'life' in info:
             self.episode_lives.append(info['life'])
+
+        if 'start_stage' in info:
+            # A clear is progress gained OR outright victory (beating 8-4
+            # cannot increase game_progress past 31)
+            self.stage_records.setdefault(info['start_stage'], []).append(
+                (float(info.get('progress_gain', 0)),
+                 float(info.get('warped', False)),
+                 float(info.get('victory', False))))
+        if 'victory' in info:
+            self.episode_victories.append(float(info['victory']))
 
         # Also track game scores for the default scorer
         game_res = info.get('scores', None)
@@ -129,11 +151,41 @@ class MarioObserver(AlgoObserver):
             mean_lives = np.mean(self.episode_lives)
             self.writer.add_scalar('mario/mean_lives_remaining', mean_lives, epoch_num)
 
+        # Per-start-stage metrics + clear-rate EMA (drives the curriculum)
+        for stage, recs in self.stage_records.items():
+            arr = np.array(recs)  # columns: gain, warped, victory
+            clear = float(np.mean((arr[:, 0] >= 1) | (arr[:, 2] > 0)))
+            self.writer.add_scalar(f'mario/gain/{stage}',
+                                   float(arr[:, 0].mean()), epoch_num)
+            self.writer.add_scalar(f'mario/clear/{stage}', clear, epoch_num)
+            self.writer.add_scalar(f'mario/warp/{stage}',
+                                   float(arr[:, 1].mean()), epoch_num)
+            prev = self._clear_ema.get(stage, 0.0)
+            self._clear_ema[stage] = prev + 0.1 * (clear - prev)
+
+        if len(self.episode_victories) > 0:
+            self.writer.add_scalar('mario/victory_rate',
+                                   float(np.mean(self.episode_victories)),
+                                   epoch_num)
+
+        # Curriculum: sample unmastered stages more often
+        if (self.curriculum_freq > 0 and epoch_num % self.curriculum_freq == 0
+                and self.stage_list
+                and hasattr(getattr(self.algo, 'vec_env', None),
+                            'set_stage_weights')):
+            weights = {s: 0.15 + (1.0 - self._clear_ema.get(s, 0.0))
+                       for s in self.stage_list}
+            self.algo.vec_env.set_stage_weights(weights)
+            for s, w in weights.items():
+                self.writer.add_scalar(f'mario/weight/{s}', w, epoch_num)
+
         # Clear buffers
         self.episode_x_pos.clear()
         self.episode_progress.clear()
         self.episode_flags.clear()
         self.episode_lives.clear()
+        self.stage_records.clear()
+        self.episode_victories.clear()
 
         # Record video periodically, on a background thread so training never
         # blocks. The thread gets a CPU copy of the model: no GPU access, and
@@ -155,10 +207,10 @@ class MarioObserver(AlgoObserver):
                 self._video_thread.start()
 
     def _make_eval_env(self):
-        """Build the env used for video recording. Subclasses override this
-        to swap the backend."""
+        """Build the env used for video recording (sequential full game from
+        1-1 by default; eval_env_kwargs overrides, e.g. start stage)."""
         from mario_env import create_mario_env
-        return create_mario_env(
+        kwargs = dict(
             name='SuperMarioBros-v0',
             action_type='complex',
             episode_life=False,
@@ -166,6 +218,8 @@ class MarioObserver(AlgoObserver):
             skip=4,
             sticky_actions=0.0,
         )
+        kwargs.update(self.eval_env_kwargs or {})
+        return create_mario_env(**kwargs)
 
     def _record_video(self, epoch_num, model):
         """Record gameplay: PIL GIF to TensorBoard + MP4 to disk.
@@ -280,6 +334,11 @@ class MarioObserver(AlgoObserver):
                 x_pos = info.get('x_pos', 0)
                 world = info.get('world', 1)
                 stage = info.get('stage', 1)
+                # Eval frontier scalars: deterministic sequential run from 1-1
+                self.writer.add_scalar('eval/game_progress',
+                                       info.get('game_progress', 0), epoch_num)
+                self.writer.add_scalar(
+                    'eval/max_x', max(s[2] for s in step_stats), epoch_num)
                 print(f'  [Video] Epoch {epoch_num}: reward={total_reward:.0f}, '
                       f'world={world}-{stage}, x_pos={x_pos}, '
                       f'gif={len(gif_bytes)/1024:.0f}KB, mp4={mp4_path}')

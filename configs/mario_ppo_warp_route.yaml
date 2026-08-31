@@ -1,0 +1,99 @@
+params:
+  seed: 42
+
+  algo:
+    name: a2c_discrete
+
+  model:
+    name: discrete_a2c
+
+  network:
+    name: actor_critic
+    separate: False
+    space:
+      discrete:
+
+    cnn:
+      type: conv2d
+      activation: elu
+      initializer:
+        name: orthogonal_initializer
+        gain: 1.41421356237
+      convs:
+        - filters: 32
+          kernel_size: 8
+          strides: 4
+          padding: 0
+        - filters: 64
+          kernel_size: 4
+          strides: 2
+          padding: 0
+        - filters: 64
+          kernel_size: 3
+          strides: 1
+          padding: 0
+
+    mlp:
+      units: [512]
+      activation: elu
+      initializer:
+        name: orthogonal_initializer
+        gain: 1.41421356237
+
+  config:
+    name: Mario_WarpRoute
+    env_name: mario
+    score_to_win: 100000
+    normalize_value: True
+    normalize_input: False
+    reward_shaper:
+      scale_value: 1.0
+    normalize_advantage: True
+    gamma: 0.995
+    tau: 0.95
+    learning_rate: 2.5e-4
+    lr_schedule: adaptive
+    kl_threshold: 0.008
+    grad_norm: 0.5
+    entropy_coef: 0.02
+    truncate_grads: True
+    e_clip: 0.1
+    clip_value: True
+    num_actors: 48
+    horizon_length: 256
+    minibatch_size: 3072
+    mini_epochs: 4
+    critic_coef: 0.5
+    max_epochs: 2000
+    use_diagnostics: True
+    save_frequency: 250
+    save_best_after: 250
+    print_stats: True
+    device: cuda:0
+    multi_gpu: False
+    stage_curriculum_freq: 20
+
+    # Warp-route full-game training: episodes start at a sampled route level
+    # (curriculum-weighted toward unmastered ones) and play on through flags
+    # and warps until game over. Route: 1-1, 1-2 -warp-> 4-1, 4-2 -vine
+    # warp-> 8-1..8-4. stage_bonus is per stage of progress (warp = stages
+    # skipped), so the 1-2 warp pays 11x a flag.
+    env_config:
+      name: SuperMarioBros-v0
+      action_type: complex
+      episode_life: True
+      full_game: True
+      stage_bonus: 500
+      idle_penalty: 0.5
+      idle_threshold: 10
+      progress_reward: 0.001
+      skip: 4
+      sticky_actions: 0.1
+      reset_noops: 30
+      random_stages: ['1-1', '1-2', '4-1', '4-2', '8-1', '8-2', '8-3', '8-4']
+
+    player:
+      render: False
+      games_num: 10
+      deterministic: True
+      n_game_life: 3

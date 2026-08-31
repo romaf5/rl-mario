@@ -68,7 +68,16 @@ def main():
     print(f"  Video freq: every {args.video_freq} epochs")
     print("=" * 60)
 
-    observer = MarioObserver(video_freq=args.video_freq)
+    # Custom keys (popped so rl_games never sees them):
+    # - stage_curriculum_freq: curriculum re-weighting of random-stage
+    #   sampling toward low-clear-rate stages every N epochs
+    # - eval_env_config: overrides for the video/eval env (e.g. start stage)
+    curriculum_freq = config['params']['config'].pop('stage_curriculum_freq', 0)
+    eval_env_config = config['params']['config'].pop('eval_env_config', None)
+
+    observer = MarioObserver(video_freq=args.video_freq,
+                             curriculum_freq=curriculum_freq,
+                             eval_env_kwargs=eval_env_config)
     runner = Runner(algo_observer=observer)
     runner.load(config)
     runner.reset()

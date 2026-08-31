@@ -226,6 +226,9 @@ def probe():
     class StubEnv:
         observation_space = None
         action_space = None
+        is_single_stage_env = True
+        stage_name = '1-1'
+        game_progress = 0
 
         def __init__(self, xs, flags):
             self.xs, self.flags, self.i = xs, flags, 0

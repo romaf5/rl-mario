@@ -22,6 +22,10 @@ import cv2
 import numpy as np
 from gymnasium import spaces
 
+# One 84x84 warp per step needs no threads; with 64 worker processes, cv2's
+# per-process thread pools thrash the scheduler and triple step time.
+cv2.setNumThreads(0)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 INTEGRATION_PATH = os.path.join(HERE, 'retro_integration')
 GAME = 'SuperMarioBros-Nes-v0'
@@ -109,7 +113,7 @@ class RetroMarioEnv:
     reward_range = (-15, 15)
 
     def __init__(self, target=None, random_stages=None,
-                 actions=COMPLEX_MOVEMENT):
+                 actions=COMPLEX_MOVEMENT, full_game=False, reset_noops=0):
         _register_integration()
         import stable_retro as retro
 
@@ -121,8 +125,13 @@ class RetroMarioEnv:
 
         self._random_stages = list(random_stages) if random_stages else None
         self._target = target
-        self.is_single_stage_env = (target is not None
-                                    or self._random_stages is not None)
+        self._reset_noops = reset_noops
+        self._stage_weights = None
+        # full_game=True + random_stages: episode starts at a sampled level
+        # but plays on through level transitions until game over.
+        self.is_single_stage_env = (not full_game
+                                    and (target is not None
+                                         or self._random_stages is not None))
 
         # Pre-load savestate bytes (load_state gunzips from disk every call)
         if self._random_stages:
@@ -234,6 +243,27 @@ class RetroMarioEnv:
         return self._cur['life']
 
     @property
+    def stage_name(self):
+        """Current stage as '4-1' (1-based)."""
+        return f"{self._cur['world0'] + 1}-{self._cur['stage0'] + 1}"
+
+    @property
+    def game_progress(self):
+        """Current stage as 0-31 (clamped; RAM can hold garbage for a frame)."""
+        p = int(self._cur['world0']) * 4 + int(self._cur['stage0'])
+        return min(max(p, 0), 31)
+
+    def set_stage_weights(self, weights):
+        """Sampling weights for random_stages resets: dict stage -> weight
+        (missing stages get 0; normalized here; all-zero disables weighting)."""
+        if not self._random_stages:
+            return
+        w = np.array([max(float(weights.get(s, 0.0)), 0.0)
+                      for s in self._random_stages], dtype=np.float64)
+        total = w.sum()
+        self._stage_weights = (w / total) if total > 0 else None
+
+    @property
     def screen(self):
         """Current RGB frame (compat with nes_py's env.screen)."""
         return self._retro.get_screen()
@@ -312,12 +342,18 @@ class RetroMarioEnv:
 
     def reset(self, **kwargs):
         if self._random_stages:
-            stage = self._rng.choice(self._random_stages)
+            stage = self._rng.choice(self._random_stages, p=self._stage_weights)
             self._retro.initial_state = self._states[stage]
         else:
             self._retro.initial_state = self._states['_']
         obs, _ = self._retro.reset()
         self._cur = dict(self._retro.data.lookup_all())
+        if self._reset_noops:
+            # Idle 0..reset_noops frames: shifts the global frame counter so
+            # enemy/firebar timing varies across episodes (anti-memorization).
+            for _ in range(int(self._rng.randint(0, self._reset_noops + 1))):
+                self._frame()
+            obs = self._em.get_screen()
         self._time_last = self._time
         self._x_last = self._x_position
         return obs
@@ -337,10 +373,14 @@ class RetroMarioEnv:
 
         if self.is_single_stage_env:
             done = self._is_dying or self._is_dead or self._flag_get
+            victory = False
         else:
-            done = self._is_game_over
+            # world-over cutscene while on 8-4 == the game is beaten
+            victory = self._is_world_over and self.game_progress == 31
+            done = self._is_game_over or victory
 
         out_info = dict(
+            victory=victory,
             coins=self._cur['coins'],
             flag_get=self._flag_get,
             life=self._cur['life'],
@@ -446,10 +486,21 @@ class EpisodicLifeMarioEnv(Wrapper):
 
 class MarioProgressWrapper(Wrapper):
     """Reward shaping for game completion (not just running forward).
-    - Big bonus for completing a stage (flag_get)
-    - Penalty for standing still (idle_penalty)
-    - Tracks overall game progress as a metric
+
+    - stage_bonus is paid PER STAGE OF GAME PROGRESS: a flag exit into the
+      next level pays 1x, a warp pays the number of stages skipped
+      (1-2 -> 4-1 is 11x, the 4-2 vine warp to 8-1 is 15x). In single-stage
+      mode (episode ends at the flag, progress never ticks) the same bonus
+      is paid on flag_get instead.
+    - Progress increases are debounced (world/stage RAM holds garbage for a
+      frame during screen transitions: require 2 consecutive identical
+      reads), monotonic per life, and jump-capped at 15 stages.
+    - idle_penalty after idle_threshold consecutive no-progress steps;
+      growing forward-movement bonus scaled by x_pos.
+    - Emits per-episode metrics: start_stage, progress_gain, warped, ...
     """
+    _MAX_PROGRESS_JUMP = 15  # 4-2 vine warp to 8-1, the biggest legal jump
+
     def __init__(self, env, stage_bonus=500.0, idle_penalty=0.5,
                  idle_threshold=10, progress_reward=0.001):
         Wrapper.__init__(self, env)
@@ -461,25 +512,63 @@ class MarioProgressWrapper(Wrapper):
         self._prev_x_pos = 0
         self._idle_steps = 0
         self._max_x_pos = 0
-        self._stage_progress = 0  # 0-31, tracking which stage we're on
+        self._start_stage = '1-1'
+        self._start_progress = 0
+        self._progress = 0
+        self._pending_progress = None
+        self._stages_cleared = 0
+        self._warped = False
+        self._victory_paid = False
 
     def reset(self, **kwargs):
         obs = self.env.reset(**kwargs)
+        base = self.env.unwrapped
         self._prev_flag_get = False
         self._prev_x_pos = 0
         self._idle_steps = 0
         self._max_x_pos = 0
-        self._stage_progress = 0
+        self._start_stage = base.stage_name
+        self._start_progress = base.game_progress
+        self._progress = self._start_progress
+        self._pending_progress = None
+        self._stages_cleared = 0
+        self._warped = False
+        self._victory_paid = False
         return obs
 
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
+        base = self.env.unwrapped
+        single = base.is_single_stage_env
 
-        # Stage completion bonus
+        # Flag bonus only in single-stage mode (episode ends at the flag, so
+        # game progress never increases and the bonus below can't fire).
         flag_get = info.get('flag_get', False)
-        if flag_get and not self._prev_flag_get:
+        if single and flag_get and not self._prev_flag_get:
             reward += self.stage_bonus
         self._prev_flag_get = flag_get
+
+        # Beating 8-4 pays one extra stage_bonus (there is no 32nd stage for
+        # the progress bonus below to reach)
+        if info.get('victory') and not self._victory_paid:
+            reward += self.stage_bonus
+            self._victory_paid = True
+
+        # Debounced game-progress bonus (see class docstring)
+        p = base.game_progress
+        if p > self._progress:
+            if p == self._pending_progress:
+                delta = p - self._progress
+                if delta <= self._MAX_PROGRESS_JUMP:
+                    self._progress = p
+                    self._stages_cleared += 1
+                    if delta >= 2:
+                        self._warped = True
+                    if not single:
+                        reward += self.stage_bonus * delta
+            self._pending_progress = p
+        else:
+            self._pending_progress = None
 
         # Growing progress reward: forward movement scaled by position
         # At x=0 bonus is ~0, at x=2000 bonus is +2 per step of forward movement
@@ -498,16 +587,12 @@ class MarioProgressWrapper(Wrapper):
                 reward -= self.idle_penalty
         self._prev_x_pos = x_pos
 
-        # Track stage progress (world 1-8, stage 1-4 -> 0-31). The world/stage
-        # RAM bytes hold garbage for a frame during screen transitions, so
-        # ignore out-of-range readings.
-        world = info.get('world', 1)
-        stage = info.get('stage', 1)
-        current_progress = (world - 1) * 4 + (stage - 1)
-        if self._stage_progress < current_progress <= 31:
-            self._stage_progress = current_progress
-        info['game_progress'] = self._stage_progress
-        info['game_progress_pct'] = self._stage_progress / 31.0
+        info['game_progress'] = self._progress
+        info['game_progress_pct'] = self._progress / 31.0
+        info['start_stage'] = self._start_stage
+        info['progress_gain'] = self._progress - self._start_progress
+        info['stages_cleared'] = self._stages_cleared
+        info['warped'] = self._warped
 
         # Track x_pos within stage
         if x_pos > self._max_x_pos:
@@ -645,7 +730,8 @@ def _parse_name(name):
 def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
                      episode_life=True, stage_bonus=500.0, idle_penalty=0.5,
                      idle_threshold=10, progress_reward=0.001, skip=4,
-                     sticky_actions=0.0, random_stages=None, **unknown):
+                     sticky_actions=0.0, random_stages=None, full_game=False,
+                     reset_noops=0, frame_only=False, **unknown):
     """Build the full Mario env wrapper chain. This is the single entry point
     used by training, evaluation, and the vecenv workers.
 
@@ -655,7 +741,9 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
         action_type: 'complex' (12 actions, incl. running) or 'simple' (7)
         episode_life: treat each life as an episode boundary (training);
                       False for evaluation
-        stage_bonus: reward for completing a stage (flag_get)
+        stage_bonus: reward per stage of game progress (flag = 1 stage,
+                     warp = stages skipped); paid on flag_get in
+                     single-stage mode
         idle_penalty: per-step penalty after idle_threshold consecutive
                       no-progress steps
         idle_threshold: idle steps tolerated before the penalty kicks in
@@ -666,8 +754,16 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
         random_stages: list like ['1-1', '2-3'] -- each reset loads a random
                        stage's savestate (single emulator per process, states
                        swapped on reset). Overrides single-level `name`.
+        full_game: with random_stages, keep full-game semantics: the episode
+                   starts at the sampled level but plays on through level
+                   transitions (flags, warps) until game over
+        reset_noops: idle 0..N random frames after reset (varies enemy/
+                     firebar timing across episodes; anti-memorization)
+        frame_only: stop the chain after WarpFrame and return (84, 84, 1)
+                    uint8 frames -- used by MarioVecEnv, which does the
+                    scaling and 4-frame stacking master-side (16x less IPC)
 
-    Final observation: (84, 84, 4) float32 in [0, 1].
+    Final observation: (84, 84, 4) float32 in [0, 1] (frame_only=False).
     """
     if unknown:
         warnings.warn(f'create_mario_env: ignoring unknown kwargs {sorted(unknown)}')
@@ -676,7 +772,8 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
 
     env = RetroMarioEnv(target=_parse_name(name),
                         random_stages=random_stages,
-                        actions=actions)
+                        actions=actions, full_game=full_game,
+                        reset_noops=reset_noops)
     if sticky_actions > 0:
         env = StickyActionWrapper(env, p=sticky_actions)
     if episode_life:
@@ -687,6 +784,8 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
                                progress_reward=progress_reward)
     env = MaxAndSkipEnv(env, skip=skip)
     env = WarpFrame(env, width=84, height=84, grayscale=True)
+    if frame_only:
+        return env
     env = ScaledFloatFrame(env)
     env = FrameStack(env, k=4)
     return env
