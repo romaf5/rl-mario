@@ -173,11 +173,12 @@ class MarioNativeVecEnv(IVecEnv):
         self.was_restart[i] = False
         if (self.sr_prob > 0 and self.archive
                 and self.rng.random_sample() < self.sr_prob):
-            if self.rng.random_sample() < 0.5:
-                cell = max(self.archive, key=lambda c: c[2])
-            else:
-                cell = min(self.archive,
-                           key=lambda c: self.archive[c][1])
+            # soft least-practiced: p(cell) ~ 1/(1+uses). Uniform-ish
+            # coverage bridges the door->frontier gap; a hard frontier
+            # bias starves the cells where the policy actually fails.
+            cells = list(self.archive.keys())
+            w = np.array([1.0 / (1 + self.archive[c][1]) for c in cells])
+            cell = cells[self.rng.choice(len(cells), p=w / w.sum())]
             ent = self.archive[cell]
             ent[1] += 1
             self.lib.benv_load(self.env, i, ent[0])

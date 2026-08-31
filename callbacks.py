@@ -46,6 +46,7 @@ class MarioObserver(AlgoObserver):
         self.stage_records = {}
         self.episode_victories = []
         self.episode_loops = []
+        self.door_x = []          # max_x of NON-restart (from-door) episodes
         self._clear_ema = {}  # start_stage -> EMA of clear rate
 
         self.best_progress = 0
@@ -104,6 +105,8 @@ class MarioObserver(AlgoObserver):
             self.episode_victories.append(float(info['victory']))
         if 'looped' in info:
             self.episode_loops.append(float(info['looped']))
+        if 'self_restart' in info and not info['self_restart']:
+            self.door_x.append(info.get('max_x_pos', 0))
 
         # Also track game scores for the default scorer
         game_res = info.get('scores', None)
@@ -174,6 +177,11 @@ class MarioObserver(AlgoObserver):
             self.writer.add_scalar('mario/loop_rate',
                                    float(np.mean(self.episode_loops)),
                                    epoch_num)
+        if len(self.door_x) > 0:
+            self.writer.add_scalar('mario/door_max_x',
+                                   float(np.max(self.door_x)), epoch_num)
+            self.writer.add_scalar('mario/door_mean_x',
+                                   float(np.mean(self.door_x)), epoch_num)
 
         # Curriculum: sample unmastered stages more often
         if (self.curriculum_freq > 0 and epoch_num % self.curriculum_freq == 0
@@ -194,6 +202,7 @@ class MarioObserver(AlgoObserver):
         self.stage_records.clear()
         self.episode_victories.clear()
         self.episode_loops.clear()
+        self.door_x.clear()
 
         # Record video periodically, on a background thread so training never
         # blocks. The thread gets a CPU copy of the model: no GPU access, and
