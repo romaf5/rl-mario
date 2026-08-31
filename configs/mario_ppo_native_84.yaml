@@ -68,13 +68,16 @@ params:
       random_stages: [8-4]
       self_restart_prob: 0.3
       n_threads: 16
-      self_restart_cells: 128
+      self_restart_cells: 512
       novelty_y_band: 24
       score_reward: 0.1
       novelty_global: true
       explore_eps: 0.05
       archive_path: native/archive_84.pkl
       explore_episode_prob: 0.25
+      explore_episode_steps: 300
+      self_restart_frontier_prob: 0.5
+      self_restart_frontier_k: 16
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
     eval_env_config:
       backend: native

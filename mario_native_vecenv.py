@@ -93,7 +93,9 @@ class MarioNativeVecEnv(IVecEnv):
                  novelty_y_band=48, score_reward=0.0,
                  novelty_global=False, explore_eps=0.0,
                  archive_path=None, explore_episode_prob=0.0,
-                 explore_episode_steps=150, **unknown):
+                 explore_episode_steps=150,
+                 self_restart_frontier_prob=0.0,
+                 self_restart_frontier_k=16, **unknown):
         assert action_type == 'complex'
         n = self.num_actors = num_actors
         self.lib = _Lib()
@@ -128,6 +130,8 @@ class MarioNativeVecEnv(IVecEnv):
         self._archive_dirty = 0
         self.exp_ep_prob = explore_episode_prob
         self.exp_ep_steps = explore_episode_steps
+        self.sr_frontier_prob = self_restart_frontier_prob
+        self.sr_frontier_k = self_restart_frontier_k
         self.explorer = np.zeros(num_actors, dtype=np.int32)
         self.novelty_counts = {}    # cross-episode cell visit counts
 
@@ -199,9 +203,17 @@ class MarioNativeVecEnv(IVecEnv):
             # soft least-practiced: p(cell) ~ 1/(1+uses). Uniform-ish
             # coverage bridges the door->frontier gap; a hard frontier
             # bias starves the cells where the policy actually fails.
+            # A recency slice (dict order = insertion order) concentrates
+            # extra practice on the newest cells so a fresh frontier gets
+            # enough episodes to keep expanding.
             cells = list(self.archive.keys())
-            w = np.array([1.0 / (1 + self.archive[c][1]) for c in cells])
-            cell = cells[self.rng.choice(len(cells), p=w / w.sum())]
+            if (self.sr_frontier_prob > 0
+                    and self.rng.random_sample() < self.sr_frontier_prob):
+                cells = cells[-self.sr_frontier_k:]
+                cell = cells[self.rng.randint(len(cells))]
+            else:
+                w = np.array([1.0 / (1 + self.archive[c][1]) for c in cells])
+                cell = cells[self.rng.choice(len(cells), p=w / w.sum())]
             ent = self.archive[cell]
             ent[1] += 1
             self.lib.benv_load(self.env, i, ent[0])
