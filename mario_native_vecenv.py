@@ -133,6 +133,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.sr_frontier_prob = self_restart_frontier_prob
         self.sr_frontier_k = self_restart_frontier_k
         self.explorer = np.zeros(num_actors, dtype=np.int32)
+        self.exp_action = np.zeros(num_actors, dtype=np.int64)
         self.novelty_counts = {}    # cross-episode cell visit counts
 
         self.rng = np.random.RandomState(seed)
@@ -154,6 +155,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.start_progress = z(); self.cleared = z()
         self.warped = z(bool); self.looped = z(bool); self.vic_paid = z(bool)
         self.idle = z(); self.prev_x = z(); self.max_x = z()
+        self.idle_paid = np.zeros(n, dtype=np.float32)
         self.prev_area = z(); self.last_action = z()
         self.start_stage = [''] * n
         self.was_restart = z(bool)
@@ -258,6 +260,7 @@ class MarioNativeVecEnv(IVecEnv):
             self.warped[i] = False; self.looped[i] = False
             self.vic_paid[i] = False
             self.idle[i] = 0
+            self.idle_paid[i] = 0.0
             self.prev_area[i] = int(r[0x760])
 
     # ------------------------------------------------------------- IVecEnv
@@ -281,7 +284,17 @@ class MarioNativeVecEnv(IVecEnv):
         acts = np.asarray(actions).astype(np.int64).ravel()
         exp_mask = self.explorer > 0
         if exp_mask.any():
-            acts = np.where(exp_mask, self.rng.randint(0, 12, size=n), acts)
+            # macro-action random walk: hold each random action ~8 steps.
+            # Per-step uniform noise cannot produce directed multi-step
+            # maneuvers (e.g. sustained sink or approach); persistence can.
+            keep = self.rng.random_sample(n) >= 1.0 / 8
+            macro = np.where(keep, self.exp_action,
+                             self.rng.randint(0, 12, size=n))
+            self.exp_action[:] = macro
+            # 60% policy / 40% macro: keep the policy's behavioral prior
+            # (pure uniform flail dies to hazards before it can discover)
+            use_macro = self.rng.random_sample(n) < 0.4
+            acts = np.where(exp_mask & use_macro, macro, acts)
             self.explorer = np.maximum(self.explorer - 1, 0)
         if self.explore_eps > 0:
             # permanent action-diversity floor: collapsed policy entropy
@@ -377,8 +390,11 @@ class MarioNativeVecEnv(IVecEnv):
         reward = reward - np.where(fwd & ~new_ground,
                                    self.backtrack_penalty, 0)
         self.idle = np.where(fwd, 0, self.idle + 1)
-        reward = reward - np.where(self.idle > self.idle_threshold,
-                                   self.idle_penalty, 0)
+        # cap total idle punishment at one death's worth per episode:
+        # persisting at a hard frontier must never score worse than dying
+        idle_hit = (self.idle > self.idle_threshold) & (self.idle_paid < 15.0)
+        reward = reward - np.where(idle_hit, self.idle_penalty, 0)
+        self.idle_paid += np.where(idle_hit, self.idle_penalty, 0)
         self.prev_x = x
         self.max_x = np.maximum(self.max_x, x)
 

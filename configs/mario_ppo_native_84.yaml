@@ -74,7 +74,7 @@ params:
       novelty_global: true
       explore_eps: 0.05
       archive_path: native/archive_84.pkl
-      explore_episode_prob: 0.25
+      explore_episode_prob: 0.4
       explore_episode_steps: 300
       self_restart_frontier_prob: 0.5
       self_restart_frontier_k: 16
