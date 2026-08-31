@@ -137,6 +137,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.ep_steps = np.zeros(num_actors, dtype=np.int32)
         self.start_cell = [None] * num_actors
         self.cell_early = {}
+        self.cell_wins = {}
         self._novelty_tick = 0
         self.nongame = np.zeros(num_actors, dtype=np.int32)
         self.novelty_counts = {}    # cross-episode cell visit counts
@@ -217,13 +218,15 @@ class MarioNativeVecEnv(IVecEnv):
             cells = list(self.archive.keys())
             if (self.sr_frontier_prob > 0
                     and self.rng.random_sample() < self.sr_frontier_prob):
-                # frontier = the K least-practiced cells (a new cell has 0
-                # uses by construction and stays in until it is practiced;
-                # insertion recency ages out under churn)
-                cells = sorted(cells,
-                               key=lambda c: self.archive[c][1]
-                               )[:self.sr_frontier_k]
-                cell = cells[self.rng.randint(len(cells))]
+                # frontier = the K least-practiced UNMASTERED cells. A cell
+                # leaves the frontier only once its restarts have actually
+                # produced wins -- practice count alone is not mastery.
+                cand = [c for c in cells
+                        if self.cell_wins.get(c, 0) < 3] or cells
+                cand = sorted(cand,
+                              key=lambda c: self.archive[c][1]
+                              )[:self.sr_frontier_k]
+                cell = cand[self.rng.randint(len(cand))]
             else:
                 w = np.array([1.0 / (1 + self.archive[c][1]) for c in cells])
                 cell = cells[self.rng.choice(len(cells), p=w / w.sum())]
@@ -541,7 +544,11 @@ class MarioNativeVecEnv(IVecEnv):
         self.ep_steps += 1
         for i in np.nonzero(done)[0]:
             cell = self.start_cell[i]
-            if cell is None or self.ep_steps[i] > 8:
+            if cell is None:
+                continue
+            if victory[i] or self.cleared[i] > 0:
+                self.cell_wins[cell] = self.cell_wins.get(cell, 0) + 1
+            if self.ep_steps[i] > 8:
                 continue
             n_early = self.cell_early.get(cell, 0) + 1
             self.cell_early[cell] = n_early
