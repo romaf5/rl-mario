@@ -531,7 +531,8 @@ class MarioProgressWrapper(Wrapper):
 
     def __init__(self, env, stage_bonus=500.0, idle_penalty=0.5,
                  idle_threshold=10, progress_reward=0.001,
-                 loop_penalty=0.0, backtrack_penalty=0.0):
+                 loop_penalty=0.0, backtrack_penalty=0.0,
+                 novelty_bonus=0.0):
         Wrapper.__init__(self, env)
         self.stage_bonus = stage_bonus
         self.idle_penalty = idle_penalty
@@ -542,6 +543,11 @@ class MarioProgressWrapper(Wrapper):
         # per-step cost for moving forward over already-covered ground.
         self.loop_penalty = loop_penalty
         self.backtrack_penalty = backtrack_penalty
+        # Content-blind exploration: pay novelty_bonus once per episode for
+        # each newly touched (area, x-cell, y-band) -- jumping into
+        # unvisited air pays, which is what finds hidden blocks anywhere.
+        self.novelty_bonus = novelty_bonus
+        self._visited = set()
         self._prev_area = None
         self._prev_flag_get = False
         self._prev_x_pos = 0
@@ -571,6 +577,7 @@ class MarioProgressWrapper(Wrapper):
         self._warped = False
         self._victory_paid = False
         self._looped = False
+        self._visited.clear()
         self._prev_area = self.env.unwrapped.area
         return obs
 
@@ -641,6 +648,12 @@ class MarioProgressWrapper(Wrapper):
             if self._idle_steps > self.idle_threshold:
                 reward -= self.idle_penalty
         self._prev_x_pos = x_pos
+
+        if self.novelty_bonus > 0:
+            cell = (base.area, x_pos // 64, info.get('y_pos', 0) // 48)
+            if cell not in self._visited:
+                self._visited.add(cell)
+                reward += self.novelty_bonus
 
         info['game_progress'] = self._progress
         info['game_progress_pct'] = self._progress / 31.0
@@ -788,7 +801,8 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
                      idle_threshold=10, progress_reward=0.001, skip=4,
                      sticky_actions=0.0, random_stages=None, full_game=False,
                      reset_noops=0, x_reward='delta', loop_penalty=0.0,
-                     backtrack_penalty=0.0, frame_only=False, **unknown):
+                     backtrack_penalty=0.0, novelty_bonus=0.0,
+                     frame_only=False, **unknown):
     """Build the full Mario env wrapper chain. This is the single entry point
     used by training, evaluation, and the vecenv workers.
 
@@ -821,6 +835,8 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
                   the maze-loop reward treadmill)
         loop_penalty: one-time penalty on a detected maze loop-back
         backtrack_penalty: per-step cost for re-running covered ground
+        novelty_bonus: reward per newly visited (area, x-cell, y-band)
+                       within an episode (content-blind exploration)
         frame_only: stop the chain after WarpFrame and return (84, 84, 1)
                     uint8 frames -- used by MarioVecEnv, which does the
                     scaling and 4-frame stacking master-side (16x less IPC)
@@ -845,7 +861,8 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
                                idle_threshold=idle_threshold,
                                progress_reward=progress_reward,
                                loop_penalty=loop_penalty,
-                               backtrack_penalty=backtrack_penalty)
+                               backtrack_penalty=backtrack_penalty,
+                               novelty_bonus=novelty_bonus)
     env = MaxAndSkipEnv(env, skip=skip)
     env = WarpFrame(env, width=84, height=84, grayscale=True)
     if frame_only:
