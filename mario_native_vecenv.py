@@ -90,7 +90,8 @@ class MarioNativeVecEnv(IVecEnv):
                  loop_penalty=0.0, backtrack_penalty=0.0, novelty_bonus=0.0,
                  self_restart_prob=0.0, self_restart_cells=96,
                  n_threads=32, seed=None, dense_infos=False,
-                 novelty_y_band=48, score_reward=0.0, **unknown):
+                 novelty_y_band=48, score_reward=0.0,
+                 novelty_global=False, **unknown):
         assert action_type == 'complex'
         n = self.num_actors = num_actors
         self.lib = _Lib()
@@ -119,6 +120,8 @@ class MarioNativeVecEnv(IVecEnv):
         self.dense_infos = dense_infos
         self.novelty_y_band = novelty_y_band
         self.score_reward = score_reward
+        self.novelty_global = novelty_global
+        self.novelty_counts = {}    # cross-episode cell visit counts
 
         self.rng = np.random.RandomState(seed)
         self.obs_u8 = np.zeros((n, 84, 84), dtype=np.uint8)
@@ -346,7 +349,15 @@ class MarioNativeVecEnv(IVecEnv):
             for i in range(n):
                 cell = (int(area[i]), int(x[i]) // 64,
                         int(ypix[i]) // self.novelty_y_band)
-                if cell not in self.novelty_sets[i]:
+                if self.novelty_global:
+                    # cross-episode decaying counts: mundane cells deplete,
+                    # never-reached cells keep a standing bonus
+                    c = self.novelty_counts.get(cell, 0)
+                    if cell not in self.novelty_sets[i]:
+                        self.novelty_sets[i].add(cell)
+                        self.novelty_counts[cell] = c + 1
+                        reward[i] += self.novelty_bonus / (1 + c) ** 0.5
+                elif cell not in self.novelty_sets[i]:
                     self.novelty_sets[i].add(cell)
                     reward[i] += self.novelty_bonus
 
