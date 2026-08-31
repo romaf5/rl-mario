@@ -403,9 +403,12 @@ class MarioNativeVecEnv(IVecEnv):
         # ---- self-restart archiving ----
         if self.sr_prob > 0:
             fstate = self._field(0x1D)
-            can = (fstate == 0) & ~dying & ~dead & (gmode == 1) & (t > 100)
             ypix_a = self._field(0x3B8)
             swim_a = self.ram[:, 0x704].astype(np.int32)
+            # grounded on land; swimming counts as controlled in water
+            # (float_state never returns to 0 while afloat)
+            can = (((fstate == 0) | (swim_a == 1)) & ~dying & ~dead
+                   & (gmode == 1) & (t > 100))
             for i in np.nonzero(can)[0]:
                 # y-band in the key: standing ON a block/pipe is a different
                 # rung than the floor below it; swim flag disambiguates the
