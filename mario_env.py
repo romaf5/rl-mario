@@ -114,7 +114,8 @@ class RetroMarioEnv:
 
     def __init__(self, target=None, random_stages=None,
                  actions=COMPLEX_MOVEMENT, full_game=False, reset_noops=0,
-                 x_reward='delta'):
+                 x_reward='delta', self_restart_prob=0.0,
+                 self_restart_cells=96):
         _register_integration()
         import stable_retro as retro
 
@@ -166,6 +167,16 @@ class RetroMarioEnv:
         self._x_reward_mode = x_reward
         self._x_highwater = 0
         self._x_context = None    # (life, world, stage, area) rebase key
+        # Self-restart curriculum (knowledge-free): each env archives
+        # snapshots of cells ITS OWN play visited (grounded, alive); a
+        # fraction of real resets resume from the least-practiced cell
+        # instead of the level start. Cell = (start stage, area, x//128).
+        self.self_restart_prob = self_restart_prob
+        self.self_restart_cells = self_restart_cells
+        self._archive = {}        # cell -> [state_bytes, uses]
+        self._episode_cells = set()
+        self._cur_start = None    # stage entry of the current episode
+        self.last_reset_was_restart = False
         self._noop_mask = np.zeros(len(_BUTTONS), dtype=np.uint8)
 
         # Fast path: step the emulator directly, bypassing RetroEnv.step()
@@ -367,11 +378,33 @@ class RetroMarioEnv:
         return [seed]
 
     def reset(self, **kwargs):
+        self._episode_cells = set()
+        self.last_reset_was_restart = False
+
+        # self-restart: resume from one of THIS env's own archived states
+        if (self.self_restart_prob > 0 and self._archive
+                and self._rng.random_sample() < self.self_restart_prob):
+            cell = min(self._archive, key=lambda c: self._archive[c][1])
+            entry = self._archive[cell]
+            entry[1] += 1
+            self._em.set_state(entry[0])
+            self._data.update_ram()
+            self._cur = dict(self._data.lookup_all())
+            self._cur_start = cell[0]
+            self.last_reset_was_restart = True
+            self._x_highwater = self._x_position
+            self._x_context = self._x_context_key()
+            self._time_last = self._time
+            self._x_last = self._x_position
+            return self._em.get_screen()
+
         if self._random_stages:
             stage = self._rng.choice(self._random_stages, p=self._stage_weights)
             self._retro.initial_state = self._states[stage]
+            self._cur_start = str(stage)
         else:
             self._retro.initial_state = self._states['_']
+            self._cur_start = '_'
         obs, _ = self._retro.reset()
         self._cur = dict(self._retro.data.lookup_all())
         self._x_highwater = self._x_position
@@ -385,6 +418,27 @@ class RetroMarioEnv:
         self._time_last = self._time
         self._x_last = self._x_position
         return obs
+
+    def _maybe_archive(self):
+        """Snapshot the current state if it is a new, healthy, archivable
+        cell: grounded or swimming, alive, normal gameplay, decent clock."""
+        c = self._cur
+        if c['float_state'] != 0:
+            return
+        if self._is_dying or self._is_dead or self._cur['gameplay_mode'] != 1:
+            return
+        if self._time < 100:
+            return
+        cell = (self._cur_start, int(c['area0']), self._x_position // 128)
+        if cell in self._episode_cells:
+            return
+        self._episode_cells.add(cell)
+        if cell not in self._archive:
+            if len(self._archive) >= self.self_restart_cells:
+                # drop the most-practiced cell to make room
+                worst = max(self._archive, key=lambda k: self._archive[k][1])
+                del self._archive[worst]
+            self._archive[cell] = [self._em.get_state(), 0]
 
     def step(self, action):
         em = self._em
@@ -409,6 +463,7 @@ class RetroMarioEnv:
 
         out_info = dict(
             victory=victory,
+            self_restart=self.last_reset_was_restart,
             coins=self._cur['coins'],
             flag_get=self._flag_get,
             life=self._cur['life'],
@@ -421,6 +476,8 @@ class RetroMarioEnv:
             y_pos=self._y_position,
         )
 
+        if self.self_restart_prob > 0 and not done:
+            self._maybe_archive()
         self._did_step(done)
         obs = em.get_screen() if self.want_obs else None
 
@@ -802,6 +859,7 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
                      sticky_actions=0.0, random_stages=None, full_game=False,
                      reset_noops=0, x_reward='delta', loop_penalty=0.0,
                      backtrack_penalty=0.0, novelty_bonus=0.0,
+                     self_restart_prob=0.0, self_restart_cells=96,
                      frame_only=False, **unknown):
     """Build the full Mario env wrapper chain. This is the single entry point
     used by training, evaluation, and the vecenv workers.
@@ -837,6 +895,11 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
         backtrack_penalty: per-step cost for re-running covered ground
         novelty_bonus: reward per newly visited (area, x-cell, y-band)
                        within an episode (content-blind exploration)
+        self_restart_prob: fraction of real resets resuming from a state
+                           this env's OWN play archived (least-practiced
+                           cell first) -- agent-derived curriculum, no
+                           human knowledge
+        self_restart_cells: max archived cells per env
         frame_only: stop the chain after WarpFrame and return (84, 84, 1)
                     uint8 frames -- used by MarioVecEnv, which does the
                     scaling and 4-frame stacking master-side (16x less IPC)
@@ -851,7 +914,9 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
     env = RetroMarioEnv(target=_parse_name(name),
                         random_stages=random_stages,
                         actions=actions, full_game=full_game,
-                        reset_noops=reset_noops, x_reward=x_reward)
+                        reset_noops=reset_noops, x_reward=x_reward,
+                        self_restart_prob=self_restart_prob,
+                        self_restart_cells=self_restart_cells)
     if sticky_actions > 0:
         env = StickyActionWrapper(env, p=sticky_actions)
     if episode_life:
