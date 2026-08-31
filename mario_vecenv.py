@@ -134,9 +134,11 @@ def _worker(remote, parent_remote, env_kwargs, worker_idx, shm):
             elif cmd == CMD_RESET:
                 shm.frames[i] = env.reset()[..., 0]
             elif cmd in (CMD_SEED, CMD_WEIGHTS):
-                if pending_payload is None:
+                # drain stale 'wake' messages until the payload arrives
+                while pending_payload is None:
                     msg = remote.recv()
-                    pending_payload = msg[1]
+                    if isinstance(msg, tuple) and msg[0] == 'payload':
+                        pending_payload = msg[1]
                 if cmd == CMD_SEED:
                     env.seed(pending_payload)
                 else:
