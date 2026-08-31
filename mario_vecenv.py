@@ -44,8 +44,8 @@ CMD_CLOSE = 4
 
 # Fixed schema for info scalars shared per step (master rebuilds dicts)
 INFO_KEYS = ['x_pos', 'max_x_pos', 'game_progress', 'progress_gain',
-             'stages_cleared', 'warped', 'victory', 'flag_get', 'life',
-             'world', 'stage', 'time', 'score', 'coins']
+             'stages_cleared', 'warped', 'victory', 'looped', 'flag_get',
+             'life', 'world', 'stage', 'time', 'score', 'coins']
 N_INFO = len(INFO_KEYS) + 1  # + start_stage index
 
 # Spin ~8ms before sleeping: covers the master's inter-step work during

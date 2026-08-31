@@ -256,6 +256,11 @@ class RetroMarioEnv:
         return f"{self._cur['world0'] + 1}-{self._cur['stage0'] + 1}"
 
     @property
+    def area(self):
+        """Current area byte (sub-area within a stage)."""
+        return int(self._cur['area0'])
+
+    @property
     def game_progress(self):
         """Current stage as 0-31 (clamped; RAM can hold garbage for a frame)."""
         p = int(self._cur['world0']) * 4 + int(self._cur['stage0'])
@@ -525,12 +530,19 @@ class MarioProgressWrapper(Wrapper):
     _MAX_PROGRESS_JUMP = 15  # 4-2 vine warp to 8-1, the biggest legal jump
 
     def __init__(self, env, stage_bonus=500.0, idle_penalty=0.5,
-                 idle_threshold=10, progress_reward=0.001):
+                 idle_threshold=10, progress_reward=0.001,
+                 loop_penalty=0.0, backtrack_penalty=0.0):
         Wrapper.__init__(self, env)
         self.stage_bonus = stage_bonus
         self.idle_penalty = idle_penalty
         self.idle_threshold = idle_threshold
         self.progress_reward = progress_reward
+        # Maze punishment: loop_penalty fires once on a maze loop-back
+        # (big backward x jump, same area, alive); backtrack_penalty is a
+        # per-step cost for moving forward over already-covered ground.
+        self.loop_penalty = loop_penalty
+        self.backtrack_penalty = backtrack_penalty
+        self._prev_area = None
         self._prev_flag_get = False
         self._prev_x_pos = 0
         self._idle_steps = 0
@@ -542,6 +554,7 @@ class MarioProgressWrapper(Wrapper):
         self._stages_cleared = 0
         self._warped = False
         self._victory_paid = False
+        self._looped = False
 
     def reset(self, **kwargs):
         obs = self.env.reset(**kwargs)
@@ -557,6 +570,8 @@ class MarioProgressWrapper(Wrapper):
         self._stages_cleared = 0
         self._warped = False
         self._victory_paid = False
+        self._looped = False
+        self._prev_area = self.env.unwrapped.area
         return obs
 
     def step(self, action):
@@ -602,12 +617,23 @@ class MarioProgressWrapper(Wrapper):
         # _prev_x_pos to 0 but env continues from death position)
         x_pos = info.get('x_pos', 0)
         x_delta = x_pos - self._prev_x_pos
+        area = base.area
+        # maze loop-back: teleported far backward, same sub-area, alive
+        if (self.loop_penalty > 0 and x_delta < -96
+                and area == self._prev_area
+                and not info.get('flag_get', False)):
+            reward -= self.loop_penalty
+            self._looped = True
+        self._prev_area = area
         if x_delta > 0:
             # pay only on NEW ground (beyond the episode max): re-running
-            # farmed ground after a maze loop-back must earn nothing
+            # farmed ground after a maze loop-back must earn nothing --
+            # and with backtrack_penalty it actively costs
             if x_pos > self._max_x_pos:
                 x_delta = min(x_delta, 20)  # cap to normal per-step movement
                 reward += x_delta * self.progress_reward * x_pos
+            else:
+                reward -= self.backtrack_penalty
             self._idle_steps = 0
         else:
             # Idle penalty: only after idle_threshold consecutive idle steps
@@ -622,6 +648,7 @@ class MarioProgressWrapper(Wrapper):
         info['progress_gain'] = self._progress - self._start_progress
         info['stages_cleared'] = self._stages_cleared
         info['warped'] = self._warped
+        info['looped'] = self._looped
 
         # Track x_pos within stage
         if x_pos > self._max_x_pos:
@@ -760,8 +787,8 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
                      episode_life=True, stage_bonus=500.0, idle_penalty=0.5,
                      idle_threshold=10, progress_reward=0.001, skip=4,
                      sticky_actions=0.0, random_stages=None, full_game=False,
-                     reset_noops=0, x_reward='delta', frame_only=False,
-                     **unknown):
+                     reset_noops=0, x_reward='delta', loop_penalty=0.0,
+                     backtrack_penalty=0.0, frame_only=False, **unknown):
     """Build the full Mario env wrapper chain. This is the single entry point
     used by training, evaluation, and the vecenv workers.
 
@@ -792,6 +819,8 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
         x_reward: 'delta' (gym_super_mario_bros x-delta) or 'highwater'
                   (only x beyond the per-life/level/area max pays; kills
                   the maze-loop reward treadmill)
+        loop_penalty: one-time penalty on a detected maze loop-back
+        backtrack_penalty: per-step cost for re-running covered ground
         frame_only: stop the chain after WarpFrame and return (84, 84, 1)
                     uint8 frames -- used by MarioVecEnv, which does the
                     scaling and 4-frame stacking master-side (16x less IPC)
@@ -814,7 +843,9 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
     env = MarioProgressWrapper(env, stage_bonus=stage_bonus,
                                idle_penalty=idle_penalty,
                                idle_threshold=idle_threshold,
-                               progress_reward=progress_reward)
+                               progress_reward=progress_reward,
+                               loop_penalty=loop_penalty,
+                               backtrack_penalty=backtrack_penalty)
     env = MaxAndSkipEnv(env, skip=skip)
     env = WarpFrame(env, width=84, height=84, grayscale=True)
     if frame_only:

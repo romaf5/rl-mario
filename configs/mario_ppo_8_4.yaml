@@ -21,7 +21,7 @@ params:
       activation: elu
       initializer: {name: orthogonal_initializer, gain: 1.41421356237}
   config:
-    name: Mario_84_HighWater
+    name: Mario_84_LoopPenalty
     env_name: mario
     score_to_win: 100000
     normalize_value: true
@@ -56,6 +56,8 @@ params:
       action_type: complex
       episode_life: true
       x_reward: highwater
+      loop_penalty: 30
+      backtrack_penalty: 0.15
       full_game: true
       stage_bonus: 500
       idle_penalty: 0.5
