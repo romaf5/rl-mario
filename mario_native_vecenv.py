@@ -154,6 +154,7 @@ class MarioNativeVecEnv(IVecEnv):
         # per-env python-side state
         z = lambda dt=np.int32: np.zeros(n, dtype=dt)
         self.x_last = z(); self.time_last = z(); self.hw = z()
+        self.x_pending = z()
         self.lives = z(); self.prev_flag = z(bool)
         self.progress = z(); self.pending = np.full(n, -1, np.int32)
         self.start_progress = z(); self.cleared = z()
@@ -253,7 +254,7 @@ class MarioNativeVecEnv(IVecEnv):
             x = int(r[0x6D]) * 256 + int(r[0x86])
             gp = min(max(int(r[0x75F]) * 4 + int(r[0x75C]), 0), 31)
             self.x_last[i] = x; self.prev_x[i] = 0; self.max_x[i] = 0
-            self.hw[i] = x
+            self.hw[i] = x; self.x_pending[i] = x
             self.time_last[i] = (int(r[0x7F8]) * 100 + int(r[0x7F9]) * 10
                                  + int(r[0x7FA]))
             self.lives[i] = int(r[0x75A])
@@ -317,10 +318,15 @@ class MarioNativeVecEnv(IVecEnv):
         ram = self.ram
 
         x = self._x(); t = self._time(); gp = self._gp()
-        # transition frames can leave garbage in the x page byte; no SMB
-        # level exceeds ~3800px, so treat larger readings as glitches and
-        # carry the previous x (self-corrects next block)
-        x = np.where(x > 4000, self.x_last, x)
+        # transition frames can leave garbage in the x page byte. A hard
+        # x>4000 cutoff is WRONG (8-4's post-water corridor runs to ~4830
+        # in the same coordinate frame); instead debounce: accept a
+        # teleport-scale jump only when it persists two consecutive steps.
+        raw = x
+        jump = np.abs(raw - self.x_last) > 600
+        confirm = np.abs(raw - self.x_pending) <= 64
+        x = np.where(jump & ~confirm, self.x_last, raw)
+        self.x_pending = raw
         life = self._field(0x75A); area = self._field(0x760)
         pstate = self._field(0x0E); yvp = self._field(0xB5)
         dying = (pstate == 0x0B) | (yvp > 1)
