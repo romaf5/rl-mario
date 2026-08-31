@@ -91,7 +91,8 @@ class MarioNativeVecEnv(IVecEnv):
                  self_restart_prob=0.0, self_restart_cells=96,
                  n_threads=32, seed=None, dense_infos=False,
                  novelty_y_band=48, score_reward=0.0,
-                 novelty_global=False, explore_eps=0.0, **unknown):
+                 novelty_global=False, explore_eps=0.0,
+                 archive_path=None, **unknown):
         assert action_type == 'complex'
         n = self.num_actors = num_actors
         self.lib = _Lib()
@@ -122,6 +123,8 @@ class MarioNativeVecEnv(IVecEnv):
         self.score_reward = score_reward
         self.novelty_global = novelty_global
         self.explore_eps = explore_eps
+        self.archive_path = archive_path
+        self._archive_dirty = 0
         self.novelty_counts = {}    # cross-episode cell visit counts
 
         self.rng = np.random.RandomState(seed)
@@ -151,6 +154,12 @@ class MarioNativeVecEnv(IVecEnv):
         # SHARED self-restart archive: all envs contribute and draw from one
         # pool (per-env archives dilute frontier discovery at large N)
         self.archive = {}                           # cell -> [state, uses]
+        if archive_path and os.path.exists(archive_path):
+            import pickle
+            with open(archive_path, 'rb') as f:
+                self.archive = pickle.load(f)
+            print(f'[archive] loaded {len(self.archive)} cells '
+                  f'from {archive_path}')
         self.ep_cells = [set() for _ in range(n)]
         self._sbuf = ctypes.create_string_buffer(self.state_size)
 
@@ -383,6 +392,20 @@ class MarioNativeVecEnv(IVecEnv):
                         del self.archive[worst]
                     self.lib.benv_save(self.env, int(i), self._sbuf)
                     self.archive[cell] = [bytes(self._sbuf.raw), 0]
+                    self._archive_dirty += 1
+                elif self.rng.random_sample() < 0.02:
+                    # refresh: stored states drift toward the current
+                    # visitation distribution (e.g. post-reveal variants)
+                    self.lib.benv_save(self.env, int(i), self._sbuf)
+                    self.archive[cell][0] = bytes(self._sbuf.raw)
+                    self._archive_dirty += 1
+        if (self.archive_path and self._archive_dirty >= 10):
+            self._archive_dirty = 0
+            import pickle
+            tmp = self.archive_path + '.tmp'
+            with open(tmp, 'wb') as f:
+                pickle.dump(self.archive, f)
+            os.replace(tmp, self.archive_path)
 
         # ---- dones ----
         game_over = life == 0xFF
@@ -460,7 +483,16 @@ class MarioNativeVecEnv(IVecEnv):
     def has_action_masks(self):
         return False
 
+    def _save_archive(self):
+        if self.archive_path and self.archive:
+            import pickle
+            tmp = self.archive_path + '.tmp'
+            with open(tmp, 'wb') as f:
+                pickle.dump(self.archive, f)
+            os.replace(tmp, self.archive_path)
+
     def close(self):
+        self._save_archive()
         self.lib.benv_destroy(self.env)
 
 

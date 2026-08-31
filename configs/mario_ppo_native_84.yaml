@@ -73,6 +73,7 @@ params:
       score_reward: 0.1
       novelty_global: true
       explore_eps: 0.05
+      archive_path: native/archive_84.pkl
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
     eval_env_config:
       backend: native
