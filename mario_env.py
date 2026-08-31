@@ -113,7 +113,8 @@ class RetroMarioEnv:
     reward_range = (-15, 15)
 
     def __init__(self, target=None, random_stages=None,
-                 actions=COMPLEX_MOVEMENT, full_game=False, reset_noops=0):
+                 actions=COMPLEX_MOVEMENT, full_game=False, reset_noops=0,
+                 x_reward='delta'):
         _register_integration()
         import stable_retro as retro
 
@@ -158,6 +159,13 @@ class RetroMarioEnv:
         self._cur = {}            # latest data.json variable values
         self._time_last = 0
         self._x_last = 0
+        # 'delta': gym_super_mario_bros x-delta reward. 'highwater': only x
+        # beyond the episode's previous max (per life/level/area) pays --
+        # kills the maze-loop reward treadmill (loop teleports Mario back
+        # with no penalty, so re-running farmed ground must earn nothing).
+        self._x_reward_mode = x_reward
+        self._x_highwater = 0
+        self._x_context = None    # (life, world, stage, area) rebase key
         self._noop_mask = np.zeros(len(_BUTTONS), dtype=np.uint8)
 
         # Fast path: step the emulator directly, bypassing RetroEnv.step()
@@ -274,8 +282,21 @@ class RetroMarioEnv:
 
     # -- reward (mirrors smb_env.py) -----------------------------------------
 
+    def _x_context_key(self):
+        c = self._cur
+        return (c['life'], c['world0'], c['stage0'], c['area0'])
+
     def _x_reward(self):
         x = self._x_position
+        if self._x_reward_mode == 'highwater':
+            key = self._x_context_key()
+            if key != self._x_context:  # death respawn / new level / area
+                self._x_context = key
+                self._x_highwater = x
+            reward = min(max(x - self._x_highwater, 0), 5)
+            self._x_highwater = max(self._x_highwater, x)
+            self._x_last = x
+            return reward
         reward = x - self._x_last
         self._x_last = x
         if reward < -5 or reward > 5:
@@ -348,6 +369,8 @@ class RetroMarioEnv:
             self._retro.initial_state = self._states['_']
         obs, _ = self._retro.reset()
         self._cur = dict(self._retro.data.lookup_all())
+        self._x_highwater = self._x_position
+        self._x_context = self._x_context_key()
         if self._reset_noops:
             # Idle 0..reset_noops frames: shifts the global frame counter so
             # enemy/firebar timing varies across episodes (anti-memorization).
@@ -562,6 +585,9 @@ class MarioProgressWrapper(Wrapper):
                 if delta <= self._MAX_PROGRESS_JUMP:
                     self._progress = p
                     self._stages_cleared += 1
+                    # new level: rebase within-stage x tracking
+                    self._max_x_pos = 0
+                    self._prev_x_pos = 0
                     if delta >= 2:
                         self._warped = True
                     if not single:
@@ -577,8 +603,11 @@ class MarioProgressWrapper(Wrapper):
         x_pos = info.get('x_pos', 0)
         x_delta = x_pos - self._prev_x_pos
         if x_delta > 0:
-            x_delta = min(x_delta, 20)  # cap to normal per-step movement
-            reward += x_delta * self.progress_reward * x_pos
+            # pay only on NEW ground (beyond the episode max): re-running
+            # farmed ground after a maze loop-back must earn nothing
+            if x_pos > self._max_x_pos:
+                x_delta = min(x_delta, 20)  # cap to normal per-step movement
+                reward += x_delta * self.progress_reward * x_pos
             self._idle_steps = 0
         else:
             # Idle penalty: only after idle_threshold consecutive idle steps
@@ -731,7 +760,8 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
                      episode_life=True, stage_bonus=500.0, idle_penalty=0.5,
                      idle_threshold=10, progress_reward=0.001, skip=4,
                      sticky_actions=0.0, random_stages=None, full_game=False,
-                     reset_noops=0, frame_only=False, **unknown):
+                     reset_noops=0, x_reward='delta', frame_only=False,
+                     **unknown):
     """Build the full Mario env wrapper chain. This is the single entry point
     used by training, evaluation, and the vecenv workers.
 
@@ -759,6 +789,9 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
                    transitions (flags, warps) until game over
         reset_noops: idle 0..N random frames after reset (varies enemy/
                      firebar timing across episodes; anti-memorization)
+        x_reward: 'delta' (gym_super_mario_bros x-delta) or 'highwater'
+                  (only x beyond the per-life/level/area max pays; kills
+                  the maze-loop reward treadmill)
         frame_only: stop the chain after WarpFrame and return (84, 84, 1)
                     uint8 frames -- used by MarioVecEnv, which does the
                     scaling and 4-frame stacking master-side (16x less IPC)
@@ -773,7 +806,7 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
     env = RetroMarioEnv(target=_parse_name(name),
                         random_stages=random_stages,
                         actions=actions, full_game=full_game,
-                        reset_noops=reset_noops)
+                        reset_noops=reset_noops, x_reward=x_reward)
     if sticky_actions > 0:
         env = StickyActionWrapper(env, p=sticky_actions)
     if episode_life:

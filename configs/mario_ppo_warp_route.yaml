@@ -82,6 +82,7 @@ params:
       name: SuperMarioBros-v0
       action_type: complex
       episode_life: True
+      x_reward: highwater
       full_game: True
       stage_bonus: 500
       idle_penalty: 0.5
