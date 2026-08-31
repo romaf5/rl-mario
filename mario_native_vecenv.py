@@ -241,6 +241,10 @@ class MarioNativeVecEnv(IVecEnv):
         ram = self.ram
 
         x = self._x(); t = self._time(); gp = self._gp()
+        # transition frames can leave garbage in the x page byte; no SMB
+        # level exceeds ~3800px, so treat larger readings as glitches and
+        # carry the previous x (self-corrects next block)
+        x = np.where(x > 4000, self.x_last, x)
         life = self._field(0x75A); area = self._field(0x760)
         pstate = self._field(0x0E); yvp = self._field(0xB5)
         dying = (pstate == 0x0B) | (yvp > 1)
