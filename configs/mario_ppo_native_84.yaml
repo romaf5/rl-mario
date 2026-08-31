@@ -72,6 +72,7 @@ params:
       novelty_y_band: 24
       score_reward: 0.1
       novelty_global: true
+      explore_eps: 0.05
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
     eval_env_config:
       backend: native

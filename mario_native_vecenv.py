@@ -91,7 +91,7 @@ class MarioNativeVecEnv(IVecEnv):
                  self_restart_prob=0.0, self_restart_cells=96,
                  n_threads=32, seed=None, dense_infos=False,
                  novelty_y_band=48, score_reward=0.0,
-                 novelty_global=False, **unknown):
+                 novelty_global=False, explore_eps=0.0, **unknown):
         assert action_type == 'complex'
         n = self.num_actors = num_actors
         self.lib = _Lib()
@@ -121,6 +121,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.novelty_y_band = novelty_y_band
         self.score_reward = score_reward
         self.novelty_global = novelty_global
+        self.explore_eps = explore_eps
         self.novelty_counts = {}    # cross-episode cell visit counts
 
         self.rng = np.random.RandomState(seed)
@@ -249,6 +250,11 @@ class MarioNativeVecEnv(IVecEnv):
     def step(self, actions):
         n = self.num_actors
         acts = np.asarray(actions).astype(np.int64).ravel()
+        if self.explore_eps > 0:
+            # permanent action-diversity floor: collapsed policy entropy
+            # otherwise closes the discovery window for rare moves
+            ex = self.rng.random_sample(n) < self.explore_eps
+            acts = np.where(ex, self.rng.randint(0, 12, size=n), acts)
         if self.sticky > 0:
             rep = self.rng.random_sample(n) < self.sticky
             acts = np.where(rep, self.last_action, acts)
