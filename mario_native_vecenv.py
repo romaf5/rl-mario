@@ -392,8 +392,12 @@ class MarioNativeVecEnv(IVecEnv):
         if self.sr_prob > 0:
             fstate = self._field(0x1D)
             can = (fstate == 0) & ~dying & ~dead & (gmode == 1) & (t > 100)
+            ypix_a = self._field(0x3B8)
             for i in np.nonzero(can)[0]:
-                cell = (self.start_stage[i], int(area[i]), int(x[i]) // 128)
+                # y-band in the key: standing ON a block/pipe is a different
+                # rung than the floor below it -- the ratchet needs rungs
+                cell = (self.start_stage[i], int(area[i]), int(x[i]) // 128,
+                        int(ypix_a[i]) // 64)
                 if cell in self.ep_cells[i]:
                     continue
                 self.ep_cells[i].add(cell)
