@@ -134,6 +134,9 @@ class MarioNativeVecEnv(IVecEnv):
         self.sr_frontier_k = self_restart_frontier_k
         self.explorer = np.zeros(num_actors, dtype=np.int32)
         self.exp_action = np.zeros(num_actors, dtype=np.int64)
+        self.ep_steps = np.zeros(num_actors, dtype=np.int32)
+        self.start_cell = [None] * num_actors
+        self.cell_early = {}
         self.novelty_counts = {}    # cross-episode cell visit counts
 
         self.rng = np.random.RandomState(seed)
@@ -221,6 +224,7 @@ class MarioNativeVecEnv(IVecEnv):
             self.lib.benv_load(self.env, i, ent[0])
             self.start_stage[i] = cell[0]
             self.was_restart[i] = True
+            self.start_cell[i] = cell
             # Go-Explore phase 1: some restart episodes flail randomly to
             # EXPAND the archive past what the policy can reach
             if self.rng.random_sample() < self.exp_ep_prob:
@@ -239,6 +243,7 @@ class MarioNativeVecEnv(IVecEnv):
                                          0, self.reset_noops + 1)), 0)
         self.ep_cells[i] = set()
         self.novelty_sets[i] = set()
+        self.ep_steps[i] = 0
 
     def _post_reset_init(self, idx, ram):
         """Re-init per-env python state for envs in idx from fresh RAM."""
@@ -495,6 +500,22 @@ class MarioNativeVecEnv(IVecEnv):
             })
 
         done = done_pre
+
+        # archive hygiene: a cell whose restarts mostly die within a few
+        # steps was saved in a doomed spot (e.g. mid enemy contact) - prune
+        self.ep_steps += 1
+        for i in np.nonzero(done)[0]:
+            cell = self.start_cell[i]
+            if cell is None or self.ep_steps[i] > 8:
+                continue
+            n_early = self.cell_early.get(cell, 0) + 1
+            self.cell_early[cell] = n_early
+            ent = self.archive.get(cell)
+            if (ent is not None and n_early >= 12
+                    and n_early > 0.5 * max(ent[1], 1)):
+                del self.archive[cell]
+                del self.cell_early[cell]
+                self._archive_dirty += 1
 
         # frame stack (ring)
         f = self.obs_u8.astype(np.float32) / 255.0
