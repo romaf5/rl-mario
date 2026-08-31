@@ -1,0 +1,75 @@
+# Overnight full warp-route run: all 8 route levels, full-game mode,
+# per-stage curriculum, and the complete knowledge-free toolbox
+# (highwater x, loop/backtrack penalties, novelty, self-restarts with
+# frontier bias). Eval = sequential full game from 1-1 (the real goal).
+params:
+  seed: 42
+  algo: {name: a2c_discrete}
+  model: {name: discrete_a2c}
+  network:
+    name: actor_critic
+    separate: false
+    space: {discrete: null}
+    cnn:
+      type: conv2d
+      activation: elu
+      initializer: {name: orthogonal_initializer, gain: 1.41421356237}
+      convs:
+      - {filters: 32, kernel_size: 8, strides: 4, padding: 0}
+      - {filters: 64, kernel_size: 4, strides: 2, padding: 0}
+      - {filters: 64, kernel_size: 3, strides: 1, padding: 0}
+    mlp:
+      units: [512]
+      activation: elu
+      initializer: {name: orthogonal_initializer, gain: 1.41421356237}
+  config:
+    name: Mario_WarpRoute_Overnight
+    env_name: mario
+    score_to_win: 100000
+    normalize_value: true
+    normalize_input: false
+    reward_shaper: {scale_value: 1.0}
+    normalize_advantage: true
+    gamma: 0.995
+    tau: 0.95
+    learning_rate: 0.00025
+    lr_schedule: adaptive
+    kl_threshold: 0.008
+    grad_norm: 0.5
+    entropy_coef: 0.02
+    truncate_grads: true
+    e_clip: 0.1
+    clip_value: true
+    num_actors: 48
+    horizon_length: 256
+    minibatch_size: 3072
+    mini_epochs: 4
+    critic_coef: 0.5
+    max_epochs: 5000
+    use_diagnostics: true
+    save_frequency: 250
+    save_best_after: 250
+    print_stats: true
+    device: cuda:0
+    multi_gpu: false
+    stage_curriculum_freq: 20
+    env_config:
+      name: SuperMarioBros-v0
+      action_type: complex
+      episode_life: true
+      x_reward: highwater
+      full_game: true
+      stage_bonus: 500
+      idle_penalty: 0.5
+      idle_threshold: 10
+      progress_reward: 0.001
+      skip: 4
+      sticky_actions: 0.05
+      reset_noops: 30
+      random_stages: [1-1, 1-2, 4-1, 4-2, 8-1, 8-2, 8-3, 8-4]
+      loop_penalty: 30
+      backtrack_penalty: 0.15
+      novelty_bonus: 0.5
+      self_restart_prob: 0.35
+      self_restart_cells: 256
+    player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}

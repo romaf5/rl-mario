@@ -384,7 +384,11 @@ class RetroMarioEnv:
         # self-restart: resume from one of THIS env's own archived states
         if (self.self_restart_prob > 0 and self._archive
                 and self._rng.random_sample() < self.self_restart_prob):
-            cell = min(self._archive, key=lambda c: self._archive[c][1])
+            if self._rng.random_sample() < 0.5:
+                # frontier bias: practice the deepest known cell
+                cell = max(self._archive, key=lambda c: c[2])
+            else:
+                cell = min(self._archive, key=lambda c: self._archive[c][1])
             entry = self._archive[cell]
             entry[1] += 1
             self._em.set_state(entry[0])
