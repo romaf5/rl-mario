@@ -17,6 +17,7 @@ from rl_games.torch_runner import Runner
 
 from mario_env import create_mario_env
 from mario_vecenv import register_mario_vecenv
+from mario_native_vecenv import register_mario_native_vecenv
 from callbacks import MarioObserver
 
 
@@ -24,8 +25,13 @@ def register_mario_env():
     """Register the Mario env config and vecenv type with rl_games.
     Both must be registered before Runner.load()."""
     register_mario_vecenv()
+    register_mario_native_vecenv()
     env_configurations.register('mario', {
         'vecenv_type': 'MARIO',
+        'env_creator': lambda **kwargs: create_mario_env(**kwargs),
+    })
+    env_configurations.register('mario_native', {
+        'vecenv_type': 'MARIO_NATIVE',
         'env_creator': lambda **kwargs: create_mario_env(**kwargs),
     })
 
