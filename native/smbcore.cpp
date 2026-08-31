@@ -31,6 +31,11 @@ struct Ppu {
     bool nmi_out = false;
     int pending = 0;                // dots not yet applied (lazy catch-up)
     int next_event = 0;             // dots until nearest scheduled event
+    // scroll snapshots for frame rendering (SMB status-bar raster split):
+    // (scanline, t, fine_x, ctrl) captured at each $2000/$2005/$2006 write
+    struct Scroll { int line; uint16_t t; uint8_t fx, ctrl; };
+    Scroll slog[16];
+    int slog_n = 0;
 };
 
 struct Core {
@@ -127,6 +132,9 @@ void write8(Core& c, uint16_t addr, uint8_t val) {
                 if (!was && (val & 0x80) && (c.ppu.status & 0x80))
                     c.cpu.nmi_pending = true;
                 c.ppu.t = (uint16_t)((c.ppu.t & 0xF3FF) | ((val & 3) << 10));
+                if (c.ppu.slog_n < 16)
+                    c.ppu.slog[c.ppu.slog_n++] = {c.ppu.scanline, c.ppu.t,
+                                                  c.ppu.fine_x, c.ppu.ctrl};
                 return;
             }
             case 1: c.ppu.mask = val; return;
@@ -141,6 +149,9 @@ void write8(Core& c, uint16_t addr, uint8_t val) {
                               | ((val & 0xF8) << 2) | ((val & 7) << 12));
                 }
                 c.ppu.latch = !c.ppu.latch;
+                if (!c.ppu.latch && c.ppu.slog_n < 16)
+                    c.ppu.slog[c.ppu.slog_n++] = {c.ppu.scanline, c.ppu.t,
+                                                  c.ppu.fine_x, c.ppu.ctrl};
                 return;
             case 6:
                 if (!c.ppu.latch)
@@ -149,6 +160,9 @@ void write8(Core& c, uint16_t addr, uint8_t val) {
                 else {
                     c.ppu.t = (uint16_t)((c.ppu.t & 0xFF00) | val);
                     c.ppu.v = c.ppu.t;
+                    if (c.ppu.slog_n < 16)
+                        c.ppu.slog[c.ppu.slog_n++] = {c.ppu.scanline, c.ppu.t,
+                                                      c.ppu.fine_x, c.ppu.ctrl};
                 }
                 c.ppu.latch = !c.ppu.latch;
                 return;
@@ -485,6 +499,7 @@ void ppu_apply(Core& c, int dots) {
                 u.status &= 0x1F;
             } else if (idx == FRAME_MARK) {
                 u.frame++;
+                u.slog_n = 0;
             }
             if (s0 >= 0 && idx == s0) u.status |= 0x40;
         }
@@ -514,6 +529,118 @@ void ppu_sync(Core& c) {
         c.ppu.pending = 0;
         ppu_apply(c, p);
     }
+}
+
+
+// ---------------------------------------------------------------- renderer
+// NES 2C02 palette -> grayscale (BT.601 luma of the canonical palette)
+static const uint8_t GRAY_LUT[64] = {
+     96,  25,  16,  49,  36,  38,  33,  23,  27,  32,  38,  32,  27,   0,   0,   0,
+    158,  77,  74, 110,  92, 100,  99,  81,  81,  86, 101,  87,  79,   0,   0,   0,
+    239, 148, 141, 168, 154, 166, 172, 160, 152, 148, 164, 155, 150,  60,   0,   0,
+    239, 200, 195, 202, 195, 200, 204, 203, 199, 194, 201, 199, 197, 154,   0,   0,
+};
+
+inline uint8_t bg_color_gray(Core& c) {
+    return GRAY_LUT[c.ppu.palette[0] & 0x3F];
+}
+
+// render one full frame to 256x240 gray using the scroll snapshot log,
+// then crop to the reference view (240x224: 8px off each edge)
+void render_gray(Core& c, uint8_t* out /*240*224*/) {
+    Ppu& u = c.ppu;
+    static thread_local uint8_t fb[256 * 240];
+    uint8_t ubg = bg_color_gray(c);
+    if (!(u.mask & 0x08)) {
+        memset(fb, ubg, sizeof(fb));
+    } else {
+        int si = 0;
+        // state at frame start: earliest snapshot from pre-render/NMI writes
+        uint16_t st = u.slog_n ? u.slog[0].t : u.t;
+        uint8_t sfx = u.slog_n ? u.slog[0].fx : u.fine_x;
+        uint8_t sctrl = u.slog_n ? u.slog[0].ctrl : u.ctrl;
+        for (int y = 0; y < 240; y++) {
+            while (si < u.slog_n && u.slog[si].line <= y) {
+                st = u.slog[si].t; sfx = u.slog[si].fx;
+                sctrl = u.slog[si].ctrl; si++;
+            }
+            int coarse_x = st & 0x1F;
+            int nt_x = (st >> 10) & 1;
+            int scroll_x = ((nt_x * 256) + (coarse_x * 8) + sfx) & 0x1FF;
+            int coarse_y = (st >> 5) & 0x1F;
+            int fine_y = (st >> 12) & 7;
+            int nt_y = (st >> 11) & 1;
+            int scroll_y = ((nt_y * 240) + (coarse_y * 8) + fine_y) % 480;
+            int sy = (scroll_y + y) % 480;
+            int row_nt = (sy >= 240);
+            int ry = sy % 240;
+            int tile_row = ry >> 3, py = ry & 7;
+            uint16_t bg_base = (sctrl & 0x10) ? 0x1000 : 0x0000;
+            uint8_t* line = fb + y * 256;
+            for (int x = 0; x < 256; ) {
+                int sx = (scroll_x + x) & 0x1FF;
+                int col_nt = (sx >= 256);
+                int rx = sx & 0xFF;
+                int tile_col = rx >> 3, px = rx & 7;
+                int nt = (col_nt ^ row_nt) ? 0 : 0;  // placeholder
+                // nametable index: horizontal from col_nt, vertical mirroring
+                nt = col_nt;
+                uint16_t nt_addr = (uint16_t)(nt * 0x400
+                                   + tile_row * 32 + tile_col);
+                uint8_t tid = u.vram[nt_addr];
+                uint8_t at = u.vram[nt * 0x400 + 0x3C0
+                                    + (tile_row >> 2) * 8 + (tile_col >> 2)];
+                int shift = ((tile_row & 2) << 1) | (tile_col & 2);
+                uint8_t pal = (at >> shift) & 3;
+                const uint8_t* pat = u.chr + bg_base + tid * 16 + py;
+                uint8_t lo = pat[0], hi = pat[8];
+                int n = 8 - px;
+                if (n > 256 - x) n = 256 - x;
+                for (int k = 0; k < n; k++) {
+                    int bit = 7 - (px + k);
+                    uint8_t ci = (uint8_t)(((lo >> bit) & 1)
+                                 | (((hi >> bit) & 1) << 1));
+                    line[x + k] = ci ? GRAY_LUT[u.palette[pal * 4 + ci] & 0x3F]
+                                     : ubg;
+                }
+                x += n;
+            }
+        }
+    }
+    // sprites (8x8; all 64, no 8-per-line limit; SMB never uses 8x16)
+    if (u.mask & 0x10) {
+        uint16_t sp_base = (u.ctrl & 0x08) ? 0x1000 : 0x0000;
+        for (int s = 63; s >= 0; s--) {
+            uint8_t sy = u.oam[s * 4 + 0];
+            if (sy >= 0xEF) continue;
+            uint8_t tid = u.oam[s * 4 + 1];
+            uint8_t attr = u.oam[s * 4 + 2];
+            uint8_t sx = u.oam[s * 4 + 3];
+            uint8_t pal = 4 + (attr & 3);
+            bool behind = attr & 0x20, fh = attr & 0x40, fv = attr & 0x80;
+            for (int row = 0; row < 8; row++) {
+                int y = sy + 1 + row;
+                if (y >= 240) break;
+                int pr = fv ? 7 - row : row;
+                const uint8_t* pat = u.chr + sp_base + tid * 16 + pr;
+                uint8_t lo = pat[0], hi = pat[8];
+                uint8_t* line = fb + y * 256;
+                for (int k = 0; k < 8; k++) {
+                    int x = sx + k;
+                    if (x >= 256) break;
+                    int bit = fh ? k : 7 - k;
+                    uint8_t ci = (uint8_t)(((lo >> bit) & 1)
+                                 | (((hi >> bit) & 1) << 1));
+                    if (!ci) continue;
+                    if (behind && line[x] != ubg) continue;
+                    line[x] = GRAY_LUT[u.palette[pal * 4 + ci] & 0x3F];
+                }
+            }
+        }
+    }
+    // crop 256x240 -> 240x224 (8px off left/right, 8 off top/bottom)
+    for (int y = 0; y < 224; y++)
+        memcpy(out + y * 240, fb + (y + 8) * 256 + 8, 240);
 }
 
 }  // namespace
@@ -554,6 +681,9 @@ void smb_frame(Core* c, uint8_t buttons) {
 }
 
 uint8_t* smb_ram(Core* c) { return c->ram; }
+
+// render current frame to 240x224 grayscale (caller buffer)
+void smb_render(Core* c, uint8_t* out) { render_gray(*c, out); }
 uint8_t* smb_oam(Core* c) { return c->ppu.oam; }
 uint8_t* smb_vram(Core* c) { return c->ppu.vram; }
 
