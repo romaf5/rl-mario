@@ -74,6 +74,7 @@ params:
       novelty_global: true
       explore_eps: 0.05
       archive_path: native/archive_84.pkl
+      explore_episode_prob: 0.25
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
     eval_env_config:
       backend: native

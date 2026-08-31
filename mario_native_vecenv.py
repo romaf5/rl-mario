@@ -92,7 +92,8 @@ class MarioNativeVecEnv(IVecEnv):
                  n_threads=32, seed=None, dense_infos=False,
                  novelty_y_band=48, score_reward=0.0,
                  novelty_global=False, explore_eps=0.0,
-                 archive_path=None, **unknown):
+                 archive_path=None, explore_episode_prob=0.0,
+                 explore_episode_steps=150, **unknown):
         assert action_type == 'complex'
         n = self.num_actors = num_actors
         self.lib = _Lib()
@@ -125,6 +126,9 @@ class MarioNativeVecEnv(IVecEnv):
         self.explore_eps = explore_eps
         self.archive_path = archive_path
         self._archive_dirty = 0
+        self.exp_ep_prob = explore_episode_prob
+        self.exp_ep_steps = explore_episode_steps
+        self.explorer = np.zeros(num_actors, dtype=np.int32)
         self.novelty_counts = {}    # cross-episode cell visit counts
 
         self.rng = np.random.RandomState(seed)
@@ -203,6 +207,10 @@ class MarioNativeVecEnv(IVecEnv):
             self.lib.benv_load(self.env, i, ent[0])
             self.start_stage[i] = cell[0]
             self.was_restart[i] = True
+            # Go-Explore phase 1: some restart episodes flail randomly to
+            # EXPAND the archive past what the policy can reach
+            if self.rng.random_sample() < self.exp_ep_prob:
+                self.explorer[i] = self.exp_ep_steps
         else:
             if self.stage_weights is not None:
                 s = self.stages[self.rng.choice(len(self.stages),
@@ -259,6 +267,10 @@ class MarioNativeVecEnv(IVecEnv):
     def step(self, actions):
         n = self.num_actors
         acts = np.asarray(actions).astype(np.int64).ravel()
+        exp_mask = self.explorer > 0
+        if exp_mask.any():
+            acts = np.where(exp_mask, self.rng.randint(0, 12, size=n), acts)
+            self.explorer = np.maximum(self.explorer - 1, 0)
         if self.explore_eps > 0:
             # permanent action-diversity floor: collapsed policy entropy
             # otherwise closes the discovery window for rare moves
