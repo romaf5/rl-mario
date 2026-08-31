@@ -70,6 +70,7 @@ params:
       n_threads: 16
       self_restart_cells: 128
       novelty_y_band: 24
+      score_reward: 0.1
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
     eval_env_config:
       backend: native

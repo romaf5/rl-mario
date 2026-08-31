@@ -90,7 +90,7 @@ class MarioNativeVecEnv(IVecEnv):
                  loop_penalty=0.0, backtrack_penalty=0.0, novelty_bonus=0.0,
                  self_restart_prob=0.0, self_restart_cells=96,
                  n_threads=32, seed=None, dense_infos=False,
-                 novelty_y_band=48, **unknown):
+                 novelty_y_band=48, score_reward=0.0, **unknown):
         assert action_type == 'complex'
         n = self.num_actors = num_actors
         self.lib = _Lib()
@@ -118,6 +118,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.sr_cells = self_restart_cells
         self.dense_infos = dense_infos
         self.novelty_y_band = novelty_y_band
+        self.score_reward = score_reward
 
         self.rng = np.random.RandomState(seed)
         self.obs_u8 = np.zeros((n, 84, 84), dtype=np.uint8)
@@ -141,6 +142,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.prev_area = z(); self.last_action = z()
         self.start_stage = [''] * n
         self.was_restart = z(bool)
+        self.prev_score = np.zeros(n, dtype=np.int64)
         self.novelty_sets = [set() for _ in range(n)]
         # SHARED self-restart archive: all envs contribute and draw from one
         # pool (per-env archives dilute frontier discovery at large N)
@@ -158,6 +160,10 @@ class MarioNativeVecEnv(IVecEnv):
     def _time(self):
         return (self._field(0x7F8) * 100 + self._field(0x7F9) * 10
                 + self._field(0x7FA))
+
+    def _score(self):
+        d = self.ram[:, 0x7DD:0x7E3].astype(np.int64)
+        return (d * np.array([100000, 10000, 1000, 100, 10, 1])).sum(axis=1)
 
     def _gp(self):
         return np.clip(self._field(0x75F) * 4 + self._field(0x75C), 0, 31)
@@ -210,6 +216,9 @@ class MarioNativeVecEnv(IVecEnv):
             self.time_last[i] = (int(r[0x7F8]) * 100 + int(r[0x7F9]) * 10
                                  + int(r[0x7FA]))
             self.lives[i] = int(r[0x75A])
+            d6 = r[0x7DD:0x7E3].astype(np.int64)
+            self.prev_score[i] = int((d6 * np.array(
+                [100000, 10000, 1000, 100, 10, 1])).sum())
             self.prev_flag[i] = False
             self.progress[i] = gp; self.start_progress[i] = gp
             self.pending[i] = -1; self.cleared[i] = 0
@@ -277,6 +286,14 @@ class MarioNativeVecEnv(IVecEnv):
         reward = np.clip(r_x + r_t + r_death, -15, 20)
         self.x_last = x
         self.time_last = t
+
+        # ---- score reward: the game's own signal (coins, stomps, blocks;
+        # notably the hidden-block reveal pays +200) ----
+        if self.score_reward > 0:
+            sc = self._score()
+            ds = np.clip(sc - self.prev_score, 0, 2000)
+            reward = reward + ds * self.score_reward
+            self.prev_score = sc
 
         # ---- progress bonus (debounced, monotonic, jump-capped) ----
         inc = gp > self.progress
