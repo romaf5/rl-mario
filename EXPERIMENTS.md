@@ -38,4 +38,21 @@
 | 84_LoopPenalty | +loop −30 / backtrack −0.15 | 626 | looping worthless but wall unchanged; loop_rate 0.97 |
 | 84_Novelty | +episodic novelty 0.5 | 251 | wall unchanged — per-episode novelty has no cross-episode push |
 | 84_SelfRestart | +restarts from own states 0.3 | 700 | **wall broken at ep 118** (best x 3847); consolidation stalled at 7–16% |
-| WarpRoute_Overnight | all 8 route levels, frontier-biased restarts, sticky 0.05 | 5000 | running |
+| WarpRoute_Overnight | all 8 route levels, frontier-biased restarts, sticky 0.05 | 20 | shm pipe race froze it at the first curriculum broadcast (fixed) |
+
+## Run log (native stack, overnight 2026-08-31)
+
+| run | change vs previous | epochs | outcome |
+|---|---|---|---|
+| Native84 v1/v2 | native stack; v2 +shared archive | 900/550 | ~0% past-wall: sticky 0.05 (untested bundle) + per-env archives |
+| Native84 v3 | sticky back to 0.1 | 890 | best 2607, ~1% -- still weak: block-granularity novelty |
+| Native84 v4 | novelty band 24, bonus 1.0; native eval | 730 | "100% past-wall" -- exposed as a RESTART-START ARTIFACT: from-door reveal rate 2/56, conversions 0/56 |
+| Native84 v5 | soft least-practiced restarts; door-only frontier metrics | running | watch mario/door_max_x |
+| NativeRoute | 8 levels, curriculum, full toolbox | 2400+ | entry levels clear 33-52%; 8-1 ticking; NO warps yet; eval was undersold ~2x by cross-renderer shift (fixed via native eval adapter) |
+
+## Lessons
+- Metrics must separate from-door and from-restart episodes (mario/door_*).
+- Frontier-biased restarts push frontiers; BRIDGING needs uniform cell
+  coverage -- match restart selection to which problem you have.
+- Eval must use the training renderer; argmax eval understates (use
+  sampled T~0.7 probes for ground truth).
