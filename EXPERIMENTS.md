@@ -47,8 +47,13 @@
 | Native84 v1/v2 | native stack; v2 +shared archive | 900/550 | ~0% past-wall: sticky 0.05 (untested bundle) + per-env archives |
 | Native84 v3 | sticky back to 0.1 | 890 | best 2607, ~1% -- still weak: block-granularity novelty |
 | Native84 v4 | novelty band 24, bonus 1.0; native eval | 730 | "100% past-wall" -- exposed as a RESTART-START ARTIFACT: from-door reveal rate 2/56, conversions 0/56 |
-| Native84 v5 | soft least-practiced restarts; door-only frontier metrics | running | watch mario/door_max_x |
-| NativeRoute | 8 levels, curriculum, full toolbox | 2400+ | entry levels clear 33-52%; 8-1 ticking; NO warps yet; eval was undersold ~2x by cross-renderer shift (fixed via native eval adapter) |
+| Native84 v5 | soft least-practiced restarts; door-only frontier metrics | 400 | door_max ~2570; reveals happen from restarts only |
+| Native84 v6-v8 | novelty bonus 3.0; score_reward 0.1; explore_eps 0.05 | ~400 ea | fresh runs kept re-losing archive capital: 0 organic climb chains |
+| Native84 v9 | persistent archive (native/archive_84.pkl) + explorer episodes 0.25 | 500 | capital kept, but on-block cells collided with floor cells |
+| Native84 v11 | height-aware cell keys (ypix//64 in key) | 657 | **BREAKTHROUGH: archive ratcheted x-cell 18→30** (x≈3840, post-pipe corridor); door_max still ~2588 |
+| Native84 v12 | +swim flag in cell key (water≠door collision fix) | running | watch: water cells appearing, door_max >2600 |
+| NativeRoute v1 | 8 levels, curriculum, full toolbox | 2900 | clears: 1-1 59% 4-1 58% 8-1 52% 1-2 48% 4-2 37%; NO warps; eval undersold ~2x by cross-renderer shift (fixed: native eval adapter) |
+| NativeRoute v2 | native eval + full toolbox refresh | running | rewards recovering (3.3k) |
 
 ## Lessons
 - Metrics must separate from-door and from-restart episodes (mario/door_*).
