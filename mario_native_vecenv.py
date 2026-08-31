@@ -138,6 +138,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.start_cell = [None] * num_actors
         self.cell_early = {}
         self._novelty_tick = 0
+        self.nongame = np.zeros(num_actors, dtype=np.int32)
         self.novelty_counts = {}    # cross-episode cell visit counts
 
         self.rng = np.random.RandomState(seed)
@@ -273,6 +274,7 @@ class MarioNativeVecEnv(IVecEnv):
             self.vic_paid[i] = False
             self.idle[i] = 0
             self.idle_paid[i] = 0.0
+            self.nongame[i] = 0
             self.prev_area[i] = int(r[0x760])
 
     # ------------------------------------------------------------- IVecEnv
@@ -496,10 +498,15 @@ class MarioNativeVecEnv(IVecEnv):
 
         # ---- dones ----
         game_over = life == 0xFF
+        # zombie guard: an env stuck outside normal gameplay (post-ending
+        # screens, title/attract after a missed terminal) never comes back
+        # on its own -- force a reset after 8 consecutive non-game steps
+        self.nongame = np.where(gmode == 1, 0, self.nongame + 1)
+        zombie = self.nongame >= 8
         if self.single_stage:
-            real_done = dying | dead | flag
+            real_done = dying | dead | flag | zombie
         else:
-            real_done = game_over | victory
+            real_done = game_over | victory | zombie
         life_lost = (life < self.lives) & (life > 0)
         self.lives = life
 

@@ -88,7 +88,11 @@ inline int game_time(Core& c) {
     return c.ram[0x7F8] * 100 + c.ram[0x7F9] * 10 + c.ram[0x7FA];
 }
 
-void frame_hacks(Core& c, bool single_stage) {
+// returns true if a skip loop exhausted its budget without reaching
+// normal gameplay -- the game is in a terminal screen (e.g. the ending
+// after the final axe) and further per-step skipping would burn 5000
+// frames forever; the caller latches post_game and stops hacking.
+bool frame_hacks(Core& c, bool single_stage) {
     // kill mario during the dying animation
     if (is_dying(c)) {
         c.ram[0x0E] = 0x06;
@@ -98,6 +102,7 @@ void frame_hacks(Core& c, bool single_stage) {
         int t = game_time(c);
         for (int i = 0; i < 5000 && game_time(c) == t; i++)
             smb_frame(&c, 0);
+        if (game_time(c) == t && is_world_over(c)) return true;
     }
     uint8_t timer = c.ram[0x6DE];              // skip area-change animation
     if (timer > 1 && timer < 255) c.ram[0x6DE] = 1;
@@ -106,13 +111,16 @@ void frame_hacks(Core& c, bool single_stage) {
             c.ram[0x7A0] = 0;
             smb_frame(&c, 0);
         }
+        if (is_busy(c) || is_world_over(c)) return true;
     }
+    return false;
 }
 
 struct BatchEnv {
     int n = 0;
     bool single_stage = false;
     std::vector<Core*> cores;
+    std::vector<uint8_t> post_game;   // per-env: terminal screen latched
     // threadpool
     std::vector<std::thread> threads;
     std::mutex mu;
@@ -153,7 +161,8 @@ struct BatchEnv {
         static thread_local uint8_t fa[W * H], fb2[W * H], mx[W * H];
         for (int k = 0; k < 4; k++) {
             smb_frame(c, b);
-            frame_hacks(*c, single_stage);
+            if (!post_game[i] && frame_hacks(*c, single_stage))
+                post_game[i] = 1;
             if (k == 2) render_gray(*c, fa);
             if (k == 3) render_gray(*c, fb2);
         }
@@ -173,6 +182,7 @@ BatchEnv* benv_create(const uint8_t* rom, int rom_len, int n, int n_threads,
     BatchEnv* e = new BatchEnv();
     e->n = n;
     e->single_stage = single_stage;
+    e->post_game.assign(n, 0);
     for (int i = 0; i < n; i++) e->cores.push_back(smb_create(rom, rom_len));
     for (int t = 0; t < n_threads; t++)
         e->threads.emplace_back([e]{ e->worker(); });
@@ -211,6 +221,7 @@ int benv_state_size(void) { return smb_state_size(); }
 void benv_save(BatchEnv* e, int i, uint8_t* out) { smb_save(e->cores[i], out); }
 void benv_load(BatchEnv* e, int i, const uint8_t* in) {
     smb_load(e->cores[i], in);
+    e->post_game[i] = 0;
 }
 void benv_frames(BatchEnv* e, int i, int nframes, int buttons) {
     for (int k = 0; k < nframes; k++)
