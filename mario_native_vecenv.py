@@ -406,9 +406,11 @@ class MarioNativeVecEnv(IVecEnv):
             ypix_a = self._field(0x3B8)
             swim_a = self.ram[:, 0x704].astype(np.int32)
             # grounded on land; swimming counts as controlled in water
-            # (float_state never returns to 0 while afloat)
+            # (float_state never returns to 0 while afloat). Timer floor
+            # stays low: chains reach deep cells with little time left,
+            # and a state with ~25s is still a practiceable episode.
             can = (((fstate == 0) | (swim_a == 1)) & ~dying & ~dead
-                   & (gmode == 1) & (t > 100))
+                   & (gmode == 1) & (t > 25))
             for i in np.nonzero(can)[0]:
                 # y-band in the key: standing ON a block/pipe is a different
                 # rung than the floor below it; swim flag disambiguates the
@@ -424,14 +426,17 @@ class MarioNativeVecEnv(IVecEnv):
                                     key=lambda c: self.archive[c][1])
                         del self.archive[worst]
                     self.lib.benv_save(self.env, int(i), self._sbuf)
-                    self.archive[cell] = [bytes(self._sbuf.raw), 0]
+                    self.archive[cell] = [bytes(self._sbuf.raw), 0, int(t[i])]
                     self._archive_dirty += 1
                 elif self.rng.random_sample() < 0.02:
                     # refresh: stored states drift toward the current
-                    # visitation distribution (e.g. post-reveal variants)
-                    self.lib.benv_save(self.env, int(i), self._sbuf)
-                    self.archive[cell][0] = bytes(self._sbuf.raw)
-                    self._archive_dirty += 1
+                    # visitation distribution (e.g. post-reveal variants),
+                    # but never downgrade to a more timer-doomed state
+                    ent = self.archive[cell]
+                    if len(ent) < 3 or int(t[i]) >= ent[2]:
+                        self.lib.benv_save(self.env, int(i), self._sbuf)
+                        ent[:] = [bytes(self._sbuf.raw), ent[1], int(t[i])]
+                        self._archive_dirty += 1
         if (self.archive_path and self._archive_dirty >= 10):
             self._archive_dirty = 0
             import pickle
