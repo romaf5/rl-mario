@@ -216,7 +216,12 @@ class MarioNativeVecEnv(IVecEnv):
             cells = list(self.archive.keys())
             if (self.sr_frontier_prob > 0
                     and self.rng.random_sample() < self.sr_frontier_prob):
-                cells = cells[-self.sr_frontier_k:]
+                # frontier = the K least-practiced cells (a new cell has 0
+                # uses by construction and stays in until it is practiced;
+                # insertion recency ages out under churn)
+                cells = sorted(cells,
+                               key=lambda c: self.archive[c][1]
+                               )[:self.sr_frontier_k]
                 cell = cells[self.rng.randint(len(cells))]
             else:
                 w = np.array([1.0 / (1 + self.archive[c][1]) for c in cells])
