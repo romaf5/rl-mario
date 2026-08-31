@@ -221,16 +221,14 @@ class MarioNativeVecEnv(IVecEnv):
             cells = list(self.archive.keys())
             if (self.sr_frontier_prob > 0
                     and self.rng.random_sample() < self.sr_frontier_prob):
-                # backward-chaining frontier: prefer cells PROVEN to
-                # convert (1+ wins) but not yet consolidated (<10) -- a
-                # small hot set gets dense practice; as cells graduate,
-                # the next ring outward starts converting and enters the
-                # band. Fall back to unconsolidated, then all.
-                cand = [c for c in cells
-                        if 1 <= self.cell_wins.get(c, 0) < 10]
-                if not cand:
-                    cand = [c for c in cells
-                            if self.cell_wins.get(c, 0) < 10] or cells
+                # backward-chaining frontier: cells PROVEN to convert
+                # (1+ wins), least-practiced first. Newly-winning
+                # outer-ring cells have the fewest uses so they dominate
+                # draws -- the band marches outward on its own; heavily
+                # consolidated inner cells fade without any graduation
+                # threshold (a cap here starved the pipeline: v24).
+                cand = ([c for c in cells if self.cell_wins.get(c, 0) >= 1]
+                        or cells)
                 cand = sorted(cand,
                               key=lambda c: self.archive[c][1]
                               )[:self.sr_frontier_k]
