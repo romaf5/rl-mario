@@ -1,5 +1,3 @@
-# 8-4 on the NATIVE core: 128 envs, 16 threads (sharing the box with
-# the retro overnight run), full knowledge-free toolbox.
 params:
   seed: 42
   algo: {name: a2c_discrete}
@@ -70,6 +68,7 @@ params:
       random_stages: [8-4]
       self_restart_prob: 0.3
       n_threads: 16
+      self_restart_cells: 128
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
     eval_env_config:
       random_stages: [8-4]

@@ -137,7 +137,9 @@ class MarioNativeVecEnv(IVecEnv):
         self.start_stage = [''] * n
         self.was_restart = z(bool)
         self.novelty_sets = [set() for _ in range(n)]
-        self.archives = [{} for _ in range(n)]      # cell -> [state, uses]
+        # SHARED self-restart archive: all envs contribute and draw from one
+        # pool (per-env archives dilute frontier discovery at large N)
+        self.archive = {}                           # cell -> [state, uses]
         self.ep_cells = [set() for _ in range(n)]
         self._sbuf = ctypes.create_string_buffer(self.state_size)
 
@@ -164,14 +166,14 @@ class MarioNativeVecEnv(IVecEnv):
     def _reset_env(self, i, first=False):
         # self-restart from own archive?
         self.was_restart[i] = False
-        if (self.sr_prob > 0 and self.archives[i]
+        if (self.sr_prob > 0 and self.archive
                 and self.rng.random_sample() < self.sr_prob):
             if self.rng.random_sample() < 0.5:
-                cell = max(self.archives[i], key=lambda c: c[2])
+                cell = max(self.archive, key=lambda c: c[2])
             else:
-                cell = min(self.archives[i],
-                           key=lambda c: self.archives[i][c][1])
-            ent = self.archives[i][cell]
+                cell = min(self.archive,
+                           key=lambda c: self.archive[c][1])
+            ent = self.archive[cell]
             ent[1] += 1
             self.lib.benv_load(self.env, i, ent[0])
             self.start_stage[i] = cell[0]
@@ -329,13 +331,13 @@ class MarioNativeVecEnv(IVecEnv):
                 if cell in self.ep_cells[i]:
                     continue
                 self.ep_cells[i].add(cell)
-                if cell not in self.archives[i]:
-                    if len(self.archives[i]) >= self.sr_cells:
-                        worst = max(self.archives[i],
-                                    key=lambda c: self.archives[i][c][1])
-                        del self.archives[i][worst]
+                if cell not in self.archive:
+                    if len(self.archive) >= self.sr_cells:
+                        worst = max(self.archive,
+                                    key=lambda c: self.archive[c][1])
+                        del self.archive[worst]
                     self.lib.benv_save(self.env, int(i), self._sbuf)
-                    self.archives[i][cell] = [bytes(self._sbuf.raw), 0]
+                    self.archive[cell] = [bytes(self._sbuf.raw), 0]
 
         # ---- dones ----
         game_over = life == 0xFF

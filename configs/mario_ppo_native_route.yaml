@@ -1,5 +1,3 @@
-# Overnight warp-route run on the NATIVE stack: 8 route levels,
-# full-game mode, per-stage curriculum, full knowledge-free toolbox.
 params:
   seed: 42
   algo: {name: a2c_discrete}
@@ -70,8 +68,5 @@ params:
       random_stages: [1-1, 1-2, 4-1, 4-2, 8-1, 8-2, 8-3, 8-4]
       self_restart_prob: 0.3
       n_threads: 24
+      self_restart_cells: 256
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
-    eval_env_config:
-      random_stages: [8-4]
-      full_game: true
-      x_reward: highwater
