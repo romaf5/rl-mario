@@ -236,11 +236,14 @@ class MarioObserver(AlgoObserver):
             sticky_actions=0.0,
         )
         kwargs.update(self.eval_env_kwargs or {})
-        if kwargs.pop('backend', 'retro') == 'native':
-            from mario_native_vecenv import NativeEvalEnv
+        backend = kwargs.pop('backend', 'retro')
+        if backend in ('native', 'lockstep'):
+            from mario_native_vecenv import NativeEvalEnv, LockstepVideoEnv
             kwargs.pop('name', None)
             kwargs.pop('action_type', None)
-            return NativeEvalEnv(**kwargs)
+            kwargs.pop('record_frames', None)
+            cls = LockstepVideoEnv if backend == 'lockstep' else NativeEvalEnv
+            return cls(**kwargs)
         return create_mario_env(**kwargs)
 
     def _record_video(self, epoch_num, model):
@@ -341,7 +344,9 @@ class MarioObserver(AlgoObserver):
                 # (33.3ms avg); at 15fps use a 70/70/60ms cycle (66.7ms avg).
                 if per_step == 4:
                     gif_frames = pil_frames[::2]
-                    durations = [4 if i % 3 == 2 else 3
+                    # PIL durations are MILLISECONDS; browsers clamp <20ms
+                    # to 100ms. 40/30/30 averages the true 33.3ms.
+                    durations = [40 if i % 3 == 2 else 30
                                  for i in range(len(gif_frames))]
                 else:
                     gif_frames = pil_frames

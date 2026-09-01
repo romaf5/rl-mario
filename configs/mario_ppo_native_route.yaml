@@ -78,6 +78,6 @@ params:
       archive_path: native/archive_route.pkl
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
     eval_env_config:
-      backend: native
+      backend: lockstep
       full_game: true
       x_reward: highwater

@@ -757,21 +757,30 @@ class MaxAndSkipEnv(Wrapper):
     consumed, so the base env is told to skip the framebuffer copy for the
     other frames (base step returns obs=None there, which is never used).
     """
-    def __init__(self, env, skip=4):
+    def __init__(self, env, skip=4, record_frames=False):
         Wrapper.__init__(self, env)
         self._obs_buffer = np.zeros(
             (2,) + env.observation_space.shape, dtype=np.uint8)
         self._skip = skip
         self._base = env.unwrapped
+        # eval video recording: capture every emulated frame (60fps
+        # material -- sampling 1 of 4 makes blinking sprites strobe)
+        self._record = record_frames
+        if record_frames:
+            self._base.frames4 = []
 
     def step(self, action):
         total_reward = 0.0
         done = None
         base = self._base
+        if self._record:
+            base.frames4 = []
         try:
             for i in range(self._skip):
                 base.want_obs = i >= self._skip - 2
                 obs, reward, done, info = self.env.step(action)
+                if self._record:
+                    base.frames4.append(base.screen.copy())
                 if i == self._skip - 2:
                     self._obs_buffer[0] = obs
                 if i == self._skip - 1:
@@ -803,6 +812,9 @@ class WarpFrame(ObservationWrapper):
                 low=0, high=255, shape=(self.height, self.width, 3), dtype=np.uint8)
 
     def observation(self, frame):
+        # status bar (top 24 rows) is cropped from the agent's view,
+        # matching the native backend's obs pipeline
+        frame = frame[24:]
         if self.grayscale:
             frame = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
         frame = cv2.resize(frame, (self.width, self.height),
@@ -864,7 +876,7 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
                      reset_noops=0, x_reward='delta', loop_penalty=0.0,
                      backtrack_penalty=0.0, novelty_bonus=0.0,
                      self_restart_prob=0.0, self_restart_cells=96,
-                     frame_only=False, **unknown):
+                     frame_only=False, record_frames=False, **unknown):
     """Build the full Mario env wrapper chain. This is the single entry point
     used by training, evaluation, and the vecenv workers.
 
@@ -932,7 +944,7 @@ def create_mario_env(name='SuperMarioBros-v0', action_type='complex',
                                loop_penalty=loop_penalty,
                                backtrack_penalty=backtrack_penalty,
                                novelty_bonus=novelty_bonus)
-    env = MaxAndSkipEnv(env, skip=skip)
+    env = MaxAndSkipEnv(env, skip=skip, record_frames=record_frames)
     env = WarpFrame(env, width=84, height=84, grayscale=True)
     if frame_only:
         return env

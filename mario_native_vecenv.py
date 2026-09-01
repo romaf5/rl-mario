@@ -80,6 +80,11 @@ class _Lib:
             lib.benv_step_rgb4.argtypes = [ctypes.c_void_p, ctypes.c_int,
                                            ctypes.c_int, ctypes.c_void_p,
                                            ctypes.c_void_p, ctypes.c_void_p]
+            lib.benv_step_raw.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                          ctypes.c_int, ctypes.c_void_p,
+                                          ctypes.c_void_p]
+            lib.benv_set_ram.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                         ctypes.c_char_p]
             cls._inst = lib
         return cls._inst
 
@@ -188,6 +193,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.ep_cells = [set() for _ in range(n)]
         self._sbuf = ctypes.create_string_buffer(self.state_size)
         self._rgb4 = None      # (4,224,240,3) capture buffer when recording
+        self._raw_steps = False  # hack-free stepping (lockstep video eval)
 
     # ------------------------------------------------------------- helpers
     def _field(self, addr):
@@ -335,7 +341,13 @@ class MarioNativeVecEnv(IVecEnv):
             acts = np.where(rep, self.last_action, acts)
         self.last_action[:] = acts
         self.actions_buf[:] = _ACTION_BYTES[acts]
-        if self._rgb4 is not None and n == 1:
+        if self._raw_steps and n == 1:
+            # pure frames, no hacks: a reference emulator fed the same
+            # actions stays in bitwise lockstep (video replay)
+            self.lib.benv_step_raw(self.env, 0, int(self.actions_buf[0]),
+                                   self.obs_u8.ctypes.data,
+                                   self.ram.ctypes.data)
+        elif self._rgb4 is not None and n == 1:
             # eval recording: capture all 4 emulated frames (no aliasing)
             self.lib.benv_step_rgb4(self.env, 0, int(self.actions_buf[0]),
                                     self.obs_u8.ctypes.data,
@@ -673,6 +685,83 @@ class NativeEvalEnv:
 
     def close(self):
         self.v.close()
+
+
+class LockstepVideoEnv:
+    """Video-grade eval env with zero train/eval obs mismatch.
+
+    The policy plays on the NATIVE core (hack-free stepping), so it sees
+    exactly the training observation distribution. A stable-retro
+    emulator, seeded from the same RAM, replays the identical actions in
+    bitwise lockstep (property proven by native/deep_difftest.py) purely
+    to render the video frames with the reference NES renderer.
+    """
+
+    def __init__(self, **kwargs):
+        from mario_env import RetroMarioEnv
+        kwargs.setdefault('n_threads', 1)
+        kwargs.setdefault('episode_life', False)
+        stages = kwargs.get('random_stages')
+        self.v = MarioNativeVecEnv('lockstep', 1, dense_infos=True, **kwargs)
+        self.v._raw_steps = True
+        self.r = RetroMarioEnv(random_stages=list(stages) if stages else None,
+                               full_game=kwargs.get('full_game', False),
+                               reset_noops=0)
+        self.frames4 = []
+        self._steps = 0
+        self.desynced = False
+        self._game = np.ones(0x800, dtype=bool)
+        self._game[0x100:0x300] = False
+
+    @property
+    def unwrapped(self):
+        return self
+
+    @property
+    def screen(self):
+        if self.frames4:
+            return self.frames4[-1]
+        return self.r.screen
+
+    def reset(self):
+        self.v.reset()                    # native state: correct PPU/VRAM
+        self.r.reset()                    # reference state: authoritative RAM
+        ram = np.frombuffer(self.r._retro.get_ram(),
+                            dtype=np.uint8)[:0x800].copy()
+        self.v.lib.benv_set_ram(self.v.env, 0, ram.tobytes())
+        self.v._post_reset_init([0], ram[None, :])
+        self.v._fetch_obs(0)
+        self.v._ring[0] = (self.v.obs_u8[0].astype(np.float32)
+                           / 255.0)[..., None]
+        self.frames4 = []
+        self._steps = 0
+        self.desynced = False
+        order = [(self.v._ptr + 1 + j) % 4 for j in range(4)]
+        return self.v._ring[..., order][0]
+
+    def step(self, action):
+        obs, rew, done, infos = self.v.step(np.array([int(action)]))
+        m = self.r._masks[int(action)]
+        fr = []
+        for _ in range(4):
+            self.r._em.set_button_mask(m, 0)
+            self.r._em.step()
+            fr.append(self.r._retro.get_screen().copy())
+        self.frames4 = fr
+        self._steps += 1
+        if self._steps % 32 == 0 and not self.desynced:
+            rram = np.frombuffer(self.r._retro.get_ram(),
+                                 dtype=np.uint8)[:0x800]
+            if not np.array_equal(self.v.ram[0][self._game],
+                                  rram[self._game]):
+                self.desynced = True
+                print(f'[lockstep] WARNING: replay desync at step '
+                      f'{self._steps}')
+        return obs[0], float(rew[0]), bool(done[0]), infos[0]
+
+    def close(self):
+        self.v.close()
+        self.r.close()
 
 
 def register_mario_native_vecenv():

@@ -80,7 +80,7 @@ params:
       self_restart_frontier_k: 16
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
     eval_env_config:
-      backend: native
+      backend: lockstep
       random_stages: [8-4]
       full_game: true
       x_reward: highwater

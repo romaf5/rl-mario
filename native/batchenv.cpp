@@ -235,6 +235,30 @@ static const uint8_t NES_PAL[64][3] = {
     {204,210,120},{180,222,120},{168,226,144},{152,226,180},{160,214,228},{160,162,160},{0,0,0},{0,0,0},
 };
 
+// adopt reference-emulator RAM (retro->native seed for lockstep eval:
+// both emulators then replay identically, bitwise -- see deep_difftest)
+void benv_set_ram(BatchEnv* e, int i, const uint8_t* ram) {
+    smb_set_ram(e->cores[i], ram);
+    e->post_game[i] = 0;
+}
+
+// hack-free single-env step: pure emulated frames so a reference
+// emulator fed the same actions stays in bitwise lockstep (video replay)
+void benv_step_raw(BatchEnv* e, int i, int action, uint8_t* obs,
+                   uint8_t* ram_out) {
+    Core* c = e->cores[i];
+    static thread_local uint8_t fa[W * H], fb2[W * H], mx[W * H];
+    for (int k = 0; k < 4; k++) {
+        smb_frame(c, (uint8_t)action);
+        if (k == 2) render_gray(*c, fa);
+        if (k == 3) render_gray(*c, fb2);
+    }
+    for (int p = 0; p < W * H; p++)
+        mx[p] = fa[p] > fb2[p] ? fa[p] : fb2[p];
+    resize_area(mx, obs + (size_t)i * OW * OH);
+    memcpy(ram_out + (size_t)i * 0x800, c->ram, 0x800);
+}
+
 // single-env step that also captures all 4 emulated frames as RGB --
 // eval video recording without temporal aliasing (blinking sprites
 // strobe when only 1 of 4 frames is sampled). Semantics identical to

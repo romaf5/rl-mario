@@ -589,8 +589,16 @@ void render_lut(Core& c, uint8_t* out /*240*224*/, const uint8_t* lut) {
         uint16_t st = u.slog_n ? u.slog[0].t : u.t;
         uint8_t sfx = u.slog_n ? u.slog[0].fx : u.fine_x;
         uint8_t sctrl = u.slog_n ? u.slog[0].ctrl : u.ctrl;
+        // visible-frame scroll changes cannot land above the sprite-0
+        // split: on lag frames the CPU slice skews write attribution to
+        // early scanlines, which made the HUD flicker. Clamp them down.
+        int s0l = s0_line(u);
+        auto eff_line = [&](int i) {
+            int l = u.slog[i].line;
+            return (l >= 1 && l < 240 && l < s0l) ? s0l : l;
+        };
         for (int y = 0; y < 240; y++) {
-            while (si < u.slog_n && u.slog[si].line <= y) {
+            while (si < u.slog_n && eff_line(si) <= y) {
                 st = u.slog[si].t; sfx = u.slog[si].fx;
                 sctrl = u.slog[si].ctrl; si++;
             }
