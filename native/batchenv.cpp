@@ -18,6 +18,9 @@
 namespace {
 
 constexpr int W = 240, H = 224, OW = 84, OH = 84;
+// the status bar (top 24 view rows) is cropped out of the agent's obs:
+// score/timer digits are UI, not world -- the policy shouldn't read them
+constexpr int HUD = 24, HP = H - HUD;
 
 // separable box-filter resize 240x224 -> 84x84, fixed-point weights
 struct Resizer {
@@ -26,7 +29,7 @@ struct Resizer {
     int rs[OH], rn[OH]; uint16_t rw[OH][4];
     Resizer() {
         build(W, OW, cs, cn, (uint16_t*)cw);
-        build(H, OH, rs, rn, (uint16_t*)rw);
+        build(HP, OH, rs, rn, (uint16_t*)rw);
     }
     static void build(int in, int out, int* st, int* n, uint16_t* wts) {
         double scale = (double)in / out;
@@ -54,8 +57,9 @@ struct Resizer {
 const Resizer RZ;
 
 void resize_area(const uint8_t* in, uint8_t* out) {
-    static thread_local uint16_t tmp[OW * H];
-    for (int y = 0; y < H; y++) {
+    static thread_local uint16_t tmp[OW * HP];
+    in += HUD * W;                      // skip the status bar
+    for (int y = 0; y < HP; y++) {
         const uint8_t* row = in + y * W;
         uint16_t* trow = tmp + y * OW;
         for (int o = 0; o < OW; o++) {

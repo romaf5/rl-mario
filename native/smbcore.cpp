@@ -497,9 +497,23 @@ void ppu_apply(Core& c, int dots) {
                 if (u.ctrl & 0x80) c.cpu.nmi_pending = true;
             } else if (idx == VBL_CLEAR) {
                 u.status &= 0x1F;
+                // start the new frame's scroll log: writes made during
+                // vblank (NMI status-bar setup) become the line-0 baseline;
+                // visible-frame entries of the finished frame are dropped.
+                // (Resetting at FRAME_MARK erased the log at the exact
+                // moment the caller renders -- HUD scrolled with Mario.)
+                {
+                    int m = 0;
+                    for (int i = 0; i < u.slog_n; i++)
+                        if (u.slog[i].line >= 240) {
+                            u.slog[m] = u.slog[i];
+                            u.slog[m].line = 0;
+                            m++;
+                        }
+                    u.slog_n = m;
+                }
             } else if (idx == FRAME_MARK) {
                 u.frame++;
-                u.slog_n = 0;
             }
             if (s0 >= 0 && idx == s0) u.status |= 0x40;
         }
