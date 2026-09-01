@@ -26,8 +26,10 @@ params:
     normalize_input: false
     reward_shaper: {scale_value: 1.0}
     normalize_advantage: true
-    gamma: 0.995
-    tau: 0.95
+    # per-second discounting invariant to frame-skip:
+    # at skip=2 (30Hz) use sqrt of the skip-4 values
+    gamma: 0.9975
+    tau: 0.975
     learning_rate: 0.00025
     lr_schedule: adaptive
     kl_threshold: 0.008
