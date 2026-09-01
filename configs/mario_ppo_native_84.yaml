@@ -59,7 +59,8 @@ params:
       novelty_bonus: 3.0
       full_game: true
       stage_bonus: 500
-      idle_penalty: 0.5
+      idle_penalty: 0
+      idle_timeout: 150
       idle_threshold: 10
       progress_reward: 0.001
       skip: 4

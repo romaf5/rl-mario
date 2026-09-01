@@ -106,7 +106,7 @@ class MarioNativeVecEnv(IVecEnv):
                  archive_path=None, explore_episode_prob=0.0,
                  explore_episode_steps=150,
                  self_restart_frontier_prob=0.0,
-                 self_restart_frontier_k=16, **unknown):
+                 self_restart_frontier_k=16, idle_timeout=150, **unknown):
         assert action_type == 'complex'
         n = self.num_actors = num_actors
         self.lib = _Lib()
@@ -126,6 +126,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.stage_bonus = stage_bonus
         self.idle_penalty = idle_penalty
         self.idle_threshold = idle_threshold
+        self.idle_timeout = idle_timeout
         self.progress_reward = progress_reward
         self.sticky = sticky_actions
         self.reset_noops = reset_noops
@@ -452,11 +453,16 @@ class MarioNativeVecEnv(IVecEnv):
         reward = reward - np.where(fwd & ~new_ground,
                                    self.backtrack_penalty, 0)
         self.idle = np.where(fwd, 0, self.idle + 1)
-        # cap total idle punishment at one death's worth per episode:
-        # persisting at a hard frontier must never score worse than dying
+        # idle drip (config may zero it) capped at one death's worth
         idle_hit = (self.idle > self.idle_threshold) & (self.idle_paid < 15.0)
         reward = reward - np.where(idle_hit, self.idle_penalty, 0)
         self.idle_paid += np.where(idle_hit, self.idle_penalty, 0)
+        # idle timeout: camping ends the episode at death cost. A capped
+        # drip alone made stalling FREE once the cap was paid (policies
+        # learned to park); unbounded drip made dying cheaper than trying.
+        # Equal terminal cost removes both attractors.
+        idle_to = self.idle >= self.idle_timeout
+        reward = reward - np.where(idle_to, 15.0, 0)
         self.prev_x = x
         self.max_x = np.maximum(self.max_x, x)
 
@@ -551,9 +557,9 @@ class MarioNativeVecEnv(IVecEnv):
         # game rolled through the ending into a new quest -- terminal
         wrapped = gp < self.start_progress
         if self.single_stage:
-            real_done = dying | dead | flag | zombie | wrapped
+            real_done = dying | dead | flag | zombie | wrapped | idle_to
         else:
-            real_done = game_over | victory | zombie | wrapped
+            real_done = game_over | victory | zombie | wrapped | idle_to
         life_lost = (life < self.lives) & (life > 0)
         self.lives = life
 
