@@ -250,7 +250,12 @@ class MarioNativeVecEnv(IVecEnv):
                 cell = cells[self.rng.choice(len(cells), p=w / w.sum())]
             ent = self.archive[cell]
             ent[1] += 1
-            self.lib.benv_load(self.env, i, ent[0])
+            # a cell may hold several state variants (different enemy/RNG
+            # phases); sampling among them exposes the policy to the full
+            # local distribution instead of one replayed setup
+            states = ent[0] if isinstance(ent[0], list) else [ent[0]]
+            self.lib.benv_load(self.env, i,
+                               states[self.rng.randint(len(states))])
             self.start_stage[i] = cell[0]
             self.was_restart[i] = True
             self.start_cell[i] = cell
@@ -503,23 +508,28 @@ class MarioNativeVecEnv(IVecEnv):
                                     key=lambda c: self.archive[c][1])
                         del self.archive[worst]
                     self.lib.benv_save(self.env, int(i), self._sbuf)
-                    self.archive[cell] = [bytes(self._sbuf.raw), 0, int(t[i])]
+                    self.archive[cell] = [[bytes(self._sbuf.raw)], 0,
+                                          int(t[i])]
                     self._archive_dirty += 1
                 else:
-                    # refresh: stored states drift toward the current
-                    # visitation distribution (e.g. post-reveal variants),
-                    # but never downgrade to a more timer-doomed state.
-                    # Cells that keep killing their restarts (saved mid
-                    # enemy contact) re-roll aggressively toward a healthy
-                    # variant.
+                    # refresh: grow a small reservoir of state variants
+                    # per cell (different enemy/RNG phases), then rotate.
+                    # Never rotate toward a more timer-doomed state unless
+                    # the cell keeps killing its restarts (early deaths).
                     ent = self.archive[cell]
+                    if not isinstance(ent[0], list):
+                        ent[0] = [ent[0]]
                     early = self.cell_early.get(cell, 0)
-                    p_ref = min(0.5, 0.02 + early / max(ent[1], 1))
+                    p_ref = min(0.5, 0.05 + early / max(ent[1], 1))
                     if (self.rng.random_sample() < p_ref
-                            and (len(ent) < 3 or int(t[i]) >= ent[2]
-                                 or early >= 3)):
+                            and (len(ent[0]) < 4 or len(ent) < 3
+                                 or int(t[i]) >= ent[2] or early >= 3)):
                         self.lib.benv_save(self.env, int(i), self._sbuf)
-                        ent[:3] = [bytes(self._sbuf.raw), ent[1], int(t[i])]
+                        ent[0].append(bytes(self._sbuf.raw))
+                        if len(ent[0]) > 4:
+                            ent[0].pop(0)
+                        if len(ent) > 2:
+                            ent[2] = max(ent[2], int(t[i]))
                         self.cell_early.pop(cell, None)
                         self._archive_dirty += 1
         if (self.archive_path and self._archive_dirty >= 10):
