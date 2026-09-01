@@ -38,6 +38,21 @@ struct Ppu {
     int slog_n = 0;
 };
 
+
+// sprite-0 hit line: hardware triggers on the sprite's first OPAQUE row
+// overlapping background, not its top line. SMB's HUD split depends on
+// this being right (a few lines early = the HUD's bottom rows scroll).
+inline int s0_line(Ppu& u) {
+    uint16_t base = (u.ctrl & 0x08) ? 0x1000 : 0x0000;
+    const uint8_t* pat = u.chr + base + u.oam[1] * 16;
+    int r0 = 0;
+    for (int r = 0; r < 8; r++) {
+        int rr = (u.oam[2] & 0x80) ? 7 - r : r;
+        if (pat[rr] | pat[rr + 8]) { r0 = r; break; }
+    }
+    return u.oam[0] + 1 + r0;
+}
+
 struct Core {
     Cpu6502 cpu;
     Ppu ppu;
@@ -476,7 +491,7 @@ void ppu_apply(Core& c, int dots) {
     while (remaining > 0) {
         int s0 = -1;
         if ((u.mask & 0x18) == 0x18 && !(u.status & 0x40)) {
-            int line = u.oam[0] + 1;
+            int line = s0_line(u);
             if (line < 240) s0 = line * 341 + u.oam[3] + 4;
         }
         int next = FRAME_DOTS;
@@ -523,7 +538,7 @@ void ppu_apply(Core& c, int dots) {
     // recompute distance to the nearest upcoming event
     int s0 = -1;
     if ((u.mask & 0x18) == 0x18 && !(u.status & 0x40)) {
-        int line = u.oam[0] + 1;
+        int line = s0_line(u);
         if (line < 240) s0 = line * 341 + u.oam[3] + 4;
     }
     int next = FRAME_DOTS;
