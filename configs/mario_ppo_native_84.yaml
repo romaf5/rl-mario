@@ -26,10 +26,8 @@ params:
     normalize_input: false
     reward_shaper: {scale_value: 1.0}
     normalize_advantage: true
-    # per-second discounting invariant to frame-skip:
-    # at skip=2 (30Hz) use sqrt of the skip-4 values
-    gamma: 0.9975
-    tau: 0.975
+    gamma: 0.995
+    tau: 0.95
     learning_rate: 0.00025
     lr_schedule: adaptive
     kl_threshold: 0.008
@@ -64,7 +62,7 @@ params:
       idle_penalty: 0.5
       idle_threshold: 10
       progress_reward: 0.001
-      skip: 2
+      skip: 4
       sticky_actions: 0.1
       reset_noops: 30
       random_stages: [8-4]
@@ -83,7 +81,7 @@ params:
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
     eval_env_config:
       backend: lockstep
-      skip: 2
+      skip: 4
       random_stages: [8-4]
       full_game: true
       x_reward: highwater
