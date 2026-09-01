@@ -75,6 +75,8 @@ class _Lib:
                                      ctypes.c_void_p, ctypes.c_void_p]
             lib.benv_render.argtypes = [ctypes.c_void_p, ctypes.c_int,
                                         ctypes.c_void_p]
+            lib.benv_render_rgb.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                            ctypes.c_void_p]
             cls._inst = lib
         return cls._inst
 
@@ -631,7 +633,7 @@ class NativeEvalEnv:
         kwargs.setdefault('n_threads', 1)
         kwargs.setdefault('episode_life', False)
         self.v = MarioNativeVecEnv('eval', 1, dense_infos=True, **kwargs)
-        self._buf = ctypes.create_string_buffer(240 * 224)
+        self._buf = ctypes.create_string_buffer(240 * 224 * 3)
 
     @property
     def unwrapped(self):
@@ -639,9 +641,8 @@ class NativeEvalEnv:
 
     @property
     def screen(self):
-        self.v.lib.benv_render(self.v.env, 0, self._buf)
-        g = np.frombuffer(self._buf, dtype=np.uint8).reshape(224, 240)
-        return np.stack([g, g, g], axis=-1)
+        self.v.lib.benv_render_rgb(self.v.env, 0, self._buf)
+        return np.frombuffer(self._buf, dtype=np.uint8).reshape(224, 240, 3)
 
     def reset(self):
         return self.v.reset()[0]

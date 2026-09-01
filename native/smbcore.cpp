@@ -545,12 +545,13 @@ inline uint8_t bg_color_gray(Core& c) {
     return GRAY_LUT[c.ppu.palette[0] & 0x3F];
 }
 
-// render one full frame to 256x240 gray using the scroll snapshot log,
-// then crop to the reference view (240x224: 8px off each edge)
-void render_gray(Core& c, uint8_t* out /*240*224*/) {
+// render one full frame to 256x240 through a 64-entry LUT (GRAY_LUT for
+// training obs -- bit-identical; identity LUT yields palette indices for
+// RGB mapping), then crop to the reference view (240x224)
+void render_lut(Core& c, uint8_t* out /*240*224*/, const uint8_t* lut) {
     Ppu& u = c.ppu;
     static thread_local uint8_t fb[256 * 240];
-    uint8_t ubg = bg_color_gray(c);
+    uint8_t ubg = lut[c.ppu.palette[0] & 0x3F];
     if (!(u.mask & 0x08)) {
         memset(fb, ubg, sizeof(fb));
     } else {
@@ -600,7 +601,7 @@ void render_gray(Core& c, uint8_t* out /*240*224*/) {
                     int bit = 7 - (px + k);
                     uint8_t ci = (uint8_t)(((lo >> bit) & 1)
                                  | (((hi >> bit) & 1) << 1));
-                    line[x + k] = ci ? GRAY_LUT[u.palette[pal * 4 + ci] & 0x3F]
+                    line[x + k] = ci ? lut[u.palette[pal * 4 + ci] & 0x3F]
                                      : ubg;
                 }
                 x += n;
@@ -633,7 +634,7 @@ void render_gray(Core& c, uint8_t* out /*240*224*/) {
                                  | (((hi >> bit) & 1) << 1));
                     if (!ci) continue;
                     if (behind && line[x] != ubg) continue;
-                    line[x] = GRAY_LUT[u.palette[pal * 4 + ci] & 0x3F];
+                    line[x] = lut[u.palette[pal * 4 + ci] & 0x3F];
                 }
             }
         }
@@ -642,6 +643,15 @@ void render_gray(Core& c, uint8_t* out /*240*224*/) {
     for (int y = 0; y < 224; y++)
         memcpy(out + y * 240, fb + (y + 8) * 256 + 8, 240);
 }
+
+static const uint8_t IDX_LUT[64] = {
+     0,  1,  2,  3,  4,  5,  6,  7,  8,  9, 10, 11, 12, 13, 14, 15,
+    16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
+    32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47,
+    48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63,
+};
+void render_gray(Core& c, uint8_t* out) { render_lut(c, out, GRAY_LUT); }
+void render_idx(Core& c, uint8_t* out) { render_lut(c, out, IDX_LUT); }
 
 }  // namespace
 

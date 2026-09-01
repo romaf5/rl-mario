@@ -77,3 +77,7 @@ params:
       score_reward: 0.1
       archive_path: native/archive_route.pkl
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
+    eval_env_config:
+      backend: native
+      full_game: true
+      x_reward: highwater
