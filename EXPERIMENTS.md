@@ -61,6 +61,11 @@
 | Native84 v21-v22 | least-uses frontier; post-victory zombie fix (5000-frame skip exhaust latch + nongame guard) | 280/460 | v21 fps 4700->74 (zombie envs) -> fixed; v22 victories 49/150 epochs early but DECAYED (uses != mastery) |
 | Native84 v23-v24 | mastery gate <3 wins; then win-band 1-9 + persisted wins | 440/260 | v23 still decayed (band filtered nothing); v24 win-band spread over 40 cells in post-water zones (areas 0/2, 10-49 wins/cell) then STARVED at ep 125 (10-win graduation cap) |
 | Native84 v25 | no graduation: band = all winners, least-uses first | 150+ | **59/154 victory epochs, sustained, no decay -- pipeline stable** |
+| Native84 v26 | wrap guard + purge 130 quest-2 cells (real decay cause) | 130 | **victories EVERY epoch, rate 2->9% compounding** |
+| Native84 v27-v31 | skip-cap 600; HUD crop; renderer fixes; lockstep video | ~500 ea | stable ~5% vr; win band 37 -> 36 -> 35 backward march |
+| Native84 v32 | per-cell variant reservoirs (4 states, rotate) | 4000 | Bowser passage stuck ~30% point-blank / 2-4% compound; 34 seeded |
+| Native84 v33 | frame-skip 2 (30Hz control), 8000 epochs | running | reward pace ~2x v32 equivalent; watch cell-35 conversion |
+| Routev4 | all-fixes route run | 6000 | **WARPS DISCOVERED (1-2 warp 18-25%); eval plays 1-1 -> warp -> 4-1**; clears 49/41/34/12; 4-2 vine warp = next gate |
 | NativeRoute v1 | 8 levels, curriculum, full toolbox | 2900 | clears: 1-1 59% 4-1 58% 8-1 52% 1-2 48% 4-2 37%; NO warps; eval undersold ~2x by cross-renderer shift (fixed: native eval adapter) |
 | NativeRoute v2 | native eval + full toolbox refresh | running | rewards recovering (3.3k) |
 
