@@ -585,6 +585,7 @@ class MarioNativeVecEnv(IVecEnv):
                 'score': 0,
                 'start_stage': self.start_stage[i],
                 'self_restart': bool(self.was_restart[i]),
+                'idle_timeout': bool(idle_to[i]),
             })
 
         done = done_pre
