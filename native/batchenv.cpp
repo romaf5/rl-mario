@@ -235,6 +235,37 @@ static const uint8_t NES_PAL[64][3] = {
     {204,210,120},{180,222,120},{168,226,144},{152,226,180},{160,214,228},{160,162,160},{0,0,0},{0,0,0},
 };
 
+// single-env step that also captures all 4 emulated frames as RGB --
+// eval video recording without temporal aliasing (blinking sprites
+// strobe when only 1 of 4 frames is sampled). Semantics identical to
+// step_env; obs/ram written the same way.
+void benv_step_rgb4(BatchEnv* e, int i, int action, uint8_t* obs,
+                    uint8_t* ram_out, uint8_t* rgb4 /*4*224*240*3*/) {
+    Core* c = e->cores[i];
+    static thread_local uint8_t fa[W * H], fb2[W * H], mx[W * H],
+        idx[W * H];
+    for (int k = 0; k < 4; k++) {
+        smb_frame(c, (uint8_t)action);
+        if (!e->post_game[i] && frame_hacks(*c, e->single_stage))
+            e->post_game[i] = 1;
+        render_idx(*c, idx);
+        uint8_t* out = rgb4 + (size_t)k * W * H * 3;
+        for (int p = 0; p < W * H; p++) {
+            const uint8_t* cc = NES_PAL[idx[p] & 0x3F];
+            out[p * 3 + 0] = cc[0];
+            out[p * 3 + 1] = cc[1];
+            out[p * 3 + 2] = cc[2];
+        }
+        // gray obs frames derive from the same palette indices
+        if (k == 2) for (int p = 0; p < W * H; p++) fa[p] = GRAY_LUT[idx[p] & 0x3F];
+        if (k == 3) for (int p = 0; p < W * H; p++) fb2[p] = GRAY_LUT[idx[p] & 0x3F];
+    }
+    for (int p = 0; p < W * H; p++)
+        mx[p] = fa[p] > fb2[p] ? fa[p] : fb2[p];
+    resize_area(mx, obs + (size_t)i * OW * OH);
+    memcpy(ram_out + (size_t)i * 0x800, c->ram, 0x800);
+}
+
 void benv_render_rgb(BatchEnv* e, int i, uint8_t* out /*224*240*3*/) {
     static thread_local uint8_t idx[240 * 224];
     render_idx(*e->cores[i], idx);

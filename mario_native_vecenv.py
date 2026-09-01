@@ -77,6 +77,9 @@ class _Lib:
                                         ctypes.c_void_p]
             lib.benv_render_rgb.argtypes = [ctypes.c_void_p, ctypes.c_int,
                                             ctypes.c_void_p]
+            lib.benv_step_rgb4.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                           ctypes.c_int, ctypes.c_void_p,
+                                           ctypes.c_void_p, ctypes.c_void_p]
             cls._inst = lib
         return cls._inst
 
@@ -184,6 +187,7 @@ class MarioNativeVecEnv(IVecEnv):
                               if len(e) > 3}
         self.ep_cells = [set() for _ in range(n)]
         self._sbuf = ctypes.create_string_buffer(self.state_size)
+        self._rgb4 = None      # (4,224,240,3) capture buffer when recording
 
     # ------------------------------------------------------------- helpers
     def _field(self, addr):
@@ -331,8 +335,15 @@ class MarioNativeVecEnv(IVecEnv):
             acts = np.where(rep, self.last_action, acts)
         self.last_action[:] = acts
         self.actions_buf[:] = _ACTION_BYTES[acts]
-        self.lib.benv_step(self.env, self.actions_buf.ctypes.data,
-                           self.obs_u8.ctypes.data, self.ram.ctypes.data)
+        if self._rgb4 is not None and n == 1:
+            # eval recording: capture all 4 emulated frames (no aliasing)
+            self.lib.benv_step_rgb4(self.env, 0, int(self.actions_buf[0]),
+                                    self.obs_u8.ctypes.data,
+                                    self.ram.ctypes.data,
+                                    self._rgb4.ctypes.data)
+        else:
+            self.lib.benv_step(self.env, self.actions_buf.ctypes.data,
+                               self.obs_u8.ctypes.data, self.ram.ctypes.data)
         ram = self.ram
 
         x = self._x(); t = self._time(); gp = self._gp()
@@ -637,6 +648,12 @@ class NativeEvalEnv:
         kwargs.setdefault('episode_life', False)
         self.v = MarioNativeVecEnv('eval', 1, dense_infos=True, **kwargs)
         self._buf = ctypes.create_string_buffer(240 * 224 * 3)
+        self.v._rgb4 = np.zeros((4, 224, 240, 3), dtype=np.uint8)
+
+    @property
+    def frames4(self):
+        """The 4 emulated RGB frames of the last step (60fps recording)."""
+        return [self.v._rgb4[k].copy() for k in range(4)]
 
     @property
     def unwrapped(self):

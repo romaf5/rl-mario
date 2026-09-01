@@ -292,10 +292,17 @@ class MarioObserver(AlgoObserver):
 
                 action = torch.argmax(res['logits'], dim=-1).item()
                 obs, reward, done, info = env.step(action)
-                frames.append(env.unwrapped.screen.copy())
                 total_reward += reward
-                step_stats.append((info.get('world', 1), info.get('stage', 1),
-                                   info.get('x_pos', 0), total_reward))
+                stat = (info.get('world', 1), info.get('stage', 1),
+                        info.get('x_pos', 0), total_reward)
+                if hasattr(env.unwrapped, 'frames4'):
+                    # native eval: all 4 emulated frames -> no aliasing
+                    for f in env.unwrapped.frames4:
+                        frames.append(f)
+                        step_stats.append(stat)
+                else:
+                    frames.append(env.unwrapped.screen.copy())
+                    step_stats.append(stat)
                 if done:
                     break
 
@@ -319,24 +326,30 @@ class MarioObserver(AlgoObserver):
                               fill=(255, 255, 255), font=font)
                     pil_frames.append(canvas)
 
-                # Save MP4 to disk (15 fps = exactly the 66.67ms real frame
-                # time: 4 NES frames at 60fps)
+                # frames are either 1/step (15fps real time) or 4/step (60fps)
+                per_step = 4 if hasattr(env.unwrapped, 'frames4') else 1
                 run_dir = os.path.dirname(os.path.dirname(
                     self.writer.file_writer.event_writer._ev_writer._file_name))
                 video_dir = os.path.join(run_dir, 'videos')
                 os.makedirs(video_dir, exist_ok=True)
                 mp4_path = os.path.join(video_dir, f'epoch_{epoch_num}.mp4')
                 imageio.mimsave(mp4_path, [np.asarray(c) for c in pil_frames],
-                                fps=15)
+                                fps=15 * per_step)
 
-                # Write PIL animated GIF to TensorBoard Images tab. GIF delays
-                # are centisecond-quantized, so a constant 67ms is impossible;
-                # a 70/70/60 cycle averages exactly 66.67ms (real time).
-                durations = [60 if i % 3 == 2 else 70
-                             for i in range(len(pil_frames))]
+                # GIF for the TB Images tab. Delays are centisecond-quantized:
+                # at 60fps material use every 2nd frame with a 3/3/4cs cycle
+                # (33.3ms avg); at 15fps use a 70/70/60ms cycle (66.7ms avg).
+                if per_step == 4:
+                    gif_frames = pil_frames[::2]
+                    durations = [4 if i % 3 == 2 else 3
+                                 for i in range(len(gif_frames))]
+                else:
+                    gif_frames = pil_frames
+                    durations = [60 if i % 3 == 2 else 70
+                                 for i in range(len(gif_frames))]
                 gif_path = tempfile.NamedTemporaryFile(suffix='.gif', delete=False).name
-                pil_frames[0].save(gif_path, save_all=True,
-                                   append_images=pil_frames[1:],
+                gif_frames[0].save(gif_path, save_all=True,
+                                   append_images=gif_frames[1:],
                                    duration=durations,
                                    loop=0, optimize=True)
                 with open(gif_path, 'rb') as f:
