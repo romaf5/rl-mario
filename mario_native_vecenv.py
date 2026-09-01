@@ -510,10 +510,13 @@ class MarioNativeVecEnv(IVecEnv):
         # on its own -- force a reset after 8 consecutive non-game steps
         self.nongame = np.where(gmode == 1, 0, self.nongame + 1)
         zombie = self.nongame >= 8
+        # wrap guard: progress below the episode's start can only mean the
+        # game rolled through the ending into a new quest -- terminal
+        wrapped = gp < self.start_progress
         if self.single_stage:
-            real_done = dying | dead | flag | zombie
+            real_done = dying | dead | flag | zombie | wrapped
         else:
-            real_done = game_over | victory | zombie
+            real_done = game_over | victory | zombie | wrapped
         life_lost = (life < self.lives) & (life > 0)
         self.lives = life
 
