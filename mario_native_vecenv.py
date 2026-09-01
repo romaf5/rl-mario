@@ -85,6 +85,7 @@ class _Lib:
                                           ctypes.c_void_p]
             lib.benv_set_ram.argtypes = [ctypes.c_void_p, ctypes.c_int,
                                          ctypes.c_char_p]
+            lib.benv_set_skip.argtypes = [ctypes.c_void_p, ctypes.c_int]
             cls._inst = lib
         return cls._inst
 
@@ -113,6 +114,9 @@ class MarioNativeVecEnv(IVecEnv):
         self.single_stage = (not full_game) and (random_stages is not None)
         self.env = self.lib.benv_create(rom, len(rom), n, n_threads,
                                         int(self.single_stage))
+        self.skip = int(skip)
+        if self.skip != 4:
+            self.lib.benv_set_skip(self.env, self.skip)
         self.state_size = self.lib.benv_state_size()
 
         self.stages = list(random_stages) if random_stages else ['FullGame']
@@ -670,12 +674,13 @@ class NativeEvalEnv:
         kwargs.setdefault('episode_life', False)
         self.v = MarioNativeVecEnv('eval', 1, dense_infos=True, **kwargs)
         self._buf = ctypes.create_string_buffer(240 * 224 * 3)
-        self.v._rgb4 = np.zeros((4, 224, 240, 3), dtype=np.uint8)
+        self.frames_per_step = self.v.skip
+        self.v._rgb4 = np.zeros((self.v.skip, 224, 240, 3), dtype=np.uint8)
 
     @property
     def frames4(self):
-        """The 4 emulated RGB frames of the last step (60fps recording)."""
-        return [self.v._rgb4[k].copy() for k in range(4)]
+        """All emulated RGB frames of the last step (60fps recording)."""
+        return [self.v._rgb4[k].copy() for k in range(self.v.skip)]
 
     @property
     def unwrapped(self):
@@ -714,6 +719,7 @@ class LockstepVideoEnv:
         stages = kwargs.get('random_stages')
         self.v = MarioNativeVecEnv('lockstep', 1, dense_infos=True, **kwargs)
         self.v._raw_steps = True
+        self.frames_per_step = self.v.skip
         self.r = RetroMarioEnv(random_stages=list(stages) if stages else None,
                                full_game=kwargs.get('full_game', False),
                                reset_noops=0)
@@ -753,7 +759,7 @@ class LockstepVideoEnv:
         obs, rew, done, infos = self.v.step(np.array([int(action)]))
         m = self.r._masks[int(action)]
         fr = []
-        for _ in range(4):
+        for _ in range(self.v.skip):
             self.r._em.set_button_mask(m, 0)
             self.r._em.step()
             fr.append(self.r._retro.get_screen().copy())

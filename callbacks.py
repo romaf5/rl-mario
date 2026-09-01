@@ -329,20 +329,23 @@ class MarioObserver(AlgoObserver):
                               fill=(255, 255, 255), font=font)
                     pil_frames.append(canvas)
 
-                # frames are either 1/step (15fps real time) or 4/step (60fps)
-                per_step = 4 if hasattr(env.unwrapped, 'frames4') else 1
+                # frames per step: full-rate capture on native/lockstep
+                per_step = getattr(env.unwrapped, 'frames_per_step',
+                                   4 if hasattr(env.unwrapped, 'frames4')
+                                   else 1)
                 run_dir = os.path.dirname(os.path.dirname(
                     self.writer.file_writer.event_writer._ev_writer._file_name))
                 video_dir = os.path.join(run_dir, 'videos')
                 os.makedirs(video_dir, exist_ok=True)
                 mp4_path = os.path.join(video_dir, f'epoch_{epoch_num}.mp4')
+                # mp4 real-time rate: skip frames per step, 60Hz game
                 imageio.mimsave(mp4_path, [np.asarray(c) for c in pil_frames],
-                                fps=15 * per_step)
+                                fps=60 if per_step >= 2 else 15)
 
                 # GIF for the TB Images tab. Delays are centisecond-quantized:
                 # at 60fps material use every 2nd frame with a 3/3/4cs cycle
                 # (33.3ms avg); at 15fps use a 70/70/60ms cycle (66.7ms avg).
-                if per_step == 4:
+                if per_step >= 2:
                     gif_frames = pil_frames[::2]
                     # PIL durations are MILLISECONDS; browsers clamp <20ms
                     # to 100ms. 40/30/30 averages the true 33.3ms.

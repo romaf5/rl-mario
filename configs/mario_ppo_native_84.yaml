@@ -62,7 +62,7 @@ params:
       idle_penalty: 0.5
       idle_threshold: 10
       progress_reward: 0.001
-      skip: 4
+      skip: 2
       sticky_actions: 0.1
       reset_noops: 30
       random_stages: [8-4]
@@ -81,6 +81,7 @@ params:
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
     eval_env_config:
       backend: lockstep
+      skip: 2
       random_stages: [8-4]
       full_game: true
       x_reward: highwater

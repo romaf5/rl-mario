@@ -122,6 +122,7 @@ bool frame_hacks(Core& c, bool single_stage) {
 
 struct BatchEnv {
     int n = 0;
+    int skip = 4;
     bool single_stage = false;
     std::vector<Core*> cores;
     std::vector<uint8_t> post_game;   // per-env: terminal screen latched
@@ -163,12 +164,12 @@ struct BatchEnv {
         Core* c = cores[i];
         uint8_t b = (uint8_t)actions[i];
         static thread_local uint8_t fa[W * H], fb2[W * H], mx[W * H];
-        for (int k = 0; k < 4; k++) {
+        for (int k = 0; k < skip; k++) {
             smb_frame(c, b);
             if (!post_game[i] && frame_hacks(*c, single_stage))
                 post_game[i] = 1;
-            if (k == 2) render_gray(*c, fa);
-            if (k == 3) render_gray(*c, fb2);
+            if (k == skip - 2) render_gray(*c, fa);
+            if (k == skip - 1) render_gray(*c, fb2);
         }
         for (int p = 0; p < W * H; p++)
             mx[p] = fa[p] > fb2[p] ? fa[p] : fb2[p];
@@ -222,6 +223,7 @@ void benv_step(BatchEnv* e, const int32_t* actions, uint8_t* obs,
 }
 
 int benv_state_size(void) { return smb_state_size(); }
+void benv_set_skip(BatchEnv* e, int skip) { e->skip = skip < 2 ? 2 : skip; }
 
 // standard NES palette (2C02), RGB triplets per color index
 static const uint8_t NES_PAL[64][3] = {
@@ -248,10 +250,10 @@ void benv_step_raw(BatchEnv* e, int i, int action, uint8_t* obs,
                    uint8_t* ram_out) {
     Core* c = e->cores[i];
     static thread_local uint8_t fa[W * H], fb2[W * H], mx[W * H];
-    for (int k = 0; k < 4; k++) {
+    for (int k = 0; k < e->skip; k++) {
         smb_frame(c, (uint8_t)action);
-        if (k == 2) render_gray(*c, fa);
-        if (k == 3) render_gray(*c, fb2);
+        if (k == e->skip - 2) render_gray(*c, fa);
+        if (k == e->skip - 1) render_gray(*c, fb2);
     }
     for (int p = 0; p < W * H; p++)
         mx[p] = fa[p] > fb2[p] ? fa[p] : fb2[p];
@@ -268,7 +270,7 @@ void benv_step_rgb4(BatchEnv* e, int i, int action, uint8_t* obs,
     Core* c = e->cores[i];
     static thread_local uint8_t fa[W * H], fb2[W * H], mx[W * H],
         idx[W * H];
-    for (int k = 0; k < 4; k++) {
+    for (int k = 0; k < e->skip; k++) {
         smb_frame(c, (uint8_t)action);
         if (!e->post_game[i] && frame_hacks(*c, e->single_stage))
             e->post_game[i] = 1;
@@ -281,8 +283,8 @@ void benv_step_rgb4(BatchEnv* e, int i, int action, uint8_t* obs,
             out[p * 3 + 2] = cc[2];
         }
         // gray obs frames derive from the same palette indices
-        if (k == 2) for (int p = 0; p < W * H; p++) fa[p] = GRAY_LUT[idx[p] & 0x3F];
-        if (k == 3) for (int p = 0; p < W * H; p++) fb2[p] = GRAY_LUT[idx[p] & 0x3F];
+        if (k == e->skip - 2) for (int p = 0; p < W * H; p++) fa[p] = GRAY_LUT[idx[p] & 0x3F];
+        if (k == e->skip - 1) for (int p = 0; p < W * H; p++) fb2[p] = GRAY_LUT[idx[p] & 0x3F];
     }
     for (int p = 0; p < W * H; p++)
         mx[p] = fa[p] > fb2[p] ? fa[p] : fb2[p];
