@@ -227,6 +227,8 @@ class MarioNativeVecEnv(IVecEnv):
     def _reset_env(self, i, first=False):
         # self-restart from own archive?
         self.was_restart[i] = False
+        self.start_cell[i] = None      # door episodes credit no cell
+        self.explorer[i] = 0           # no macro-noise leak across episodes
         if (self.sr_prob > 0 and self.archive
                 and self.rng.random_sample() < self.sr_prob):
             # soft least-practiced: p(cell) ~ 1/(1+uses). Uniform-ish
@@ -376,9 +378,19 @@ class MarioNativeVecEnv(IVecEnv):
         raw = x
         jump = np.abs(raw - self.x_last) > 600
         confirm = np.abs(raw - self.x_pending) <= 64
-        x = np.where(jump & ~confirm, self.x_last, raw)
+        held = jump & ~confirm          # x carried this step, decided next
+        x = np.where(held, self.x_last, raw)
         self.x_pending = raw
         life = self._field(0x75A); area = self._field(0x760)
+        # on a held step the area/context bookkeeping is deferred too, so
+        # the rebase and the loop-penalty exemption land on the CONFIRMED
+        # step with the true x (otherwise pipe exits paid -30 and hw
+        # rebased to the stale pre-teleport x)
+        area_b = np.where(held, self.prev_area, area)
+        # death = life decrement (0 is the last playable life; 0xFF = game
+        # over). The C++ kill-dying hack skips the dying frames inside the
+        # step, so pstate can never be relied on for the death penalty.
+        died = (life == 0xFF) | (life < self.lives)
         pstate = self._field(0x0E); yvp = self._field(0xB5)
         dying = (pstate == 0x0B) | (yvp > 1)
         dead = pstate == 0x06
@@ -391,7 +403,7 @@ class MarioNativeVecEnv(IVecEnv):
 
         # ---- base reward (block granularity) ----
         if self.x_reward == 'highwater':
-            ctx_change = (life != self.lives) | (area != self.prev_area) | \
+            ctx_change = (life != self.lives) | (area_b != self.prev_area) | \
                          (gp != self.progress)
             self.hw = np.where(ctx_change, x, self.hw)
             r_x = np.clip(x - self.hw, 0, 20).astype(np.float32)
@@ -400,7 +412,7 @@ class MarioNativeVecEnv(IVecEnv):
             dx = x - self.x_last
             r_x = np.where(np.abs(dx) > 24, 0, dx).astype(np.float32)
         r_t = np.minimum(t - self.time_last, 0).astype(np.float32)
-        r_death = np.where(dying | dead, -15.0, 0.0).astype(np.float32)
+        r_death = np.where(died, -15.0, 0.0).astype(np.float32)
         reward = np.clip(r_x + r_t + r_death, -15, 20)
         self.x_last = x
         self.time_last = t
@@ -441,10 +453,11 @@ class MarioNativeVecEnv(IVecEnv):
         # ---- loop penalty / x shaping / idle ----
         xd = x - self.prev_x
         loop = (self.loop_penalty > 0) & (xd < -96) & \
-               (area == self.prev_area) & ~flag & ~dying & ~dead
+               (area_b == self.prev_area) & ~flag & ~died & ~held
         reward = reward - np.where(loop, self.loop_penalty, 0)
         self.looped |= loop
-        self.prev_area = area
+        area_changed = area_b != self.prev_area
+        self.prev_area = np.where(held, self.prev_area, area)
 
         fwd = xd > 0
         new_ground = x > self.max_x
@@ -502,7 +515,8 @@ class MarioNativeVecEnv(IVecEnv):
             # stays low: chains reach deep cells with little time left,
             # and a state with ~25s is still a practiceable episode.
             can = (((fstate == 0) | (swim_a == 1)) & ~dying & ~dead
-                   & (gmode == 1) & (t > 25))
+                   & (gmode == 1) & (t > 25)
+                   & ~held & ~died & ~area_changed)   # no phantom cells
             for i in np.nonzero(can)[0]:
                 # y-band in the key: standing ON a block/pipe is a different
                 # rung than the floor below it; swim flag disambiguates the
@@ -514,8 +528,12 @@ class MarioNativeVecEnv(IVecEnv):
                 self.ep_cells[i].add(cell)
                 if cell not in self.archive:
                     if len(self.archive) >= self.sr_cells:
-                        worst = max(self.archive,
-                                    key=lambda c: self.archive[c][1])
+                        # evict the OLDEST cell without wins (evicting the
+                        # most-used one made practice impossible at cap)
+                        losers = [c for c in self.archive
+                                  if self.cell_wins.get(c, 0) == 0]
+                        worst = losers[0] if losers else min(
+                            self.archive, key=lambda c: self.cell_wins.get(c, 0))
                         del self.archive[worst]
                     self.lib.benv_save(self.env, int(i), self._sbuf)
                     self.archive[cell] = [[bytes(self._sbuf.raw)], 0,
@@ -560,7 +578,7 @@ class MarioNativeVecEnv(IVecEnv):
             real_done = dying | dead | flag | zombie | wrapped | idle_to
         else:
             real_done = game_over | victory | zombie | wrapped | idle_to
-        life_lost = (life < self.lives) & (life > 0)
+        life_lost = life < self.lives
         self.lives = life
 
         infos = []

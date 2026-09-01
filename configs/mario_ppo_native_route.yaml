@@ -71,7 +71,7 @@ params:
       random_stages: [1-1, 1-2, 4-1, 4-2, 8-1, 8-2, 8-3, 8-4]
       self_restart_prob: 0.3
       n_threads: 24
-      self_restart_cells: 256
+      self_restart_cells: 512
       explore_eps: 0.05
       novelty_global: true
       novelty_y_band: 24

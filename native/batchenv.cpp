@@ -104,18 +104,21 @@ bool frame_hacks(Core& c, bool single_stage) {
     }
     if (!single_stage && is_world_over(c)) {   // skip end-of-world cutscene
         int t = game_time(c);
-        for (int i = 0; i < 600 && game_time(c) == t; i++)
+        for (int i = 0; i < 2000 && game_time(c) == t; i++)
             smb_frame(&c, 0);
         if (game_time(c) == t && is_world_over(c)) return true;
     }
     uint8_t timer = c.ram[0x6DE];              // skip area-change animation
     if (timer > 1 && timer < 255) c.ram[0x6DE] = 1;
     if (is_busy(c) || is_world_over(c)) {      // skip black inter-life screens
-        for (int i = 0; i < 600 && (is_busy(c) || is_world_over(c)); i++) {
+        // a flag sequence needs ~1000 busy frames; 600 latched post_game
+        // after every stage clear and disabled all hacks for the rest of
+        // the game. Latch only on a persistent world-over (the ending).
+        for (int i = 0; i < 2000 && (is_busy(c) || is_world_over(c)); i++) {
             c.ram[0x7A0] = 0;
             smb_frame(&c, 0);
         }
-        if (is_busy(c) || is_world_over(c)) return true;
+        if (is_world_over(c)) return true;
     }
     return false;
 }
