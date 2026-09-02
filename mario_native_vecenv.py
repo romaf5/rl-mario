@@ -177,8 +177,11 @@ class MarioNativeVecEnv(IVecEnv):
         # loop/off-route use their own knobs): equal costs leave no reason
         # to prefer one failure over another (e.g. suicide over a loop)
         self.fail_penalty = float(fail_penalty)
-        self.transit = np.zeros(n, dtype=np.uint8)      # C++ per-step flag
-        self.transit_hold = np.zeros(n, dtype=bool)     # carried over held steps
+        # per-life visited cells (level, area, swim, x//128) as ints: a jump
+        # into a visited cell is a cycle whatever mechanism produced it
+        self.visited = [set() for _ in range(n)]
+        self.last_cid = np.full(n, -1, dtype=np.int64)
+        self.prev_swim = np.zeros(n, dtype=np.int32)
 
         self.observation_space = spaces.Box(0.0, 1.0, (84, 84, FRAME_STACK),
                                             np.float32)
@@ -327,6 +330,9 @@ class MarioNativeVecEnv(IVecEnv):
             self.idle_paid[i] = 0.0
             self.nongame[i] = 0
             self.prev_area[i] = int(r[0x760])
+            self.prev_swim[i] = int(r[0x704])
+            self.visited[i] = set()
+            self.last_cid[i] = -1
 
     # ------------------------------------------------------------- IVecEnv
     def _fetch_obs(self, i):
@@ -386,13 +392,6 @@ class MarioNativeVecEnv(IVecEnv):
         else:
             self.lib.benv_step(self.env, self.actions_buf.ctypes.data,
                                self.obs_u8.ctypes.data, self.ram.ctypes.data)
-        if self._raw_steps or self._rgb4 is not None:
-            # single-env eval paths have no skip loop to observe: treat
-            # every backward jump as a legit transition (eval reward is
-            # not trained on; never cut a replay on a false loop)
-            self.transit[:] = 1
-        else:
-            self.lib.benv_transit(self.env, self.transit.ctypes.data)
         ram = self.ram
 
         x = self._x(); t = self._time(); gp = self._gp()
@@ -434,17 +433,30 @@ class MarioNativeVecEnv(IVecEnv):
         # transition is a maze loop teleport: penalised and (in training)
         # terminal, so no state ever earns different rewards for the same
         # forward run depending on invisible history.
-        tr = self.transit.astype(bool) | self.transit_hold
-        self.transit_hold = np.where(held, tr, False)
-        back = ((x - self.x_last) < -96) & ~held & ~died & ~flag & \
-               (area_b == self.prev_area) & (gp == self.progress)
-        legit = back & tr
-        loop = back & ~tr & (self.loop_penalty > 0)
+        # Cycle rule (frame = level, area byte, swim flag): SMB never scrolls
+        # left, so a backward jump INSIDE one frame is never progress --
+        # whether it came from a wrong pipe (scripted) or a maze teleport
+        # (instant). A jump that changes frame is a transition (8-4 pipe 3
+        # -> water: same area byte, swim 0->1) UNLESS it lands in a cell
+        # this life already visited (re-entering a bonus room = cycle).
+        swim = ram[:, 0x704].astype(np.int32)
+        swim_b = np.where(held, self.prev_swim, swim)
+        jump_c = (np.abs(x - self.x_last) > 96) & ~held & ~died & ~flag & \
+                 (gp == self.progress)
+        same_frame = (area_b == self.prev_area) & (swim_b == self.prev_swim)
+        cid = ((gp.astype(np.int64) * 8 + area) * 2 + swim) * 64 + x // 128
+        revisit = np.zeros(n, dtype=bool)
+        for i in np.nonzero(jump_c & ~same_frame)[0]:
+            revisit[i] = int(cid[i]) in self.visited[i]
+        loop = jump_c & ((same_frame & (x < self.x_last)) | revisit) & \
+               (self.loop_penalty > 0)
+        legit = jump_c & ~loop
 
         # ---- base reward (block granularity) ----
         if self.x_reward == 'highwater':
             ctx_change = (life != self.lives) | (area_b != self.prev_area) | \
-                         (gp != self.progress) | legit
+                         (swim_b != self.prev_swim) | (gp != self.progress) | \
+                         legit
             self.hw = np.where(ctx_change, x, self.hw)
             self.max_x = np.where(legit, 0, self.max_x)
             r_x = np.clip(x - self.hw, 0, 20).astype(np.float32)
@@ -504,6 +516,11 @@ class MarioNativeVecEnv(IVecEnv):
         self.looped |= loop
         area_changed = area_b != self.prev_area
         self.prev_area = np.where(held, self.prev_area, area)
+        self.prev_swim = np.where(held, self.prev_swim, swim)
+        # mark the (confirmed) current cell as visited this life
+        for i in np.nonzero(~held & (cid != self.last_cid))[0]:
+            self.visited[i].add(int(cid[i]))
+            self.last_cid[i] = cid[i]
 
         fwd = xd > 0
         new_ground = x > self.max_x
@@ -562,7 +579,7 @@ class MarioNativeVecEnv(IVecEnv):
             # and a state with ~25s is still a practiceable episode.
             can = (((fstate == 0) | (swim_a == 1)) & ~dying & ~dead
                    & (gmode == 1) & (t > 25)
-                   & ~held & ~died & ~area_changed & ~back)  # no phantom cells
+                   & ~held & ~died & ~area_changed & ~jump_c)  # no phantom cells
             for i in np.nonzero(can)[0]:
                 # y-band in the key: standing ON a block/pipe is a different
                 # rung than the floor below it; swim flag disambiguates the
@@ -702,6 +719,12 @@ class MarioNativeVecEnv(IVecEnv):
         soft_idx = [i for i in done_idx if i not in set(realdone_idx)]
         if soft_idx:
             self._post_reset_init(soft_idx, self.ram)
+            # new episode = fresh frame stack: the first observation of
+            # the next life (or post-loop run) must not carry death /
+            # pre-teleport frames from the episode that just ended
+            for i in soft_idx:
+                self._ring[i] = (self.obs_u8[i].astype(np.float32)
+                                 / 255.0)[..., None]
 
         order = [(self._ptr + 1 + j) % FRAME_STACK for j in range(FRAME_STACK)]
         obs = self._ring[..., order]

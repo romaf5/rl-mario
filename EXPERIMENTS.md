@@ -70,7 +70,8 @@
 | NativeRoute v2 | native eval + full toolbox refresh | running | rewards recovering (3.3k) |
 | Native84 v34-v38 | skip-4 revert; idle timeout 150 -> 450; review fixes (debounced ctx, phantom cells, eviction) | ~600 ea | v36 idle 150 killed Bowser patience (conversion collapse); v38 stable ~3% vr, door mean ~2570 = corridor loop point |
 | Routev5-v10 | same fixes; stochastic eval videos; off-route = -100 terminal; archive keyed by current level (512 -> 312 cells) | ~2000 ea | v9: clear/1-2 20% but warp/1-2 0% (flag paid +500 and then 1-3 x-reward); world 8 got <1% of restarts (evicted at cap) |
-| Native84 v40 / Routev11 | **reward set v2**: highwater rebased on scripted backward transitions (C++ transit flag), loop = -100 + episode end, uniform fail cost 100, no growth/backtrack terms | running | probes: corridor loop -100/done then +12/step; water pipe no penalty, swimming rewarded; death -100 |
+| Native84 v40 / Routev11 | reward set v2 draft: highwater rebased on any scripted backward transition (C++ transit flag), loop = -100 + episode end, uniform fail cost 100, no growth/backtrack terms | 900 | **FARMED**: a wrong pipe is a scripted transition too -> section-1 pipe x824->312 rebased the highwater; reward 160 -> 5100/episode with door_max_x < 1290 (user spotted it in the video) |
+| Native84 v41 / Routev12 | **reward set v2, cycle rule**: frame = (level, area byte, swim); backward jump inside a frame = loop; jump into a cell already visited this life = loop; other jumps = transition (water pipe). Frame stack reset at life/loop boundaries | running | probes: wrong pipe -100/done; instant corridor loop -100/done; water pipe legit, swimming +2..5/step; death -100, fresh stack |
 
 ## Lessons
 - Metrics must separate from-door and from-restart episodes (mario/door_*).
