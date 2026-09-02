@@ -287,14 +287,14 @@ class MarioObserver(AlgoObserver):
         line 1 = epoch, level, x, cumulative R, this step's reward;
         line 2 = reward event flash (LOOP/DEATH/OFF-ROUTE/IDLE/CLEAR)."""
         from PIL import Image, ImageDraw
-        world, stage, x_pos, rew, r_step, event = stat
+        world, stage, x_pos, rew, r_step, event, lives = stat
         bar_h = 32                      # 224 + 32 = 256: codec-friendly height
         img = Image.fromarray(frame)
         canvas = Image.new('RGB', (img.width, img.height + bar_h), (0, 0, 0))
         canvas.paste(img, (0, 0))
         draw = ImageDraw.Draw(canvas)
         draw.text((4, img.height + 2),
-                  f'ep {epoch_num}  {world}-{stage}  x={x_pos}  '
+                  f'ep {epoch_num}  {world}-{stage}  x={x_pos}  L={lives}  '
                   f'R={rew:.0f}  r={r_step:+.1f}',
                   fill=(255, 255, 255), font=font)
         if event:
@@ -354,6 +354,8 @@ class MarioObserver(AlgoObserver):
                 event, event_ttl = 'OFF-ROUTE %+.0f' % reward, 60
             elif info.get('idle_timeout'):
                 event, event_ttl = 'IDLE TIMEOUT %+.0f' % reward, 60
+            elif life == 255 and prev_life is not None and prev_life != 255:
+                event, event_ttl = 'GAME OVER %+.0f' % reward, 60
             elif prev_life is not None and life < prev_life:
                 event, event_ttl = 'DEATH %+.0f' % reward, 60
             elif info.get('flag_get') or info.get('victory'):
@@ -361,7 +363,8 @@ class MarioObserver(AlgoObserver):
             prev_life = life
             stat = (info.get('world', 1), info.get('stage', 1),
                     info.get('x_pos', 0), total_reward, reward,
-                    event if event_ttl > 0 else '')
+                    event if event_ttl > 0 else '',
+                    (life if life != 255 else 0))
             event_ttl -= per_step_frames
             if hasattr(env.unwrapped, 'frames4'):
                 # native eval: all 4 emulated frames -> no aliasing
@@ -378,6 +381,13 @@ class MarioObserver(AlgoObserver):
                         and gp != gp0 and step > 8):
                 break
         env.close()
+        cause = ('victory' if info.get('victory') else 'loop' if info.get('looped')
+                 else 'idle timeout' if info.get('idle_timeout') else 'off-route'
+                 if info.get('offroute') else 'game over' if info.get('life') == 255
+                 else 'level cleared' if (gp0 is not None and info.get('game_progress') != gp0)
+                 else 'step cap')
+        print(f'  [Video] clip {info.get("world", "?")}-{info.get("stage", "?")}: '
+              f'{len(frames)} frames, ended by {cause} at x={info.get("x_pos", 0)}')
         font = ImageFont.load_default()
         pil_frames = [self.draw_strip(f, epoch_num, s, font)
                       for s, f in zip(step_stats, frames)]
