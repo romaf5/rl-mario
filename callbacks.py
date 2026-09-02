@@ -48,6 +48,7 @@ class MarioObserver(AlgoObserver):
         self.episode_loops = []
         self.episode_timeouts = []
         self.episode_offroute = []
+        self.frontier_cells = None
         self.door_x = []          # max_x of NON-restart (from-door) episodes
         self._clear_ema = {}  # start_stage -> EMA of clear rate
 
@@ -113,6 +114,8 @@ class MarioObserver(AlgoObserver):
             self.episode_timeouts.append(float(info['idle_timeout']))
         if 'offroute' in info:
             self.episode_offroute.append(float(info['offroute']))
+        if 'frontier_cells' in info:
+            self.frontier_cells = info['frontier_cells']
 
         # Also track game scores for the default scorer
         game_res = info.get('scores', None)
@@ -183,6 +186,9 @@ class MarioObserver(AlgoObserver):
             self.writer.add_scalar('mario/loop_rate',
                                    float(np.mean(self.episode_loops)),
                                    epoch_num)
+        if self.frontier_cells is not None:
+            self.writer.add_scalar('mario/frontier_cells',
+                                   self.frontier_cells, epoch_num)
         if len(self.episode_offroute) > 0:
             self.writer.add_scalar('mario/offroute_rate',
                                    float(np.mean(self.episode_offroute)),

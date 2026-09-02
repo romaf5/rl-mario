@@ -720,6 +720,8 @@ class MarioNativeVecEnv(IVecEnv):
         self.lives = life
 
         infos = []
+        n_front = sum(1 for c in self.archive if self.cell_wins.get(c, 0) > 0) \
+            if self.archive else 0
         # a loop ends the PPO episode like a lost life (the game itself
         # continues from the teleport point with rebased trackers)
         done_pre = real_done | ((life_lost | loop) if self.episode_life
@@ -746,6 +748,7 @@ class MarioNativeVecEnv(IVecEnv):
                 'self_restart': bool(self.was_restart[i]),
                 'idle_timeout': bool(idle_to[i]),
                 'offroute': bool(off[i]),
+                'frontier_cells': n_front,
             })
 
         done = done_pre
@@ -757,7 +760,17 @@ class MarioNativeVecEnv(IVecEnv):
             cell = self.start_cell[i]
             if cell is None:
                 continue
-            if victory[i] or self.cleared[i] > 0:
+            # transitive credit: reaching a DEEPER cell that already wins is
+            # a win for this cell. With victory-only credit the frontier
+            # never left the Bowser room (0 wins before x4100 over 200k
+            # restarts; the water and the corridor were unreachable for
+            # backward chaining).
+            reached = any(
+                self.cell_wins.get(c, 0) > 0 and not (
+                    c[0] == cell[0] and c[1] == cell[1] and c[4] == cell[4]
+                    and c[2] <= cell[2])
+                for c in self.ep_cells[i] if c != cell)
+            if victory[i] or self.cleared[i] > 0 or reached:
                 self.cell_wins[cell] = self.cell_wins.get(cell, 0) + 1
             if self.ep_steps[i] > 8:
                 continue
@@ -791,6 +804,11 @@ class MarioNativeVecEnv(IVecEnv):
         soft_idx = list(np.nonzero((life_lost | loop) & ~real_done)[0])
         if soft_idx:
             self._post_reset_init(soft_idx, self.ram)
+            for i in soft_idx:
+                # the restart cell's episode ended here; the next life is
+                # a door-like continuation and credits no cell
+                self.start_cell[i] = None
+                self.ep_cells[i] = set()
             # new episode = fresh frame stack: the first observation of
             # the next life (or post-loop run) must not carry death /
             # pre-teleport frames from the episode that just ended
