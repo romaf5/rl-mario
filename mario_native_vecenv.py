@@ -447,6 +447,13 @@ class MarioNativeVecEnv(IVecEnv):
         else:
             self.lib.benv_step(self.env, self.actions_buf.ctypes.data,
                                self.obs_u8.ctypes.data, self.ram.ctypes.data)
+        return self._after_step()
+
+    def _after_step(self):
+        """Score the step from the freshly fetched RAM: rewards, dones,
+        archive, infos, resets. Split from the emulation so external
+        drivers (tas/replay_tas.py) can advance frames themselves."""
+        n = self.num_actors
         ram = self.ram
 
         x = self._x(); t = self._time(); gp = self._gp()
