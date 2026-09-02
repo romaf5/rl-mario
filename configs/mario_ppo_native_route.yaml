@@ -72,6 +72,13 @@ params:
       reset_noops: 30
       random_stages: [1-1, 1-2, 4-1, 4-2, 8-1, 8-2, 8-3, 8-4]
       self_restart_prob: 0.3
+      # backward-chaining frontier (the mechanism that consolidated 8-4's
+      # late cells): half of the restarts go to the least-practised cells
+      # that already produced a level advance. Off-route exits no longer
+      # count, so in 1-2 the winners are warp-zone/ceiling cells and the
+      # band chains back toward the ceiling entry.
+      self_restart_frontier_prob: 0.5
+      self_restart_frontier_k: 16
       n_threads: 24
       self_restart_cells: 1024
       # entering a level outside random_stages (e.g. 1-2 flag -> 1-3):
@@ -89,3 +96,6 @@ params:
       backend: lockstep
       full_game: true
       x_reward: highwater
+      # per-level clips (mp4 each + one mosaic GIF in TB) at every video epoch
+      video_levels: [1-1, 1-2, 4-1, 4-2, 8-1, 8-2, 8-3, 8-4]
+      video_level_steps: 300

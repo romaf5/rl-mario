@@ -239,9 +239,10 @@ class MarioObserver(AlgoObserver):
                     daemon=True)
                 self._video_thread.start()
 
-    def _make_eval_env(self):
+    def _make_eval_env(self, **overrides):
         """Build the env used for video recording (sequential full game from
-        1-1 by default; eval_env_kwargs overrides, e.g. start stage)."""
+        1-1 by default; eval_env_kwargs overrides, e.g. start stage;
+        `overrides` win over both, e.g. random_stages=[level])."""
         from mario_env import create_mario_env
         kwargs = dict(
             name='SuperMarioBros-v0',
@@ -261,6 +262,9 @@ class MarioObserver(AlgoObserver):
             if k in env_cfg:
                 kwargs[k] = env_cfg[k]
         kwargs.update(self.eval_env_kwargs or {})
+        kwargs.pop('video_levels', None)        # recorder options, not env
+        kwargs.pop('video_level_steps', None)
+        kwargs.update(overrides)
         backend = kwargs.pop('backend', 'retro')
         if backend in ('native', 'lockstep'):
             from mario_native_vecenv import NativeEvalEnv, LockstepVideoEnv
@@ -278,7 +282,7 @@ class MarioObserver(AlgoObserver):
         line 2 = reward event flash (LOOP/DEATH/OFF-ROUTE/IDLE/CLEAR)."""
         from PIL import Image, ImageDraw
         world, stage, x_pos, rew, r_step, event = stat
-        bar_h = 28
+        bar_h = 32                      # 224 + 32 = 256: codec-friendly height
         img = Image.fromarray(frame)
         canvas = Image.new('RGB', (img.width, img.height + bar_h), (0, 0, 0))
         canvas.paste(img, (0, 0))
@@ -290,8 +294,101 @@ class MarioObserver(AlgoObserver):
         if event:
             color = (80, 255, 80) if event.startswith('CLEAR') \
                 else (255, 80, 80)
-            draw.text((4, img.height + 15), event, fill=color, font=font)
+            draw.text((4, img.height + 17), event, fill=color, font=font)
         return canvas
+
+    def _play_clip(self, model, env, max_steps, epoch_num):
+        """Play one clip with the sampled policy.
+
+        Returns (raw_frames, pil_frames_with_strip, step_stats, last_info,
+        total_reward, frames_per_step). Closes the env."""
+        from PIL import ImageFont
+        frames, step_stats = [], []
+        obs = env.reset()
+        total_reward, info = 0, {}
+        prev_life, event, event_ttl = None, '', 0
+        per_step_frames = getattr(env.unwrapped, 'frames_per_step',
+                                  4 if hasattr(env.unwrapped, 'frames4')
+                                  else 1)
+        is_rnn = self.algo.is_rnn
+        if is_rnn:
+            # Default state is (num_layers, num_actors, hidden)
+            # For single-env eval we need (num_layers, 1, hidden)
+            rnn_states = model.get_default_rnn_state()
+            rnn_states = [s[:, :1, :].contiguous() for s in rnn_states]
+        for step in range(max_steps):
+            obs_tensor = torch.from_numpy(obs).float().unsqueeze(0)
+            with torch.no_grad():
+                input_dict = {'obs': obs_tensor, 'is_train': False}
+                if is_rnn:
+                    input_dict['rnn_states'] = rnn_states
+                    input_dict['seq_length'] = 1
+                res = model(input_dict)
+            if is_rnn:
+                rnn_states = res.get('rnn_states', rnn_states)
+            # sample, don't argmax: the stochastic policy is what PPO
+            # optimizes; argmax has fixed points (same frame -> same
+            # action, e.g. running into a stair block forever) that the
+            # trained policy never exhibits
+            action = torch.distributions.Categorical(
+                logits=res['logits']).sample().item()
+            obs, reward, done, info = env.step(action)
+            total_reward += reward
+            # reward events, flashed on the strip for ~1s so penalties
+            # are auditable from the video (R alone hides a -100 that
+            # lands on the same step as a +8)
+            life = info.get('life', prev_life)
+            if info.get('looped'):
+                event, event_ttl = 'LOOP %+.0f' % reward, 60
+            elif info.get('offroute'):
+                event, event_ttl = 'OFF-ROUTE %+.0f' % reward, 60
+            elif info.get('idle_timeout'):
+                event, event_ttl = 'IDLE TIMEOUT %+.0f' % reward, 60
+            elif prev_life is not None and life < prev_life:
+                event, event_ttl = 'DEATH %+.0f' % reward, 60
+            elif info.get('flag_get') or info.get('victory'):
+                event, event_ttl = 'CLEAR %+.0f' % reward, 60
+            prev_life = life
+            stat = (info.get('world', 1), info.get('stage', 1),
+                    info.get('x_pos', 0), total_reward, reward,
+                    event if event_ttl > 0 else '')
+            event_ttl -= per_step_frames
+            if hasattr(env.unwrapped, 'frames4'):
+                # native eval: all 4 emulated frames -> no aliasing
+                for f in env.unwrapped.frames4:
+                    frames.append(f)
+                    step_stats.append(stat)
+            else:
+                frames.append(env.unwrapped.screen.copy())
+                step_stats.append(stat)
+            if done:
+                break
+        env.close()
+        font = ImageFont.load_default()
+        pil_frames = [self.draw_strip(f, epoch_num, s, font)
+                      for s, f in zip(step_stats, frames)]
+        return frames, pil_frames, step_stats, info, total_reward, per_step_frames
+
+    @staticmethod
+    def _gif_bytes(pil_frames, per_step, every=None):
+        """Encode frames as an animated GIF. Delays are centisecond-
+        quantized: at 60fps material use every 2nd frame with a 40/30/30ms
+        cycle (33.3ms avg), every 4th with 70/70/60 (66.7ms); at 15fps
+        material use all frames with the 70/70/60 cycle."""
+        import tempfile
+        if every is None:
+            every = 2 if per_step >= 2 else 1
+        gif_frames = pil_frames[::every]
+        fast = per_step >= 2 and every <= 2
+        durations = [(40 if i % 3 == 2 else 30) if fast else
+                     (60 if i % 3 == 2 else 70) for i in range(len(gif_frames))]
+        path = tempfile.NamedTemporaryFile(suffix='.gif', delete=False).name
+        gif_frames[0].save(path, save_all=True, append_images=gif_frames[1:],
+                           duration=durations, loop=0, optimize=True)
+        with open(path, 'rb') as f:
+            data = f.read()
+        os.remove(path)
+        return data
 
     def _record_video(self, epoch_num, model):
         """Record gameplay: PIL GIF to TensorBoard + MP4 to disk.
@@ -308,93 +405,12 @@ class MarioObserver(AlgoObserver):
             except ImportError:
                 from tensorboard.compat.proto.summary_pb2 import Summary
 
-            env = self._make_eval_env()
-
-            frames = []
-            step_stats = []
-            obs = env.reset()
-            done = False
-            total_reward = 0
-            info = {}
-            prev_life, event, event_ttl = None, '', 0
-            per_step_frames = getattr(env.unwrapped, 'frames_per_step',
-                                      4 if hasattr(env.unwrapped, 'frames4')
-                                      else 1)
-
-            is_rnn = self.algo.is_rnn
-            if is_rnn:
-                # Default state is (num_layers, num_actors, hidden)
-                # For single-env eval we need (num_layers, 1, hidden)
-                rnn_states = model.get_default_rnn_state()
-                rnn_states = [s[:, :1, :].contiguous() for s in rnn_states]
-
-            for step in range(self.video_max_steps):
-                obs_tensor = torch.from_numpy(obs).float().unsqueeze(0)
-
-                with torch.no_grad():
-                    input_dict = {
-                        'obs': obs_tensor,
-                        'is_train': False,
-                    }
-                    if is_rnn:
-                        input_dict['rnn_states'] = rnn_states
-                        input_dict['seq_length'] = 1
-                    res = model(input_dict)
-
-                if is_rnn:
-                    rnn_states = res.get('rnn_states', rnn_states)
-
-                # sample, don't argmax: the stochastic policy is what PPO
-                # optimizes; argmax has fixed points (same frame -> same
-                # action, e.g. running into a stair block forever) that the
-                # trained policy never exhibits
-                action = torch.distributions.Categorical(
-                    logits=res['logits']).sample().item()
-                obs, reward, done, info = env.step(action)
-                total_reward += reward
-                # reward events, flashed on the strip for ~1s so penalties
-                # are auditable from the video (R alone hides a -100 that
-                # lands on the same step as a +8)
-                life = info.get('life', prev_life)
-                if info.get('looped'):
-                    event, event_ttl = 'LOOP %+.0f' % reward, 60
-                elif info.get('offroute'):
-                    event, event_ttl = 'OFF-ROUTE %+.0f' % reward, 60
-                elif info.get('idle_timeout'):
-                    event, event_ttl = 'IDLE TIMEOUT %+.0f' % reward, 60
-                elif prev_life is not None and life < prev_life:
-                    event, event_ttl = 'DEATH %+.0f' % reward, 60
-                elif info.get('flag_get') or info.get('victory'):
-                    event, event_ttl = 'CLEAR %+.0f' % reward, 60
-                prev_life = life
-                stat = (info.get('world', 1), info.get('stage', 1),
-                        info.get('x_pos', 0), total_reward, reward,
-                        event if event_ttl > 0 else '')
-                event_ttl -= per_step_frames
-                if hasattr(env.unwrapped, 'frames4'):
-                    # native eval: all 4 emulated frames -> no aliasing
-                    for f in env.unwrapped.frames4:
-                        frames.append(f)
-                        step_stats.append(stat)
-                else:
-                    frames.append(env.unwrapped.screen.copy())
-                    step_stats.append(stat)
-                if done:
-                    break
-
-            env.close()
+            # main clip: sequential game from the eval start (1-1 by default)
+            (frames, pil_frames, step_stats, info, total_reward,
+             per_step) = self._play_clip(model, self._make_eval_env(),
+                                         self.video_max_steps, epoch_num)
 
             if len(frames) > 4:
-                # Stats strip below the frame: gameplay pixels stay untouched.
-                # 240 + 16 = 256 high, which video encoders also prefer.
-                font = ImageFont.load_default()
-                pil_frames = [self.draw_strip(f, epoch_num, stat, font)
-                              for stat, f in zip(step_stats, frames)]
-
-                # frames per step: full-rate capture on native/lockstep
-                per_step = getattr(env.unwrapped, 'frames_per_step',
-                                   4 if hasattr(env.unwrapped, 'frames4')
-                                   else 1)
                 run_dir = os.path.dirname(os.path.dirname(
                     self.writer.file_writer.event_writer._ev_writer._file_name))
                 video_dir = os.path.join(run_dir, 'videos')
@@ -404,27 +420,8 @@ class MarioObserver(AlgoObserver):
                 imageio.mimsave(mp4_path, [np.asarray(c) for c in pil_frames],
                                 fps=60 if per_step >= 2 else 15)
 
-                # GIF for the TB Images tab. Delays are centisecond-quantized:
-                # at 60fps material use every 2nd frame with a 3/3/4cs cycle
-                # (33.3ms avg); at 15fps use a 70/70/60ms cycle (66.7ms avg).
-                if per_step >= 2:
-                    gif_frames = pil_frames[::2]
-                    # PIL durations are MILLISECONDS; browsers clamp <20ms
-                    # to 100ms. 40/30/30 averages the true 33.3ms.
-                    durations = [40 if i % 3 == 2 else 30
-                                 for i in range(len(gif_frames))]
-                else:
-                    gif_frames = pil_frames
-                    durations = [60 if i % 3 == 2 else 70
-                                 for i in range(len(gif_frames))]
-                gif_path = tempfile.NamedTemporaryFile(suffix='.gif', delete=False).name
-                gif_frames[0].save(gif_path, save_all=True,
-                                   append_images=gif_frames[1:],
-                                   duration=durations,
-                                   loop=0, optimize=True)
-                with open(gif_path, 'rb') as f:
-                    gif_bytes = f.read()
-                os.remove(gif_path)
+                # GIF for the TB Images tab
+                gif_bytes = self._gif_bytes(pil_frames, per_step)
 
                 w, h = pil_frames[0].size
                 summary = Summary(value=[Summary.Value(
@@ -435,6 +432,46 @@ class MarioObserver(AlgoObserver):
                 )])
                 self.writer.file_writer.add_summary(summary, epoch_num)
                 self.writer.flush()
+
+                # per-level clips (multi-level training): one clip from each
+                # level's door -> mp4 each + one synchronized mosaic GIF, so
+                # the policy's play on every level can be compared at once
+                ek = self.eval_env_kwargs or {}
+                levels = ek.get('video_levels')
+                if levels is None:
+                    rs = (self.algo.env_config or {}).get('random_stages')
+                    levels = list(rs) if rs and len(rs) > 1 else []
+                if levels:
+                    lvl_steps = int(ek.get('video_level_steps', 300))
+                    sizes = []
+                    for lvl in levels:
+                        env_l = self._make_eval_env(random_stages=[lvl],
+                                                    full_game=True)
+                        fr, pf, st, inf_l, rew_l, ps = self._play_clip(
+                            model, env_l, lvl_steps, epoch_num)
+                        if len(fr) < 4:
+                            continue
+                        imageio.mimsave(
+                            os.path.join(video_dir,
+                                         f'epoch_{epoch_num}_{lvl}.mp4'),
+                            [np.asarray(c) for c in pf],
+                            fps=60 if ps >= 2 else 15)
+                        gb = self._gif_bytes(pf, ps)
+                        gw, gh = pf[0].size
+                        self.writer.file_writer.add_summary(Summary(value=[
+                            Summary.Value(tag=f'gameplay/level_{lvl}',
+                                          image=Summary.Image(
+                                              height=gh, width=gw,
+                                              colorspace=3,
+                                              encoded_image_string=gb))]),
+                            epoch_num)
+                        self.writer.add_scalar(f'eval/level_max_x/{lvl}',
+                                               max(s[2] for s in st),
+                                               epoch_num)
+                        sizes.append(len(gb) // 1024)
+                    self.writer.flush()
+                    print(f'  [Video] Epoch {epoch_num}: {len(sizes)} level '
+                          f'clips, GIF KB {sizes}')
 
                 x_pos = info.get('x_pos', 0)
                 world = info.get('world', 1)
