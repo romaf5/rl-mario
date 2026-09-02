@@ -379,6 +379,11 @@ class MarioObserver(AlgoObserver):
                 gp0 = gp
             if done or (stop_on_level_change and gp is not None
                         and gp != gp0 and step > 8):
+                # hold the terminal frame ~1s so the event flash (LOOP /
+                # DEATH / GAME OVER ...) is actually visible, not 4 frames
+                for _ in range(60):
+                    frames.append(frames[-1])
+                    step_stats.append(stat)
                 break
         env.close()
         cause = ('victory' if info.get('victory') else 'loop' if info.get('looped')
