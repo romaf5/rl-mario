@@ -86,6 +86,7 @@ class _Lib:
             lib.benv_set_ram.argtypes = [ctypes.c_void_p, ctypes.c_int,
                                          ctypes.c_char_p]
             lib.benv_set_skip.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            lib.benv_transit.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
             cls._inst = lib
         return cls._inst
 
@@ -107,7 +108,7 @@ class MarioNativeVecEnv(IVecEnv):
                  explore_episode_steps=150,
                  self_restart_frontier_prob=0.0,
                  self_restart_frontier_k=16, idle_timeout=150,
-                 offroute_penalty=0.0, **unknown):
+                 offroute_penalty=0.0, fail_penalty=15.0, **unknown):
         assert action_type == 'complex'
         n = self.num_actors = num_actors
         self.lib = _Lib()
@@ -172,6 +173,12 @@ class MarioNativeVecEnv(IVecEnv):
         self.obs_u8 = np.zeros((n, 84, 84), dtype=np.uint8)
         self.ram = np.zeros((n, 0x800), dtype=np.uint8)
         self.actions_buf = np.zeros(n, dtype=np.int32)
+        # uniform cost of every attempt-ending failure (death, idle timeout;
+        # loop/off-route use their own knobs): equal costs leave no reason
+        # to prefer one failure over another (e.g. suicide over a loop)
+        self.fail_penalty = float(fail_penalty)
+        self.transit = np.zeros(n, dtype=np.uint8)      # C++ per-step flag
+        self.transit_hold = np.zeros(n, dtype=bool)     # carried over held steps
 
         self.observation_space = spaces.Box(0.0, 1.0, (84, 84, FRAME_STACK),
                                             np.float32)
@@ -379,6 +386,13 @@ class MarioNativeVecEnv(IVecEnv):
         else:
             self.lib.benv_step(self.env, self.actions_buf.ctypes.data,
                                self.obs_u8.ctypes.data, self.ram.ctypes.data)
+        if self._raw_steps or self._rgb4 is not None:
+            # single-env eval paths have no skip loop to observe: treat
+            # every backward jump as a legit transition (eval reward is
+            # not trained on; never cut a replay on a false loop)
+            self.transit[:] = 1
+        else:
+            self.lib.benv_transit(self.env, self.transit.ctypes.data)
         ram = self.ram
 
         x = self._x(); t = self._time(); gp = self._gp()
@@ -412,19 +426,35 @@ class MarioNativeVecEnv(IVecEnv):
         else:
             victory = (gmode == 2) & (gp == 31)
 
+        # ---- backward x jumps: legit transition vs loop ----
+        # A scripted transition (pipe/vine/entrance) seen by the C++ skip
+        # loop explains a backward jump (8-4 pipe 3 -> water: same area
+        # byte, x frame restarts at 0). Carried across a held step so it
+        # lands on the CONFIRMED step with the jump. A backward jump with no
+        # transition is a maze loop teleport: penalised and (in training)
+        # terminal, so no state ever earns different rewards for the same
+        # forward run depending on invisible history.
+        tr = self.transit.astype(bool) | self.transit_hold
+        self.transit_hold = np.where(held, tr, False)
+        back = ((x - self.x_last) < -96) & ~held & ~died & ~flag & \
+               (area_b == self.prev_area) & (gp == self.progress)
+        legit = back & tr
+        loop = back & ~tr & (self.loop_penalty > 0)
+
         # ---- base reward (block granularity) ----
         if self.x_reward == 'highwater':
             ctx_change = (life != self.lives) | (area_b != self.prev_area) | \
-                         (gp != self.progress)
+                         (gp != self.progress) | legit
             self.hw = np.where(ctx_change, x, self.hw)
+            self.max_x = np.where(legit, 0, self.max_x)
             r_x = np.clip(x - self.hw, 0, 20).astype(np.float32)
             self.hw = np.maximum(self.hw, x)
         else:
             dx = x - self.x_last
             r_x = np.where(np.abs(dx) > 24, 0, dx).astype(np.float32)
         r_t = np.minimum(t - self.time_last, 0).astype(np.float32)
-        r_death = np.where(died, -15.0, 0.0).astype(np.float32)
-        reward = np.clip(r_x + r_t + r_death, -15, 20)
+        reward = np.clip(r_x + r_t, -15, 20) - \
+            np.where(died, self.fail_penalty, 0.0).astype(np.float32)
         self.x_last = x
         self.time_last = t
 
@@ -470,8 +500,6 @@ class MarioNativeVecEnv(IVecEnv):
 
         # ---- loop penalty / x shaping / idle ----
         xd = x - self.prev_x
-        loop = (self.loop_penalty > 0) & (xd < -96) & \
-               (area_b == self.prev_area) & ~flag & ~died & ~held
         reward = reward - np.where(loop, self.loop_penalty, 0)
         self.looped |= loop
         area_changed = area_b != self.prev_area
@@ -493,7 +521,7 @@ class MarioNativeVecEnv(IVecEnv):
         # learned to park); unbounded drip made dying cheaper than trying.
         # Equal terminal cost removes both attractors.
         idle_to = self.idle >= self.idle_timeout
-        reward = reward - np.where(idle_to, 15.0, 0)
+        reward = reward - np.where(idle_to, self.fail_penalty, 0)
         self.prev_x = x
         self.max_x = np.maximum(self.max_x, x)
 
@@ -534,7 +562,7 @@ class MarioNativeVecEnv(IVecEnv):
             # and a state with ~25s is still a practiceable episode.
             can = (((fstate == 0) | (swim_a == 1)) & ~dying & ~dead
                    & (gmode == 1) & (t > 25)
-                   & ~held & ~died & ~area_changed)   # no phantom cells
+                   & ~held & ~died & ~area_changed & ~back)  # no phantom cells
             for i in np.nonzero(can)[0]:
                 # y-band in the key: standing ON a block/pipe is a different
                 # rung than the floor below it; swim flag disambiguates the
@@ -605,7 +633,10 @@ class MarioNativeVecEnv(IVecEnv):
         self.lives = life
 
         infos = []
-        done_pre = real_done | (life_lost if self.episode_life else False)
+        # a loop ends the PPO episode like a lost life (the game itself
+        # continues from the teleport point with rebased trackers)
+        done_pre = real_done | ((life_lost | loop) if self.episode_life
+                                else False)
         for i in range(n):
             if not done_pre[i] and not self.dense_infos:
                 infos.append({})   # observer only reads infos of done envs

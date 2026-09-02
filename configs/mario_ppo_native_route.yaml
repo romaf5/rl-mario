@@ -56,15 +56,17 @@ params:
       action_type: complex
       episode_life: true
       x_reward: highwater
-      loop_penalty: 30
-      backtrack_penalty: 0.15
+      # reward set v2 -- see mario_ppo_native_84.yaml for the rationale
+      loop_penalty: 100
+      fail_penalty: 100
+      backtrack_penalty: 0
       novelty_bonus: 3.0
       full_game: true
       stage_bonus: 500
       idle_penalty: 0
       idle_timeout: 450
       idle_threshold: 10
-      progress_reward: 0.001
+      progress_reward: 0
       skip: 4
       sticky_actions: 0.1
       reset_noops: 30

@@ -96,12 +96,16 @@ inline int game_time(Core& c) {
 // normal gameplay -- the game is in a terminal screen (e.g. the ending
 // after the final axe) and further per-step skipping would burn 5000
 // frames forever; the caller latches post_game and stops hacking.
-bool frame_hacks(Core& c, bool single_stage) {
+bool frame_hacks(Core& c, bool single_stage, uint8_t* transit = nullptr) {
     // kill mario during the dying animation
     if (is_dying(c)) {
         c.ram[0x0E] = 0x06;
         smb_frame(&c, 0);
     }
+    // scripted transition (pipe/vine/entrance engine states, $0E 0-5,7):
+    // reported to the caller so a same-area backward x jump can be told
+    // apart from a maze loop teleport, which never leaves player control
+    if (transit && is_busy(c)) *transit = 1;
     if (!single_stage && is_world_over(c)) {   // skip end-of-world cutscene
         int t = game_time(c);
         for (int i = 0; i < 2000 && game_time(c) == t; i++)
@@ -129,6 +133,7 @@ struct BatchEnv {
     bool single_stage = false;
     std::vector<Core*> cores;
     std::vector<uint8_t> post_game;   // per-env: terminal screen latched
+    std::vector<uint8_t> transit;     // per-env: scripted transition this step
     // threadpool
     std::vector<std::thread> threads;
     std::mutex mu;
@@ -167,9 +172,10 @@ struct BatchEnv {
         Core* c = cores[i];
         uint8_t b = (uint8_t)actions[i];
         static thread_local uint8_t fa[W * H], fb2[W * H], mx[W * H];
+        transit[i] = 0;
         for (int k = 0; k < skip; k++) {
             smb_frame(c, b);
-            if (!post_game[i] && frame_hacks(*c, single_stage))
+            if (!post_game[i] && frame_hacks(*c, single_stage, &transit[i]))
                 post_game[i] = 1;
             if (k == skip - 2) render_gray(*c, fa);
             if (k == skip - 1) render_gray(*c, fb2);
@@ -191,6 +197,7 @@ BatchEnv* benv_create(const uint8_t* rom, int rom_len, int n, int n_threads,
     e->n = n;
     e->single_stage = single_stage;
     e->post_game.assign(n, 0);
+    e->transit.assign(n, 0);
     for (int i = 0; i < n; i++) e->cores.push_back(smb_create(rom, rom_len));
     for (int t = 0; t < n_threads; t++)
         e->threads.emplace_back([e]{ e->worker(); });
@@ -227,6 +234,11 @@ void benv_step(BatchEnv* e, const int32_t* actions, uint8_t* obs,
 
 int benv_state_size(void) { return smb_state_size(); }
 void benv_set_skip(BatchEnv* e, int skip) { e->skip = skip < 2 ? 2 : skip; }
+// per-env flag: a scripted transition (pipe/vine/entrance) ran inside the
+// last benv_step -- distinguishes legit x-frame changes from loop teleports
+void benv_transit(BatchEnv* e, uint8_t* out) {
+    memcpy(out, e->transit.data(), e->n);
+}
 
 // standard NES palette (2C02), RGB triplets per color index
 static const uint8_t NES_PAL[64][3] = {

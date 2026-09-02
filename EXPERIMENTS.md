@@ -68,6 +68,9 @@
 | Routev4 | all-fixes route run | 6000 | **WARPS DISCOVERED (1-2 warp 18-25%); eval plays 1-1 -> warp -> 4-1**; clears 49/41/34/12; 4-2 vine warp = next gate |
 | NativeRoute v1 | 8 levels, curriculum, full toolbox | 2900 | clears: 1-1 59% 4-1 58% 8-1 52% 1-2 48% 4-2 37%; NO warps; eval undersold ~2x by cross-renderer shift (fixed: native eval adapter) |
 | NativeRoute v2 | native eval + full toolbox refresh | running | rewards recovering (3.3k) |
+| Native84 v34-v38 | skip-4 revert; idle timeout 150 -> 450; review fixes (debounced ctx, phantom cells, eviction) | ~600 ea | v36 idle 150 killed Bowser patience (conversion collapse); v38 stable ~3% vr, door mean ~2570 = corridor loop point |
+| Routev5-v10 | same fixes; stochastic eval videos; off-route = -100 terminal; archive keyed by current level (512 -> 312 cells) | ~2000 ea | v9: clear/1-2 20% but warp/1-2 0% (flag paid +500 and then 1-3 x-reward); world 8 got <1% of restarts (evicted at cap) |
+| Native84 v40 / Routev11 | **reward set v2**: highwater rebased on scripted backward transitions (C++ transit flag), loop = -100 + episode end, uniform fail cost 100, no growth/backtrack terms | running | probes: corridor loop -100/done then +12/step; water pipe no penalty, swimming rewarded; death -100 |
 
 ## Lessons
 - Metrics must separate from-door and from-restart episodes (mario/door_*).
@@ -85,3 +88,9 @@
 - Archive states can be doomed (saved mid enemy contact, low timer,
   0 lives): gate saves on survivability signals, prune/re-roll by
   early-death rate, never downgrade a cell's timer on refresh.
+- Reward must be a function of what the agent SEES. Per-life highwater
+  x kept paying 0 after a maze loop (and through the whole 8-4 water
+  section: same area byte 3), so an identical forward run earned +8 or
+  -0.3 depending on invisible history; position-scaled growth paid the
+  same run 4x more late in the level. Fix: end the episode on loops,
+  rebase on scripted transitions, one flat cost for every failure.
