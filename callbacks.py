@@ -423,6 +423,60 @@ class MarioObserver(AlgoObserver):
         os.remove(path)
         return data
 
+    def _clean_door_eval(self, model, epoch_num, n=32, max_steps=600):
+        """Door episodes WITHOUT exploration noise (no sticky/random actions,
+        no restarts): what the policy can do vs what the noise does to it.
+        Training door metrics run under noise (8-4: 42% of door episodes
+        died in the opening lava with 5% random + 10% sticky actions while
+        the clean policy entered pipe 1 61/64 times)."""
+        from mario_native_vecenv import MarioNativeVecEnv
+        ec = dict(self.algo.env_config or {})
+        for k in ('explore_eps', 'sticky_actions', 'self_restart_prob',
+                  'explore_episode_prob', 'novelty_bonus'):
+            ec[k] = 0
+        for k in ('name', 'action_type', 'archive_path'):
+            ec.pop(k, None)
+        ec['n_threads'] = 4
+        env = MarioNativeVecEnv('clean', n, dense_infos=False, **ec)
+        try:
+            obs = env.reset()
+            max_x = np.zeros(n); fin = {}
+            for step in range(max_steps):
+                with torch.no_grad():
+                    res = model({'obs': torch.from_numpy(obs).float(),
+                                 'is_train': False})
+                a = torch.distributions.Categorical(
+                    logits=res['logits']).sample().numpy()
+                obs, r, d, infos = env.step(a)
+                for i in range(n):
+                    if i in fin:
+                        continue
+                    max_x[i] = max(max_x[i], env.max_x[i])
+                    if d[i]:
+                        inf = infos[i] if isinstance(infos, list) else {}
+                        fin[i] = ('victory' if inf.get('victory') else
+                                  'loop' if inf.get('looped') else
+                                  'idle' if inf.get('idle_timeout') else
+                                  'offroute' if inf.get('offroute') else
+                                  'death')
+                if len(fin) == n:
+                    break
+            for i in range(n):
+                fin.setdefault(i, 'running')
+            counts = {k: sum(1 for v in fin.values() if v == k) / n
+                      for k in ('death', 'loop', 'victory', 'idle', 'offroute')}
+            self.writer.add_scalar('eval/door_max_x_mean', float(max_x.mean()),
+                                   epoch_num)
+            self.writer.add_scalar('eval/door_max_x_max', float(max_x.max()),
+                                   epoch_num)
+            for k, v in counts.items():
+                self.writer.add_scalar(f'eval/door_{k}_rate', v, epoch_num)
+            print(f'  [Eval] clean door x{n}: max_x mean {max_x.mean():.0f} '
+                  f'max {max_x.max():.0f} | ' + ' '.join(
+                      f'{k} {v:.2f}' for k, v in counts.items()))
+        finally:
+            env.close()
+
     def _record_video(self, epoch_num, model):
         """Record gameplay: PIL GIF to TensorBoard + MP4 to disk.
 
@@ -433,6 +487,10 @@ class MarioObserver(AlgoObserver):
             import imageio
             import tempfile
             from PIL import Image, ImageDraw, ImageFont
+            try:
+                self._clean_door_eval(model, epoch_num)
+            except Exception as e:
+                print(f'  [Eval] clean door eval failed: {e}')
             try:
                 from tensorboardX.proto.summary_pb2 import Summary
             except ImportError:

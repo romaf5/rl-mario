@@ -63,7 +63,7 @@ params:
       idle_threshold: 10
       progress_reward: 0
       skip: 4
-      sticky_actions: 0.1
+      sticky_actions: 0.05
       reset_noops: 30
       random_stages: [8-4]
       self_restart_prob: 0.3
@@ -72,7 +72,7 @@ params:
       novelty_y_band: 24
       score_reward: 0.1
       novelty_global: true
-      explore_eps: 0.05
+      explore_eps: 0.02
       archive_path: native/archive_84ram.pkl
       explore_episode_prob: 0.4
       explore_episode_steps: 300

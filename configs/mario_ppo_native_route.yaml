@@ -68,7 +68,7 @@ params:
       idle_threshold: 10
       progress_reward: 0
       skip: 4
-      sticky_actions: 0.1
+      sticky_actions: 0.05
       reset_noops: 30
       random_stages: [1-1, 1-2, 4-1, 4-2, 8-1, 8-2, 8-3, 8-4]
       self_restart_prob: 0.3
@@ -86,7 +86,7 @@ params:
       # clearly bad; smaller than the ~+300 x-reward of finishing the level
       # so idling/dying before the exit never becomes the better option.
       offroute_penalty: 100
-      explore_eps: 0.05
+      explore_eps: 0.02
       novelty_global: true
       novelty_y_band: 24
       score_reward: 0.1
