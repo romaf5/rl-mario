@@ -71,7 +71,12 @@ params:
       random_stages: [1-1, 1-2, 4-1, 4-2, 8-1, 8-2, 8-3, 8-4]
       self_restart_prob: 0.3
       n_threads: 24
-      self_restart_cells: 512
+      self_restart_cells: 1024
+      # entering a level outside random_stages (e.g. 1-2 flag -> 1-3):
+      # -100 and terminal. Bigger than a death (-15) so the wrong exit is
+      # clearly bad; smaller than the ~+300 x-reward of finishing the level
+      # so idling/dying before the exit never becomes the better option.
+      offroute_penalty: 100
       explore_eps: 0.05
       novelty_global: true
       novelty_y_band: 24

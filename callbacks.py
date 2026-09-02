@@ -47,6 +47,7 @@ class MarioObserver(AlgoObserver):
         self.episode_victories = []
         self.episode_loops = []
         self.episode_timeouts = []
+        self.episode_offroute = []
         self.door_x = []          # max_x of NON-restart (from-door) episodes
         self._clear_ema = {}  # start_stage -> EMA of clear rate
 
@@ -110,6 +111,8 @@ class MarioObserver(AlgoObserver):
             self.door_x.append(info.get('max_x_pos', 0))
         if 'idle_timeout' in info:
             self.episode_timeouts.append(float(info['idle_timeout']))
+        if 'offroute' in info:
+            self.episode_offroute.append(float(info['offroute']))
 
         # Also track game scores for the default scorer
         game_res = info.get('scores', None)
@@ -180,6 +183,10 @@ class MarioObserver(AlgoObserver):
             self.writer.add_scalar('mario/loop_rate',
                                    float(np.mean(self.episode_loops)),
                                    epoch_num)
+        if len(self.episode_offroute) > 0:
+            self.writer.add_scalar('mario/offroute_rate',
+                                   float(np.mean(self.episode_offroute)),
+                                   epoch_num)
         if len(self.episode_timeouts) > 0:
             self.writer.add_scalar('mario/idle_timeout_rate',
                                    float(np.mean(self.episode_timeouts)),
@@ -210,6 +217,7 @@ class MarioObserver(AlgoObserver):
         self.episode_victories.clear()
         self.episode_loops.clear()
         self.episode_timeouts.clear()
+        self.episode_offroute.clear()
         self.door_x.clear()
 
         # Record video periodically, on a background thread so training never

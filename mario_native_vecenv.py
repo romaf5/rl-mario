@@ -106,7 +106,8 @@ class MarioNativeVecEnv(IVecEnv):
                  archive_path=None, explore_episode_prob=0.0,
                  explore_episode_steps=150,
                  self_restart_frontier_prob=0.0,
-                 self_restart_frontier_k=16, idle_timeout=150, **unknown):
+                 self_restart_frontier_k=16, idle_timeout=150,
+                 offroute_penalty=0.0, **unknown):
         assert action_type == 'complex'
         n = self.num_actors = num_actors
         self.lib = _Lib()
@@ -121,6 +122,16 @@ class MarioNativeVecEnv(IVecEnv):
 
         self.stages = list(random_stages) if random_stages else ['FullGame']
         self.states = {s: _load_state(s) for s in self.stages}
+        # off-route guard (full-game training on a level SET): a confirmed
+        # move into a level outside the set is a dead end -- penalised and
+        # terminal. Without it the 1-2 flag paid +500 and then unlimited
+        # x-reward in 1-3, so the flag beat the warp (which pays +5500 once).
+        self.offroute_penalty = float(offroute_penalty)
+        self.route_gps = None
+        if full_game and random_stages and self.offroute_penalty > 0:
+            self.route_gps = np.array(sorted(
+                (int(s.split('-')[0]) - 1) * 4 + int(s.split('-')[1]) - 1
+                for s in self.stages), dtype=np.int32)
         self.stage_weights = None
         self.episode_life = episode_life
         self.stage_bonus = stage_bonus
@@ -430,11 +441,18 @@ class MarioNativeVecEnv(IVecEnv):
         confirm = inc & (gp == self.pending)
         delta = gp - self.progress
         ok = confirm & (delta <= 15)
+        # off-route level entry: no bonus, a penalty, and terminal (below)
+        if self.route_gps is not None:
+            off = ok & ~np.isin(gp, self.route_gps)
+        else:
+            off = np.zeros(n, dtype=bool)
         if ok.any():
+            good = ok & ~off
             if not self.single_stage:
-                reward = reward + np.where(ok, self.stage_bonus * delta, 0)
-            self.cleared += ok.astype(np.int32)
-            self.warped |= ok & (delta >= 2)
+                reward = reward + np.where(good, self.stage_bonus * delta, 0)
+                reward = reward - np.where(off, self.offroute_penalty, 0)
+            self.cleared += good.astype(np.int32)
+            self.warped |= good & (delta >= 2)
             self.progress = np.where(ok, gp, self.progress)
             # rebase within-stage x tracking on level change
             self.max_x = np.where(ok, 0, self.max_x)
@@ -521,8 +539,13 @@ class MarioNativeVecEnv(IVecEnv):
                 # y-band in the key: standing ON a block/pipe is a different
                 # rung than the floor below it; swim flag disambiguates the
                 # water zone (same area byte + low x as the level start)
-                cell = (self.start_stage[i], int(area[i]), int(x[i]) // 128,
-                        int(ypix_a[i]) // 64, int(swim_a[i]))
+                # keyed by the level Mario is IN (not the episode's start
+                # stage): the same physical spot reached via 1-1 -> 1-2 or
+                # from the 1-2 door is one cell. Start-stage keys held the
+                # same states 3-4x over and crowded world 8 out at the cap.
+                g = int(gp[i])
+                cell = ('%d-%d' % (g // 4 + 1, g % 4 + 1), int(area[i]),
+                        int(x[i]) // 128, int(ypix_a[i]) // 64, int(swim_a[i]))
                 if cell in self.ep_cells[i]:
                     continue
                 self.ep_cells[i].add(cell)
@@ -577,7 +600,7 @@ class MarioNativeVecEnv(IVecEnv):
         if self.single_stage:
             real_done = dying | dead | flag | zombie | wrapped | idle_to
         else:
-            real_done = game_over | victory | zombie | wrapped | idle_to
+            real_done = game_over | victory | zombie | wrapped | idle_to | off
         life_lost = life < self.lives
         self.lives = life
 
@@ -604,6 +627,7 @@ class MarioNativeVecEnv(IVecEnv):
                 'start_stage': self.start_stage[i],
                 'self_restart': bool(self.was_restart[i]),
                 'idle_timeout': bool(idle_to[i]),
+                'offroute': bool(off[i]),
             })
 
         done = done_pre
