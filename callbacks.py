@@ -258,7 +258,7 @@ class MarioObserver(AlgoObserver):
         env_cfg = self.algo.env_config or {}
         for k in ('idle_timeout', 'idle_penalty', 'idle_threshold',
                   'loop_penalty', 'fail_penalty', 'backtrack_penalty',
-                  'progress_reward', 'score_reward', 'x_reward'):
+                  'progress_reward', 'score_reward', 'x_reward', 'obs_mode'):
             if k in env_cfg:
                 kwargs[k] = env_cfg[k]
         kwargs.update(self.eval_env_kwargs or {})

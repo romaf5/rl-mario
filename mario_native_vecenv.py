@@ -27,6 +27,10 @@ ROM = os.path.join(HERE, 'retro_integration', 'SuperMarioBros-Nes-v0',
 STATE_DIR = os.path.join(HERE, 'native', 'states')
 
 FRAME_STACK = 4
+# RAM feature layout: 12x13 tile grid (2 cols behind Mario, 9 ahead; all 13
+# playfield rows) + 5 enemy slots x 4 + 12 Mario/game scalars
+GRID_COLS, GRID_ROWS = 12, 13
+RAM_FEATS = GRID_COLS * GRID_ROWS + 5 * 4 + 12
 
 # COMPLEX_MOVEMENT -> native button byte (bit0=A,1=B,2=Sel,3=Start,4=U,5=D,6=L,7=R)
 _ACTION_BYTES = np.array([
@@ -108,7 +112,8 @@ class MarioNativeVecEnv(IVecEnv):
                  explore_episode_steps=150,
                  self_restart_frontier_prob=0.0,
                  self_restart_frontier_k=16, idle_timeout=150,
-                 offroute_penalty=0.0, fail_penalty=15.0, **unknown):
+                 offroute_penalty=0.0, fail_penalty=15.0, obs_mode='pixels',
+                 **unknown):
         assert action_type == 'complex'
         n = self.num_actors = num_actors
         self.lib = _Lib()
@@ -184,8 +189,16 @@ class MarioNativeVecEnv(IVecEnv):
         self.prev_swim = np.zeros(n, dtype=np.int32)
         self.prev_in_play = np.ones(n, dtype=bool)
 
-        self.observation_space = spaces.Box(0.0, 1.0, (84, 84, FRAME_STACK),
-                                            np.float32)
+        # obs_mode 'pixels': 84x84x4 frame stack (default); 'ram': flat
+        # feature vector decoded from RAM (see _features) for an MLP policy
+        self.obs_mode = obs_mode
+        if obs_mode == 'ram':
+            self.observation_space = spaces.Box(-10.0, 10.0, (RAM_FEATS,),
+                                                np.float32)
+        else:
+            self.observation_space = spaces.Box(0.0, 1.0,
+                                                (84, 84, FRAME_STACK),
+                                                np.float32)
         self.action_space = spaces.Discrete(12)
         self._ring = np.zeros((n, 84, 84, FRAME_STACK), dtype=np.float32)
         self._ptr = 0
@@ -337,6 +350,47 @@ class MarioNativeVecEnv(IVecEnv):
             self.prev_in_play[i] = not (r[0x0E] <= 5 or r[0x0E] == 7)
 
     # ------------------------------------------------------------- IVecEnv
+    def _features(self, ram):
+        """RAM -> (n, RAM_FEATS) float32. Everything the screen would show,
+        decoded exactly: local solid-tile grid, enemy slots, Mario state,
+        plus absolute level position (the pixel policy cannot localize in a
+        visually repetitive corridor; the corridor is where 8-4 stalls)."""
+        r = ram.astype(np.int32)
+        n = r.shape[0]
+        x = r[:, 0x6D] * 256 + r[:, 0x86]
+        ypix = r[:, 0x3B8]
+        # metatile buffer: 2 screens x 13 rows x 16 cols at $0500
+        cols = (x // 16 - 2)[:, None] + np.arange(GRID_COLS)[None, :]
+        cx = cols * 16
+        base = 0x500 + ((cx // 256) % 2) * 0xD0 + (cx % 256) // 16
+        idx = (base[:, None, :] + (np.arange(GRID_ROWS) * 16)[None, :, None])
+        tiles = (np.take_along_axis(r, idx.reshape(n, -1), axis=1) != 0)
+        # enemy slots 0-4: active, dx, dy, type
+        act = (r[:, 0x0F:0x14] != 0).astype(np.float32)
+        ex = r[:, 0x6E:0x73] * 256 + r[:, 0x87:0x8C]
+        ey = r[:, 0xCF:0xD4]
+        en = np.stack([act,
+                       np.clip((ex - x[:, None]) / 256.0, -1, 2) * act,
+                       (ey - ypix[:, None]) / 240.0 * act,
+                       r[:, 0x16:0x1B] / 64.0 * act], axis=-1).reshape(n, -1)
+        sgn = lambda a: ((a + 128) % 256) - 128
+        cam = r[:, 0x71A] * 256 + r[:, 0x71C]
+        gp = np.clip(r[:, 0x75F] * 4 + r[:, 0x75C], 0, 31)
+        t = r[:, 0x7F8] * 100 + r[:, 0x7F9] * 10 + r[:, 0x7FA]
+        m = np.stack([x / 5000.0, ypix / 240.0,
+                      sgn(r[:, 0x57]) / 40.0, sgn(r[:, 0x9F]) / 8.0,
+                      (r[:, 0x1D] == 0), r[:, 0x704],
+                      r[:, 0x756] / 2.0, (r[:, 0x33] == 1) * 2.0 - 1.0,
+                      (r[:, 0x0E] == 8), gp / 31.0, t / 400.0,
+                      np.clip((x - cam) / 256.0, -1, 2)], axis=-1)
+        return np.concatenate([tiles, en, m], axis=1).astype(np.float32)
+
+    def _obs(self):
+        if self.obs_mode == 'ram':
+            return self._features(self.ram)
+        order = [(self._ptr + 1 + j) % FRAME_STACK for j in range(FRAME_STACK)]
+        return self._ring[..., order]
+
     def _fetch_obs(self, i):
         self.lib.benv_obs(self.env, int(i),
                           self.obs_u8[i].ctypes.data,
@@ -349,8 +403,7 @@ class MarioNativeVecEnv(IVecEnv):
         self._post_reset_init(range(self.num_actors), self.ram)
         f = self.obs_u8.astype(np.float32) / 255.0
         self._ring[:] = f[..., None]
-        order = [(self._ptr + 1 + j) % FRAME_STACK for j in range(FRAME_STACK)]
-        return self._ring[..., order]
+        return self._obs()
 
     def step(self, actions):
         n = self.num_actors
@@ -738,8 +791,7 @@ class MarioNativeVecEnv(IVecEnv):
                 self._ring[i] = (self.obs_u8[i].astype(np.float32)
                                  / 255.0)[..., None]
 
-        order = [(self._ptr + 1 + j) % FRAME_STACK for j in range(FRAME_STACK)]
-        obs = self._ring[..., order]
+        obs = self._obs()
         return obs, reward.astype(np.float32), done, infos
 
     def get_number_of_agents(self):
@@ -867,8 +919,7 @@ class LockstepVideoEnv:
         self.frames4 = []
         self._steps = 0
         self.desynced = False
-        order = [(self.v._ptr + 1 + j) % 4 for j in range(4)]
-        return self.v._ring[..., order][0]
+        return self.v._obs()[0]
 
     def step(self, action):
         obs, rew, done, infos = self.v.step(np.array([int(action)]))

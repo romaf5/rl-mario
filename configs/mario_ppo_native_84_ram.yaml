@@ -1,0 +1,87 @@
+# 8-4 specialist on RAM FEATURES instead of pixels (MLP policy).
+# Same env/reward set as mario_ppo_native_84.yaml; observation = decoded RAM
+# (tile grid around Mario, enemy slots, Mario state, absolute position).
+# Hypothesis: the pixel policy cannot localize in 8-4's repetitive corridor
+# (hidden block at x2400 has no pixel cue), exact position makes it trivial.
+params:
+  seed: 42
+  algo: {name: a2c_discrete}
+  model: {name: discrete_a2c}
+  network:
+    name: actor_critic
+    separate: false
+    space: {discrete: null}
+    mlp:
+      units: [512, 256]
+      activation: elu
+      initializer: {name: orthogonal_initializer, gain: 1.41421356237}
+  config:
+    name: Mario_Native84ram
+    env_name: mario_native
+    score_to_win: 100000
+    normalize_value: true
+    normalize_input: true
+    reward_shaper: {scale_value: 1.0}
+    normalize_advantage: true
+    gamma: 0.995
+    tau: 0.95
+    learning_rate: 0.00025
+    lr_schedule: adaptive
+    kl_threshold: 0.008
+    grad_norm: 0.5
+    entropy_coef: 0.02
+    truncate_grads: true
+    e_clip: 0.1
+    clip_value: true
+    num_actors: 128
+    horizon_length: 128
+    minibatch_size: 4096
+    mini_epochs: 4
+    critic_coef: 0.5
+    max_epochs: 20000
+    use_diagnostics: true
+    save_frequency: 500
+    save_best_after: 500
+    print_stats: true
+    device: cuda:0
+    multi_gpu: false
+    stage_curriculum_freq: 0
+    env_config:
+      name: SuperMarioBros-v0
+      action_type: complex
+      obs_mode: ram
+      episode_life: true
+      x_reward: highwater
+      loop_penalty: 100
+      fail_penalty: 100
+      backtrack_penalty: 0
+      novelty_bonus: 3.0
+      full_game: true
+      stage_bonus: 500
+      idle_penalty: 0
+      idle_timeout: 450
+      idle_threshold: 10
+      progress_reward: 0
+      skip: 4
+      sticky_actions: 0.1
+      reset_noops: 30
+      random_stages: [8-4]
+      self_restart_prob: 0.3
+      n_threads: 12
+      self_restart_cells: 512
+      novelty_y_band: 24
+      score_reward: 0.1
+      novelty_global: true
+      explore_eps: 0.05
+      archive_path: native/archive_84ram.pkl
+      explore_episode_prob: 0.4
+      explore_episode_steps: 300
+      self_restart_frontier_prob: 0.5
+      self_restart_frontier_k: 16
+    player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
+    eval_env_config:
+      backend: lockstep
+      skip: 4
+      random_stages: [8-4]
+      full_game: true
+      x_reward: highwater
