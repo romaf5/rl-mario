@@ -243,6 +243,11 @@ class MarioObserver(AlgoObserver):
             skip=4,
             sticky_actions=0.0,
         )
+        # idle semantics must match training (default would silently be 150)
+        env_cfg = self.algo.env_config or {}
+        for k in ('idle_timeout', 'idle_penalty', 'idle_threshold'):
+            if k in env_cfg:
+                kwargs[k] = env_cfg[k]
         kwargs.update(self.eval_env_kwargs or {})
         backend = kwargs.pop('backend', 'retro')
         if backend in ('native', 'lockstep'):
@@ -301,7 +306,12 @@ class MarioObserver(AlgoObserver):
                 if is_rnn:
                     rnn_states = res.get('rnn_states', rnn_states)
 
-                action = torch.argmax(res['logits'], dim=-1).item()
+                # sample, don't argmax: the stochastic policy is what PPO
+                # optimizes; argmax has fixed points (same frame -> same
+                # action, e.g. running into a stair block forever) that the
+                # trained policy never exhibits
+                action = torch.distributions.Categorical(
+                    logits=res['logits']).sample().item()
                 obs, reward, done, info = env.step(action)
                 total_reward += reward
                 stat = (info.get('world', 1), info.get('stage', 1),
