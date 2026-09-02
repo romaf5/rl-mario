@@ -664,7 +664,12 @@ class MarioNativeVecEnv(IVecEnv):
             # and a state with ~25s is still a practiceable episode.
             can = (((fstate == 0) | (swim_a == 1)) & ~dying & ~dead
                    & (gmode == 1) & (t > 25)
-                   & ~held & ~died & ~area_changed & ~jump_c)  # no phantom cells
+                   & ~held & ~died & ~area_changed & ~jump_c & ~off)
+            # no phantom cells; never archive a state in a level outside the
+            # training set (the off-route confirm step used to save one, and
+            # restarts then practised 4-3 for free)
+            if self.route_gps is not None:
+                can &= np.isin(gp, self.route_gps)
             for i in np.nonzero(can)[0]:
                 # y-band in the key: standing ON a block/pipe is a different
                 # rung than the floor below it; swim flag disambiguates the
