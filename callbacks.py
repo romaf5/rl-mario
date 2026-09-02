@@ -24,7 +24,7 @@ class MarioObserver(AlgoObserver):
         - Videos show the full game (no episode_life) with deterministic policy
     """
 
-    def __init__(self, video_freq=500, video_max_steps=4000, video_fps=8,
+    def __init__(self, video_freq=500, video_max_steps=20000, video_fps=8,
                  curriculum_freq=0, eval_env_kwargs=None):
         super().__init__()
         self.video_freq = video_freq
@@ -303,8 +303,11 @@ class MarioObserver(AlgoObserver):
             draw.text((4, img.height + 17), event, fill=color, font=font)
         return canvas
 
-    def _play_clip(self, model, env, max_steps, epoch_num):
-        """Play one clip with the sampled policy.
+    def _play_clip(self, model, env, max_steps, epoch_num,
+                   stop_on_level_change=False):
+        """Play one clip with the sampled policy until the episode is over
+        (max_steps is only a safety cap). With stop_on_level_change the clip
+        also ends once the level is cleared (per-level clips).
 
         Returns (raw_frames, pil_frames_with_strip, step_stats, last_info,
         total_reward, frames_per_step). Closes the env."""
@@ -312,6 +315,7 @@ class MarioObserver(AlgoObserver):
         frames, step_stats = [], []
         obs = env.reset()
         total_reward, info = 0, {}
+        gp0 = None
         prev_life, event, event_ttl = None, '', 0
         per_step_frames = getattr(env.unwrapped, 'frames_per_step',
                                   4 if hasattr(env.unwrapped, 'frames4')
@@ -367,7 +371,11 @@ class MarioObserver(AlgoObserver):
             else:
                 frames.append(env.unwrapped.screen.copy())
                 step_stats.append(stat)
-            if done:
+            gp = info.get('game_progress')
+            if gp0 is None:
+                gp0 = gp
+            if done or (stop_on_level_change and gp is not None
+                        and gp != gp0 and step > 8):
                 break
         env.close()
         font = ImageFont.load_default()
@@ -384,6 +392,10 @@ class MarioObserver(AlgoObserver):
         import tempfile
         if every is None:
             every = 2 if per_step >= 2 else 1
+            # long clips: bound the GIF (TB) at ~3000 frames by halving the
+            # rate again; the mp4 on disk keeps every frame
+            if len(pil_frames) // every > 3000:
+                every *= 2
         gif_frames = pil_frames[::every]
         fast = per_step >= 2 and every <= 2
         durations = [(40 if i % 3 == 2 else 30) if fast else
@@ -448,13 +460,17 @@ class MarioObserver(AlgoObserver):
                     rs = (self.algo.env_config or {}).get('random_stages')
                     levels = list(rs) if rs and len(rs) > 1 else []
                 if levels:
-                    lvl_steps = int(ek.get('video_level_steps', 300))
+                    # play until the level is cleared or the lives are gone
+                    # (video_level_steps is only an optional safety cap)
+                    lvl_steps = int(ek.get('video_level_steps')
+                                    or self.video_max_steps)
                     sizes = []
                     for lvl in levels:
                         env_l = self._make_eval_env(random_stages=[lvl],
                                                     full_game=True)
                         fr, pf, st, inf_l, rew_l, ps = self._play_clip(
-                            model, env_l, lvl_steps, epoch_num)
+                            model, env_l, lvl_steps, epoch_num,
+                            stop_on_level_change=True)
                         if len(fr) < 4:
                             continue
                         imageio.mimsave(

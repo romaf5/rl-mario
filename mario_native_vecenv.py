@@ -712,20 +712,20 @@ class MarioNativeVecEnv(IVecEnv):
         # wrap guard: progress below the episode's start can only mean the
         # game rolled through the ending into a new quest -- terminal
         wrapped = gp < self.start_progress
+        # a loop is a real terminal ("die immediately"): the env resets to a
+        # fresh start, nothing is played on from the teleport point
         if self.single_stage:
-            real_done = dying | dead | flag | zombie | wrapped | idle_to
+            real_done = dying | dead | flag | zombie | wrapped | idle_to | loop
         else:
-            real_done = game_over | victory | zombie | wrapped | idle_to | off
+            real_done = (game_over | victory | zombie | wrapped | idle_to | off
+                         | loop)
         life_lost = life < self.lives
         self.lives = life
 
         infos = []
         n_front = sum(1 for c in self.archive if self.cell_wins.get(c, 0) > 0) \
             if self.archive else 0
-        # a loop ends the PPO episode like a lost life (the game itself
-        # continues from the teleport point with rebased trackers)
-        done_pre = real_done | ((life_lost | loop) if self.episode_life
-                                else False)
+        done_pre = real_done | (life_lost if self.episode_life else False)
         for i in range(n):
             if not done_pre[i] and not self.dense_infos:
                 infos.append({})   # observer only reads infos of done envs
@@ -801,7 +801,7 @@ class MarioNativeVecEnv(IVecEnv):
         # life-loss boundaries: re-init episode trackers but keep playing
         # (also with episode_life=False: the trackers still re-sync on a
         # life loss / loop; only the PPO done differs)
-        soft_idx = list(np.nonzero((life_lost | loop) & ~real_done)[0])
+        soft_idx = list(np.nonzero(life_lost & ~real_done)[0])
         if soft_idx:
             self._post_reset_init(soft_idx, self.ram)
             for i in soft_idx:

@@ -96,6 +96,6 @@ params:
       backend: lockstep
       full_game: true
       x_reward: highwater
-      # per-level clips (mp4 each + one mosaic GIF in TB) at every video epoch
+      # per-level clips (GIF per level in TB + mp4) at every video epoch,
+      # each played until the level is cleared or the lives are gone
       video_levels: [1-1, 1-2, 4-1, 4-2, 8-1, 8-2, 8-3, 8-4]
-      video_level_steps: 300
