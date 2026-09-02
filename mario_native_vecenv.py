@@ -188,6 +188,8 @@ class MarioNativeVecEnv(IVecEnv):
         self.last_cid = np.full(n, -1, dtype=np.int64)
         self.prev_swim = np.zeros(n, dtype=np.int32)
         self.prev_in_play = np.ones(n, dtype=bool)
+        self.play_x = np.zeros(n, dtype=np.int32); self.play_area = np.zeros(n, dtype=np.int32); self.play_swim = np.zeros(n, dtype=np.int32)
+        self.play_life = np.zeros(n, dtype=np.int32)
 
         # obs_mode 'pixels': 84x84x4 frame stack (default); 'ram': flat
         # feature vector decoded from RAM (see _features) for an MLP policy
@@ -348,6 +350,8 @@ class MarioNativeVecEnv(IVecEnv):
             self.visited[i] = set()
             self.last_cid[i] = -1
             self.prev_in_play[i] = not (r[0x0E] <= 5 or r[0x0E] == 7)
+            self.play_x[i] = x; self.play_area[i] = int(r[0x760])
+            self.play_swim[i] = int(r[0x704]); self.play_life[i] = -1   # anchor invalid until the next in-play step (a respawn is never a loop)
 
     # ------------------------------------------------------------- IVecEnv
     def _features(self, ram):
@@ -512,21 +516,32 @@ class MarioNativeVecEnv(IVecEnv):
         resume = in_play & ~self.prev_in_play
         jump_c = (np.abs(x - self.x_last) > 96) & ~held & ~died & ~flag & \
                  (gp == self.progress) & in_play & self.prev_in_play
+        # hack-free path: a scripted sequence spans several steps, so the
+        # resume step is judged against the last in-play anchor (position
+        # before the sequence). A wrong pipe is then a loop here too; a
+        # respawn (life changed meanwhile) is not.
+        r_back = resume & (x < self.play_x - 96) & (life == self.play_life) & \
+                 (gp == self.progress) & ~flag
+        r_same = (area == self.play_area) & (swim == self.play_swim)
         self.prev_in_play = in_play
         same_frame = (area_b == self.prev_area) & (swim_b == self.prev_swim)
         cid = ((gp.astype(np.int64) * 8 + area) * 2 + swim) * 64 + x // 128
         revisit = np.zeros(n, dtype=bool)
-        for i in np.nonzero(jump_c & ~same_frame)[0]:
+        for i in np.nonzero((jump_c & ~same_frame) | (r_back & ~r_same))[0]:
             revisit[i] = int(cid[i]) in self.visited[i]
-        loop = jump_c & ((same_frame & (x < self.x_last)) | revisit) & \
-               (self.loop_penalty > 0)
-        legit = jump_c & ~loop
+        loop = ((jump_c & ((same_frame & (x < self.x_last)) | revisit))
+                | (r_back & (r_same | revisit))) & (self.loop_penalty > 0)
+        legit = (jump_c | resume) & ~loop
+        self.play_x = np.where(in_play, x, self.play_x)
+        self.play_area = np.where(in_play, area, self.play_area)
+        self.play_swim = np.where(in_play, swim, self.play_swim)
+        self.play_life = np.where(in_play, life, self.play_life)
 
         # ---- base reward (block granularity) ----
         if self.x_reward == 'highwater':
             ctx_change = (life != self.lives) | (area_b != self.prev_area) | \
                          (swim_b != self.prev_swim) | (gp != self.progress) | \
-                         legit | resume
+                         legit
             self.hw = np.where(ctx_change, x, self.hw)
             self.max_x = np.where(legit, 0, self.max_x)
             r_x = np.clip(x - self.hw, 0, 20).astype(np.float32)
@@ -588,7 +603,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.prev_area = np.where(held, self.prev_area, area)
         self.prev_swim = np.where(held, self.prev_swim, swim)
         # mark the (confirmed) current cell as visited this life
-        for i in np.nonzero(~held & (cid != self.last_cid))[0]:
+        for i in np.nonzero(~held & in_play & (cid != self.last_cid))[0]:
             self.visited[i].add(int(cid[i]))
             self.last_cid[i] = cid[i]
 
