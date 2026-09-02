@@ -182,6 +182,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.visited = [set() for _ in range(n)]
         self.last_cid = np.full(n, -1, dtype=np.int64)
         self.prev_swim = np.zeros(n, dtype=np.int32)
+        self.prev_in_play = np.ones(n, dtype=bool)
 
         self.observation_space = spaces.Box(0.0, 1.0, (84, 84, FRAME_STACK),
                                             np.float32)
@@ -333,6 +334,7 @@ class MarioNativeVecEnv(IVecEnv):
             self.prev_swim[i] = int(r[0x704])
             self.visited[i] = set()
             self.last_cid[i] = -1
+            self.prev_in_play[i] = not (r[0x0E] <= 5 or r[0x0E] == 7)
 
     # ------------------------------------------------------------- IVecEnv
     def _fetch_obs(self, i):
@@ -441,8 +443,16 @@ class MarioNativeVecEnv(IVecEnv):
         # this life already visited (re-entering a bonus room = cycle).
         swim = ram[:, 0x704].astype(np.int32)
         swim_b = np.where(held, self.prev_swim, swim)
+        # player control ($0E not in 0-5,7). The hacked training step
+        # always ends in control; the hack-free replay path (eval video)
+        # exposes death/respawn and pipe frames step by step, so a jump only
+        # counts between two control steps and the first control step after
+        # a scripted sequence is a context change (respawn, pipe exit).
+        in_play = ~((pstate <= 5) | (pstate == 7))
+        resume = in_play & ~self.prev_in_play
         jump_c = (np.abs(x - self.x_last) > 96) & ~held & ~died & ~flag & \
-                 (gp == self.progress)
+                 (gp == self.progress) & in_play & self.prev_in_play
+        self.prev_in_play = in_play
         same_frame = (area_b == self.prev_area) & (swim_b == self.prev_swim)
         cid = ((gp.astype(np.int64) * 8 + area) * 2 + swim) * 64 + x // 128
         revisit = np.zeros(n, dtype=bool)
@@ -456,7 +466,7 @@ class MarioNativeVecEnv(IVecEnv):
         if self.x_reward == 'highwater':
             ctx_change = (life != self.lives) | (area_b != self.prev_area) | \
                          (swim_b != self.prev_swim) | (gp != self.progress) | \
-                         legit
+                         legit | resume
             self.hw = np.where(ctx_change, x, self.hw)
             self.max_x = np.where(legit, 0, self.max_x)
             r_x = np.clip(x - self.hw, 0, 20).astype(np.float32)
@@ -716,7 +726,9 @@ class MarioNativeVecEnv(IVecEnv):
                                  / 255.0)[..., None]
             self._post_reset_init(realdone_idx, self.ram)
         # life-loss boundaries: re-init episode trackers but keep playing
-        soft_idx = [i for i in done_idx if i not in set(realdone_idx)]
+        # (also with episode_life=False: the trackers still re-sync on a
+        # life loss / loop; only the PPO done differs)
+        soft_idx = list(np.nonzero((life_lost | loop) & ~real_done)[0])
         if soft_idx:
             self._post_reset_init(soft_idx, self.ram)
             # new episode = fresh frame stack: the first observation of

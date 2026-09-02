@@ -251,9 +251,13 @@ class MarioObserver(AlgoObserver):
             skip=4,
             sticky_actions=0.0,
         )
-        # idle semantics must match training (default would silently be 150)
+        # reward semantics must match training so the video's R readout is
+        # the trained signal (idle default would silently be 150; loop and
+        # fail penalties default to 0/15 and made loops look free)
         env_cfg = self.algo.env_config or {}
-        for k in ('idle_timeout', 'idle_penalty', 'idle_threshold'):
+        for k in ('idle_timeout', 'idle_penalty', 'idle_threshold',
+                  'loop_penalty', 'fail_penalty', 'backtrack_penalty',
+                  'progress_reward', 'score_reward', 'x_reward'):
             if k in env_cfg:
                 kwargs[k] = env_cfg[k]
         kwargs.update(self.eval_env_kwargs or {})
@@ -266,6 +270,28 @@ class MarioObserver(AlgoObserver):
             cls = LockstepVideoEnv if backend == 'lockstep' else NativeEvalEnv
             return cls(**kwargs)
         return create_mario_env(**kwargs)
+
+    @staticmethod
+    def draw_strip(frame, epoch_num, stat, font):
+        """Frame + 2-line stats strip below it (gameplay pixels untouched):
+        line 1 = epoch, level, x, cumulative R, this step's reward;
+        line 2 = reward event flash (LOOP/DEATH/OFF-ROUTE/IDLE/CLEAR)."""
+        from PIL import Image, ImageDraw
+        world, stage, x_pos, rew, r_step, event = stat
+        bar_h = 28
+        img = Image.fromarray(frame)
+        canvas = Image.new('RGB', (img.width, img.height + bar_h), (0, 0, 0))
+        canvas.paste(img, (0, 0))
+        draw = ImageDraw.Draw(canvas)
+        draw.text((4, img.height + 2),
+                  f'ep {epoch_num}  {world}-{stage}  x={x_pos}  '
+                  f'R={rew:.0f}  r={r_step:+.1f}',
+                  fill=(255, 255, 255), font=font)
+        if event:
+            color = (80, 255, 80) if event.startswith('CLEAR') \
+                else (255, 80, 80)
+            draw.text((4, img.height + 15), event, fill=color, font=font)
+        return canvas
 
     def _record_video(self, epoch_num, model):
         """Record gameplay: PIL GIF to TensorBoard + MP4 to disk.
@@ -290,6 +316,10 @@ class MarioObserver(AlgoObserver):
             done = False
             total_reward = 0
             info = {}
+            prev_life, event, event_ttl = None, '', 0
+            per_step_frames = getattr(env.unwrapped, 'frames_per_step',
+                                      4 if hasattr(env.unwrapped, 'frames4')
+                                      else 1)
 
             is_rnn = self.algo.is_rnn
             if is_rnn:
@@ -322,8 +352,25 @@ class MarioObserver(AlgoObserver):
                     logits=res['logits']).sample().item()
                 obs, reward, done, info = env.step(action)
                 total_reward += reward
+                # reward events, flashed on the strip for ~1s so penalties
+                # are auditable from the video (R alone hides a -100 that
+                # lands on the same step as a +8)
+                life = info.get('life', prev_life)
+                if info.get('looped'):
+                    event, event_ttl = 'LOOP %+.0f' % reward, 60
+                elif info.get('offroute'):
+                    event, event_ttl = 'OFF-ROUTE %+.0f' % reward, 60
+                elif info.get('idle_timeout'):
+                    event, event_ttl = 'IDLE TIMEOUT %+.0f' % reward, 60
+                elif prev_life is not None and life < prev_life:
+                    event, event_ttl = 'DEATH %+.0f' % reward, 60
+                elif info.get('flag_get') or info.get('victory'):
+                    event, event_ttl = 'CLEAR %+.0f' % reward, 60
+                prev_life = life
                 stat = (info.get('world', 1), info.get('stage', 1),
-                        info.get('x_pos', 0), total_reward)
+                        info.get('x_pos', 0), total_reward, reward,
+                        event if event_ttl > 0 else '')
+                event_ttl -= per_step_frames
                 if hasattr(env.unwrapped, 'frames4'):
                     # native eval: all 4 emulated frames -> no aliasing
                     for f in env.unwrapped.frames4:
@@ -341,19 +388,8 @@ class MarioObserver(AlgoObserver):
                 # Stats strip below the frame: gameplay pixels stay untouched.
                 # 240 + 16 = 256 high, which video encoders also prefer.
                 font = ImageFont.load_default()
-                bar_h = 16
-                pil_frames = []
-                for (world, stage, x_pos, rew), f in zip(step_stats, frames):
-                    img = Image.fromarray(f)
-                    canvas = Image.new('RGB', (img.width, img.height + bar_h),
-                                       (0, 0, 0))
-                    canvas.paste(img, (0, 0))
-                    draw = ImageDraw.Draw(canvas)
-                    draw.text((4, img.height + 2),
-                              f'ep {epoch_num}  {world}-{stage}  '
-                              f'x={x_pos}  R={rew:.0f}',
-                              fill=(255, 255, 255), font=font)
-                    pil_frames.append(canvas)
+                pil_frames = [self.draw_strip(f, epoch_num, stat, font)
+                              for stat, f in zip(step_stats, frames)]
 
                 # frames per step: full-rate capture on native/lockstep
                 per_step = getattr(env.unwrapped, 'frames_per_step',
