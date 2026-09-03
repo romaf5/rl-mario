@@ -554,7 +554,9 @@ class MarioNativeVecEnv(IVecEnv):
                          (swim_b != self.prev_swim) | (gp != self.progress) | \
                          legit
             self.hw = np.where(ctx_change, x, self.hw)
-            self.max_x = np.where(legit, 0, self.max_x)
+            # (max_x is NOT reset on transitions: it is the episode's deepest
+            # coordinate for the door metrics -- resetting it made a run that
+            # reached the water report max_x ~600 and looked like a regression)
             r_x = np.clip(x - self.hw, 0, 20).astype(np.float32)
             self.hw = np.maximum(self.hw, x)
         else:
