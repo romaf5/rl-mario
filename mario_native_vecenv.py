@@ -283,12 +283,15 @@ class MarioNativeVecEnv(IVecEnv):
                 # draws -- the band marches outward on its own; heavily
                 # consolidated inner cells fade without any graduation
                 # threshold (a cap here starved the pipeline: v24).
-                cand = ([c for c in cells if self.cell_wins.get(c, 0) >= 1]
-                        or cells)
-                cand = sorted(cand,
-                              key=lambda c: self.archive[c][1]
-                              )[:self.sr_frontier_k]
-                cell = cand[self.rng.randint(len(cand))]
+                # practice where you fail: weight by failure rate
+                # (1 - wins/uses) so cells that keep failing -- the hard
+                # links -- draw the restarts (and their explore episodes);
+                # consolidated cells fade. Uniform-over-winners (the
+                # previous rule) gave the corridor floor ~1% of restarts.
+                w = np.array([1.0 - self.cell_wins.get(c, 0)
+                              / (self.archive[c][1] + 1.0) + 0.05
+                              for c in cells])
+                cell = cells[self.rng.choice(len(cells), p=w / w.sum())]
             else:
                 w = np.array([1.0 / (1 + self.archive[c][1]) for c in cells])
                 cell = cells[self.rng.choice(len(cells), p=w / w.sum())]
@@ -785,10 +788,14 @@ class MarioNativeVecEnv(IVecEnv):
             # never left the Bowser room (0 wins before x4100 over 200k
             # restarts; the water and the corridor were unreachable for
             # backward chaining).
+            # "deeper" = another frame (level/area/swim) or >= 4 x-bins
+            # (512 px) further: the next floor cell must not count, else
+            # every cell wins trivially and the hard links (hidden block,
+            # pipe entries) are invisible to practice allocation
             reached = any(
-                self.cell_wins.get(c, 0) > 0 and not (
-                    c[0] == cell[0] and c[1] == cell[1] and c[4] == cell[4]
-                    and c[2] <= cell[2])
+                self.cell_wins.get(c, 0) > 0 and (
+                    c[0] != cell[0] or c[1] != cell[1] or c[4] != cell[4]
+                    or c[2] >= cell[2] + 4)
                 for c in self.ep_cells[i] if c != cell)
             if victory[i] or self.cleared[i] > 0 or reached:
                 self.cell_wins[cell] = self.cell_wins.get(cell, 0) + 1
