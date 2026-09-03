@@ -170,6 +170,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.start_cell = [None] * num_actors
         self.cell_early = {}
         self.cell_wins = {}
+        self.cell_tries = {}      # restarts since the last credit reset
         self._novelty_tick = 0
         self.nongame = np.zeros(num_actors, dtype=np.int32)
         self.novelty_counts = {}    # cross-episode cell visit counts
@@ -232,6 +233,9 @@ class MarioNativeVecEnv(IVecEnv):
             # win counts persist as entry[3] (backward-chaining state)
             self.cell_wins = {c: e[3] for c, e in self.archive.items()
                               if len(e) > 3}
+            # tries default to wins for entries saved before the counter
+            self.cell_tries = {c: (e[4] if len(e) > 4 else e[3])
+                               for c, e in self.archive.items() if len(e) > 3}
         self.ep_cells = [set() for _ in range(n)]
         self._sbuf = ctypes.create_string_buffer(self.state_size)
         self._rgb4 = None      # (4,224,240,3) capture buffer when recording
@@ -288,15 +292,19 @@ class MarioNativeVecEnv(IVecEnv):
                 # links -- draw the restarts (and their explore episodes);
                 # consolidated cells fade. Uniform-over-winners (the
                 # previous rule) gave the corridor floor ~1% of restarts.
-                w = np.array([1.0 - self.cell_wins.get(c, 0)
-                              / (self.archive[c][1] + 1.0) + 0.05
-                              for c in cells])
+                # rate over restarts since the credit reset (lifetime uses
+                # are in the thousands and made every cell score ~1.0)
+                w = np.array([max(1.0 - (self.cell_wins.get(c, 0) + 1.0)
+                                  / (max(self.cell_tries.get(c, 0),
+                                         self.cell_wins.get(c, 0)) + 2.0), 0.0)
+                              + 0.05 for c in cells])
                 cell = cells[self.rng.choice(len(cells), p=w / w.sum())]
             else:
                 w = np.array([1.0 / (1 + self.archive[c][1]) for c in cells])
                 cell = cells[self.rng.choice(len(cells), p=w / w.sum())]
             ent = self.archive[cell]
             ent[1] += 1
+            self.cell_tries[cell] = self.cell_tries.get(cell, 0) + 1
             # a cell may hold several state variants (different enemy/RNG
             # phases); sampling among them exposes the policy to the full
             # local distribution instead of one replayed setup
@@ -871,9 +879,10 @@ class MarioNativeVecEnv(IVecEnv):
             for c, w in self.cell_wins.items():
                 e = self.archive.get(c)
                 if e is not None:
-                    while len(e) < 4:
+                    while len(e) < 5:
                         e.append(0)
                     e[3] = w
+                    e[4] = self.cell_tries.get(c, 0)
             tmp = self.archive_path + '.tmp'
             with open(tmp, 'wb') as f:
                 pickle.dump(self.archive, f)
