@@ -116,7 +116,8 @@ class MarioNativeVecEnv(IVecEnv):
                  self_restart_frontier_prob=0.0,
                  self_restart_frontier_k=16, idle_timeout=150,
                  offroute_penalty=0.0, fail_penalty=15.0, obs_mode='pixels',
-                 reward=None, play_mode=False, **unknown):
+                 reward=None, play_mode=False, route_levels=None,
+                 **unknown):
         assert action_type == 'complex'
         n = self.num_actors = num_actors
         self.lib = _Lib()
@@ -137,10 +138,14 @@ class MarioNativeVecEnv(IVecEnv):
         # x-reward in 1-3, so the flag beat the warp (which pays +5500 once).
         self.offroute_penalty = float(offroute_penalty)
         self.route_gps = None
-        if full_game and random_stages and self.offroute_penalty > 0:
+        # the on-route set defaults to the levels we start from, but can be
+        # given explicitly: tools that start on ONE level (tools/play.py
+        # --level 1-2) must not turn the rest of the route into dead ends
+        route = route_levels or random_stages
+        if full_game and route and self.offroute_penalty > 0:
             self.route_gps = np.array(sorted(
                 (int(s.split('-')[0]) - 1) * 4 + int(s.split('-')[1]) - 1
-                for s in self.stages), dtype=np.int32)
+                for s in route), dtype=np.int32)
         self.stage_weights = None
         self.episode_life = episode_life
         self.stage_bonus = stage_bonus

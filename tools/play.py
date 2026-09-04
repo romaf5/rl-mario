@@ -102,7 +102,10 @@ class Inspector:
                   explore_episode_prob=0.0, reset_noops=0, n_threads=1,
                   dense_infos=True, episode_life=True, play_mode=True,
                   idle_timeout=10 ** 9)
+        # --level changes only the START level; the config's level list stays
+        # the on-route set, so a warp out of 1-2 is still on-route
         if args.level:
+            ec.setdefault('route_levels', list(ec.get('random_stages') or []))
             ec['random_stages'] = [args.level]
         self.env = MarioNativeVecEnv('play', 1, **ec)
         self.env.reset()
