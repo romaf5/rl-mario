@@ -94,7 +94,8 @@ def main():
         ec.pop(k, None)
     ec.update(sticky_actions=0.0, explore_eps=0.0, self_restart_prob=0.0,
               explore_episode_prob=0.0, reset_noops=0, n_threads=1,
-              dense_infos=True, episode_life=True)
+              dense_infos=True, episode_life=True, play_mode=True,
+              idle_timeout=10**9)
     if args.level:
         ec['random_stages'] = [args.level]
     env = MarioNativeVecEnv('play', 1, **ec)

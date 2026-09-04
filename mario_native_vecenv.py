@@ -116,7 +116,7 @@ class MarioNativeVecEnv(IVecEnv):
                  self_restart_frontier_prob=0.0,
                  self_restart_frontier_k=16, idle_timeout=150,
                  offroute_penalty=0.0, fail_penalty=15.0, obs_mode='pixels',
-                 reward=None, **unknown):
+                 reward=None, play_mode=False, **unknown):
         assert action_type == 'complex'
         n = self.num_actors = num_actors
         self.lib = _Lib()
@@ -236,6 +236,10 @@ class MarioNativeVecEnv(IVecEnv):
             t.name == 'loop' for t in self.rewards.terms)
         self.last_terms = {}
         self.last_signals = None
+        # play_mode (tools/play.py): loop / off-route / idle timeout still
+        # flag and pay, but never reset the game -- it continues from the
+        # teleport point with the trackers re-synced, for human inspection
+        self.play_mode = bool(play_mode)
         # SHARED self-restart archive: all envs contribute and draw from one
         # pool (per-env archives dilute frontier discovery at large N)
         self.archive = {}                           # cell -> [state, uses]
@@ -729,6 +733,10 @@ class MarioNativeVecEnv(IVecEnv):
         else:
             real_done = (game_over | victory | zombie | wrapped | idle_to | off
                          | loop)
+        soft_extra = np.zeros(n, dtype=bool)
+        if self.play_mode:
+            soft_extra = (loop | off | idle_to) & ~game_over & ~victory & ~zombie
+            real_done = real_done & ~soft_extra
         life_lost = life < self.lives
         self.lives = life
 
@@ -815,7 +823,7 @@ class MarioNativeVecEnv(IVecEnv):
         # life-loss boundaries: re-init episode trackers but keep playing
         # (also with episode_life=False: the trackers still re-sync on a
         # life loss / loop; only the PPO done differs)
-        soft_idx = list(np.nonzero(life_lost & ~real_done)[0])
+        soft_idx = list(np.nonzero((life_lost | soft_extra) & ~real_done)[0])
         if soft_idx:
             self._post_reset_init(soft_idx, self.ram)
             for i in soft_idx:
