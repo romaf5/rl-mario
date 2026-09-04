@@ -9,7 +9,7 @@ trace of everything is written for later analysis.
     venv_retro/bin/python tools/play.py --config configs/mario_ppo_native_84.yaml --level 8-4
 
 Keys
-  arrows      move / down = pipe / up        Z = A (jump)   X = B (run)
+  W A S D     move (S = down/pipe, W = up)   J = A (jump)   K = B (run)   (arrows also move)
   R           rewind one step (hold to keep rewinding)   Shift+R rewinds 15
   Space       pause / resume        N   single step while paused
   [ ]         slower / faster       B   bookmark here   M  jump to bookmark
@@ -34,9 +34,10 @@ ACT = ['NOOP', 'R', 'R+A', 'R+B', 'R+A+B', 'A', 'L', 'L+A', 'L+B', 'L+A+B',
 
 
 def keys_to_action(k, pg):
-    right, left = k[pg.K_RIGHT], k[pg.K_LEFT]
-    down, up = k[pg.K_DOWN], k[pg.K_UP]
-    a, b = k[pg.K_z], k[pg.K_x]
+    # WASD moves (arrows also work), J = A (jump), K = B (run)
+    right, left = k[pg.K_d] or k[pg.K_RIGHT], k[pg.K_a] or k[pg.K_LEFT]
+    down, up = k[pg.K_s] or k[pg.K_DOWN], k[pg.K_w] or k[pg.K_UP]
+    a, b = k[pg.K_j], k[pg.K_k]
     if down:
         return 10
     if up and not (right or left):
@@ -256,6 +257,7 @@ def main():
         for evl in events[-8:]:
             lines.append(('  ' + evl, (255, 160, 80)))
         lines.append(('', None))
+        lines.append(('WASD move  J jump  K run', (110, 110, 110)))
         lines.append(('R rewind  Shift+R x15  Space pause  N step', (110, 110, 110)))
         lines.append(('[ ] speed  B/M bookmark  Q quit', (110, 110, 110)))
         y = 8
