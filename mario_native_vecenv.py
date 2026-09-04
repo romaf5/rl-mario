@@ -119,7 +119,7 @@ class MarioNativeVecEnv(IVecEnv):
                  self_restart_frontier_k=16, idle_timeout=150,
                  offroute_penalty=0.0, fail_penalty=15.0, obs_mode='pixels',
                  reward=None, play_mode=False, route_levels=None,
-                 **unknown):
+                 loop_terminal='always', **unknown):
         assert action_type == 'complex'
         n = self.num_actors = num_actors
         self.lib = _Lib()
@@ -256,6 +256,17 @@ class MarioNativeVecEnv(IVecEnv):
         # flag and pay, but never reset the game -- it continues from the
         # teleport point with the trackers re-synced, for human inspection
         self.play_mode = bool(play_mode)
+        # what a backward teleport (the game's loop) does to the episode:
+        #   'always' : ends it (legacy: loop == death)
+        #   'repeat' : a first teleport in a life is a SETBACK -- costs the
+        #              loop term, play continues from where the game put
+        #              Mario, and the highwater is kept so the re-run pays
+        #              nothing until new ground; a second teleport in the
+        #              same life is cycling and ends the episode
+        #   'never'  : never terminal
+        assert loop_terminal in ('always', 'repeat', 'never')
+        self.loop_terminal = loop_terminal
+        self.loops = np.zeros(n, dtype=np.int32)    # teleports this life
         # SHARED self-restart archive: all envs contribute and draw from one
         # pool (per-env archives dilute frontier discovery at large N)
         self.archive = {}                           # cell -> [state, uses]
@@ -402,7 +413,7 @@ class MarioNativeVecEnv(IVecEnv):
             self.prev_flag[i] = False
             self.progress[i] = gp; self.start_progress[i] = gp
             self.pending[i] = -1; self.cleared[i] = 0
-            self.warped[i] = False; self.looped[i] = False
+            self.warped[i] = False; self.looped[i] = False; self.loops[i] = 0
             self.vic_paid[i] = False
             self.idle[i] = 0
             self.nongame[i] = 0
@@ -652,6 +663,13 @@ class MarioNativeVecEnv(IVecEnv):
         prev_x_before = self.prev_x.copy()
         xd = x - prev_x_before
         self.looped |= loop
+        self.loops = self.loops + loop.astype(np.int32)
+        if self.loop_terminal == 'always':
+            loop_term = loop
+        elif self.loop_terminal == 'repeat':
+            loop_term = loop & (self.loops >= 2)
+        else:
+            loop_term = np.zeros(n, dtype=bool)
         area_changed = area_b != self.prev_area
         self.prev_area = np.where(held, self.prev_area, area)
         self.prev_swim = np.where(held, self.prev_swim, swim)
@@ -675,6 +693,7 @@ class MarioNativeVecEnv(IVecEnv):
                       fwd=fwd, new_ground=new_ground, ctx_change=ctx_change,
                       t=t, t_last=t_last, died=died, game_over=(life == 0xFF),
                       loop=loop, legit=legit, off=off, level_up=good,
+                      loop_count=self.loops.copy(), loop_terminal=loop_term,
                       level_delta=delta, newflag=newflag, victory_new=vpay,
                       score_delta=score_delta, idle=self.idle, idle_to=idle_to,
                       area=area_b, swim=swim_b, ypix=ypix, held=held, gp=gp,
@@ -769,13 +788,14 @@ class MarioNativeVecEnv(IVecEnv):
         # a loop is a real terminal ("die immediately"): the env resets to a
         # fresh start, nothing is played on from the teleport point
         if self.single_stage:
-            real_done = dying | dead | flag | zombie | wrapped | idle_to | loop
+            real_done = (dying | dead | flag | zombie | wrapped | idle_to
+                         | loop_term)
         else:
             real_done = (game_over | victory | zombie | wrapped | idle_to | off
-                         | loop)
+                         | loop_term)
         soft_extra = np.zeros(n, dtype=bool)
         if self.play_mode:
-            soft_extra = (loop | off | idle_to) & ~game_over & ~victory & ~zombie
+            soft_extra = (loop_term | off | idle_to) & ~game_over & ~victory & ~zombie
             real_done = real_done & ~soft_extra
         life_lost = life < self.lives
         self.lives = life

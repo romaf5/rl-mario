@@ -55,6 +55,8 @@ class Signals:
     ypix: np.ndarray
     held: np.ndarray         # x carried (debounce) this step
     gp: np.ndarray           # level index 0-31 (world*4 + stage)
+    loop_count: np.ndarray = None    # teleports so far this life (incl. this step)
+    loop_terminal: np.ndarray = None # this loop ends the episode
     single_stage: bool = False
     extra: dict = field(default_factory=dict)
 
@@ -183,7 +185,8 @@ class Fail(Term):
 
 
 class Loop(Term):
-    """-cost on a cycle (maze teleport / wrong pipe)."""
+    """-cost on every backward teleport (the game's loop). Whether it also
+    ends the episode is the env's loop_terminal policy, not this term."""
     name = 'loop'
 
     def __init__(self, n, cost=100.0, **kw):

@@ -57,7 +57,10 @@ params:
       episode_life: true
       x_reward: highwater
       # reward set v2 -- see mario_ppo_native_84.yaml for the rationale
-      loop_penalty: 100
+      # a backward teleport is a setback worth ~the time it costs, not a
+      # death: first one in a life continues (highwater kept), a repeat ends it
+      loop_penalty: 30
+      loop_terminal: repeat
       fail_penalty: 100
       backtrack_penalty: 0
       novelty_bonus: 3.0
