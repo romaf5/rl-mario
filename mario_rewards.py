@@ -54,6 +54,7 @@ class Signals:
     swim: np.ndarray
     ypix: np.ndarray
     held: np.ndarray         # x carried (debounce) this step
+    gp: np.ndarray           # level index 0-31 (world*4 + stage)
     single_stage: bool = False
     extra: dict = field(default_factory=dict)
 
@@ -166,9 +167,11 @@ class Fail(Term):
     """-cost on death and on idle timeout (one flat attempt-ending cost)."""
     name = 'fail'
 
-    def __init__(self, n, cost=100.0, death=True, idle=True, **kw):
+    def __init__(self, n, cost=100.0, death=True, idle=True, name=None, **kw):
         super().__init__(n, cost=cost, death=death, idle=idle)
         self.cost, self.death, self.idle = float(cost), death, idle
+        self.name = name or ('fail' if (death and idle)
+                             else 'fail_death' if death else 'fail_idle')
 
     def __call__(self, s):
         hit = np.zeros(s.n, dtype=bool)
@@ -308,8 +311,9 @@ class Novelty(Term):
         self.tick = 0
 
     def reset(self, idx, sig, hard=False):
-        if not hard:          # per-episode novelty survives a life loss
-            return
+        # every episode boundary, life losses included: with episode_life a
+        # life IS an episode, and paying novelty only on the first life made
+        # identical behaviour earn different reward depending on the life
         for i in idx:
             self.sets[i] = set()
 
@@ -320,7 +324,9 @@ class Novelty(Term):
             self.counts = {k: v * 0.5 for k, v in self.counts.items()
                            if v * 0.5 >= 0.1}
         for i in range(s.n):
-            cell = (int(s.area[i]), int(s.x[i]) // 64,
+            # the level belongs in the key: every x-1 level shares area 0,
+            # so without it 1-1's traffic depleted 4-1's and 8-1's bonus
+            cell = (int(s.gp[i]), int(s.area[i]), int(s.x[i]) // 64,
                     int(s.ypix[i]) // self.y_band)
             if cell in self.sets[i]:
                 continue
@@ -334,10 +340,15 @@ class Novelty(Term):
         return r
 
     def state(self):
-        return {'sets': [set(x) for x in self.sets]}
+        # counts and tick drive the bonus size and its decay: a rewind that
+        # dropped them replayed the same game state for a different reward
+        return {'sets': [set(x) for x in self.sets],
+                'counts': dict(self.counts), 'tick': self.tick}
 
     def restore(self, st):
         self.sets = [set(x) for x in st['sets']]
+        self.counts = dict(st.get('counts', {}))
+        self.tick = st.get('tick', 0)
 
 
 TERMS = {
@@ -391,6 +402,15 @@ class RewardSet:
             tot = tot + v
         return tot
 
+    def has(self, name):
+        """Is a term with this name present anywhere (including nested)?"""
+        for t in self.terms:
+            if t.name == name:
+                return True
+            if isinstance(t, Clip) and any(c.name == name for c in t.terms):
+                return True
+        return False
+
     def get(self, cls):
         for t in self.terms:
             if isinstance(t, cls):
@@ -421,7 +441,7 @@ def legacy_specs(x_reward='highwater', fail_penalty=15.0, loop_penalty=0.0,
     specs = [{'type': 'clip', 'lo': -15, 'hi': 20,
               'terms': [prog, {'type': 'time'}]},
              {'type': 'fail', 'cost': fail_penalty, 'death': True,
-              'idle': False}]
+              'idle': False, 'name': 'fail_death'}]
     if score_reward > 0:
         specs.append({'type': 'score', 'scale': score_reward})
     specs.append({'type': 'stage', 'bonus': stage_bonus})
@@ -438,7 +458,7 @@ def legacy_specs(x_reward='highwater', fail_penalty=15.0, loop_penalty=0.0,
         specs.append({'type': 'idle_drip', 'cost': idle_penalty,
                       'threshold': idle_threshold})
     specs.append({'type': 'fail', 'cost': fail_penalty, 'death': False,
-                  'idle': True})
+                  'idle': True, 'name': 'fail_idle'})
     if novelty_bonus > 0:
         specs.append({'type': 'novelty', 'bonus': novelty_bonus,
                       'y_band': novelty_y_band,

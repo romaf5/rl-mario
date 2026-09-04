@@ -333,7 +333,9 @@ void benv_render(BatchEnv* e, int i, uint8_t* out240x224) {
 // render current state to 84x84 + RAM snapshot WITHOUT stepping any frames
 // (used after per-env resets)
 void benv_obs(BatchEnv* e, int i, uint8_t* out84, uint8_t* ram_out) {
-    static uint8_t fb[W * H];
+    // thread_local like every sibling: the video thread calls this while the
+    // training thread resets envs, and a shared buffer tore both frames
+    static thread_local uint8_t fb[W * H];
     render_gray(*e->cores[i], fb);
     resize_area(fb, out84);
     memcpy(ram_out, e->cores[i]->ram, 0x800);

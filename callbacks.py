@@ -49,6 +49,7 @@ class MarioObserver(AlgoObserver):
         self.episode_timeouts = []
         self.episode_offroute = []
         self.frontier_cells = None
+        self._last_logged_epoch = -1
         self.door_x = []          # max_x of NON-restart (from-door) episodes
         self._clear_ema = {}  # start_stage -> EMA of clear rate
 
@@ -95,15 +96,20 @@ class MarioObserver(AlgoObserver):
             self.episode_flags.append(float(info['flag_get']))
 
         if 'life' in info:
-            self.episode_lives.append(info['life'])
+            # 0xFF is the game-over sentinel, not 255 lives
+            self.episode_lives.append(0 if info['life'] == 255 else info['life'])
 
         if 'start_stage' in info:
-            # A clear is progress gained OR outright victory (beating 8-4
-            # cannot increase game_progress past 31)
+            # A clear is an ON-ROUTE level advance (stages_cleared) or an
+            # outright victory. progress_gain also counts OFF-ROUTE exits
+            # (1-2 -> 1-3), which made the curriculum starve exactly the
+            # level whose wrong exit the policy was taking.
             self.stage_records.setdefault(info['start_stage'], []).append(
                 (float(info.get('progress_gain', 0)),
                  float(info.get('warped', False)),
-                 float(info.get('victory', False))))
+                 float(info.get('victory', False)),
+                 float(info.get('stages_cleared', 0)),
+                 float(not info.get('self_restart', False))))
         if 'victory' in info:
             self.episode_victories.append(float(info['victory']))
         if 'looped' in info:
@@ -129,6 +135,11 @@ class MarioObserver(AlgoObserver):
     def after_print_stats(self, frame, epoch_num, total_time):
         if self.writer is None:
             return
+        # rl_games calls this twice per epoch (write_stats + train loop);
+        # the second call would republish the non-buffered scalars
+        if epoch_num == self._last_logged_epoch:
+            return
+        self._last_logged_epoch = epoch_num
 
         # Default scores
         if self.game_scores.current_size > 0:
@@ -168,15 +179,25 @@ class MarioObserver(AlgoObserver):
 
         # Per-start-stage metrics + clear-rate EMA (drives the curriculum)
         for stage, recs in self.stage_records.items():
-            arr = np.array(recs)  # columns: gain, warped, victory
-            clear = float(np.mean((arr[:, 0] >= 1) | (arr[:, 2] > 0)))
+            # columns: gain, warped, victory, stages_cleared, is_door
+            arr = np.array(recs)
+            cleared = (arr[:, 3] > 0) | (arr[:, 2] > 0)
             self.writer.add_scalar(f'mario/gain/{stage}',
                                    float(arr[:, 0].mean()), epoch_num)
-            self.writer.add_scalar(f'mario/clear/{stage}', clear, epoch_num)
+            self.writer.add_scalar(f'mario/clear/{stage}',
+                                   float(cleared.mean()), epoch_num)
             self.writer.add_scalar(f'mario/warp/{stage}',
                                    float(arr[:, 1].mean()), epoch_num)
-            prev = self._clear_ema.get(stage, 0.0)
-            self._clear_ema[stage] = prev + 0.1 * (clear - prev)
+            # the curriculum re-weights DOOR resets, so its signal must come
+            # from door episodes (archive restarts start mid-level and would
+            # make a level look mastered)
+            door = arr[:, 4] > 0
+            if door.any():
+                dclear = float(cleared[door].mean())
+                self.writer.add_scalar(f'mario/clear_door/{stage}', dclear,
+                                       epoch_num)
+                prev = self._clear_ema.get(stage, 0.0)
+                self._clear_ema[stage] = prev + 0.1 * (dclear - prev)
 
         if len(self.episode_victories) > 0:
             self.writer.add_scalar('mario/victory_rate',
@@ -224,6 +245,7 @@ class MarioObserver(AlgoObserver):
         self.episode_loops.clear()
         self.episode_timeouts.clear()
         self.episode_offroute.clear()
+        self.frontier_cells = None
         self.door_x.clear()
 
         # Record video periodically, on a background thread so training never
@@ -254,7 +276,6 @@ class MarioObserver(AlgoObserver):
             name='SuperMarioBros-v0',
             action_type='complex',
             episode_life=False,
-            stage_bonus=0,
             skip=4,
             sticky_actions=0.0,
         )
@@ -264,9 +285,17 @@ class MarioObserver(AlgoObserver):
         env_cfg = self.algo.env_config or {}
         for k in ('idle_timeout', 'idle_penalty', 'idle_threshold',
                   'loop_penalty', 'fail_penalty', 'backtrack_penalty',
-                  'progress_reward', 'score_reward', 'x_reward', 'obs_mode'):
+                  'progress_reward', 'score_reward', 'x_reward', 'obs_mode',
+                  'stage_bonus', 'offroute_penalty', 'novelty_bonus',
+                  'novelty_global', 'novelty_y_band', 'reward'):
             if k in env_cfg:
                 kwargs[k] = env_cfg[k]
+        # the on-route set follows the CONFIG, never the clip's start level:
+        # a per-level clip passes random_stages=[lvl], which would otherwise
+        # make every legal advance (including the 1-2 warp) off-route
+        route = env_cfg.get('route_levels') or env_cfg.get('random_stages')
+        if route:
+            kwargs['route_levels'] = list(route)
         kwargs.update(self.eval_env_kwargs or {})
         kwargs.pop('video_levels', None)        # recorder options, not env
         kwargs.pop('video_level_steps', None)
@@ -305,6 +334,15 @@ class MarioObserver(AlgoObserver):
 
     def _play_clip(self, model, env, max_steps, epoch_num,
                    stop_on_level_change=False):
+        try:
+            return self._play_clip_inner(model, env, max_steps, epoch_num,
+                                         stop_on_level_change)
+        finally:
+            # a leaked stable-retro emulator makes every later video fail
+            env.close()
+
+    def _play_clip_inner(self, model, env, max_steps, epoch_num,
+                         stop_on_level_change=False):
         """Play one clip with the sampled policy until the episode is over
         (max_steps is only a safety cap). With stop_on_level_change the clip
         also ends once the level is cleared (per-level clips).
@@ -378,14 +416,13 @@ class MarioObserver(AlgoObserver):
             if gp0 is None:
                 gp0 = gp
             if done or (stop_on_level_change and gp is not None
-                        and gp != gp0 and step > 8):
+                        and gp != gp0 and step > 8):  # noqa: E501
                 # hold the terminal frame ~1s so the event flash (LOOP /
                 # DEATH / GAME OVER ...) is actually visible, not 4 frames
                 for _ in range(60):
                     frames.append(frames[-1])
                     step_stats.append(stat)
                 break
-        env.close()
         cause = ('victory' if info.get('victory') else 'loop' if info.get('looped')
                  else 'idle timeout' if info.get('idle_timeout') else 'off-route'
                  if info.get('offroute') else 'game over' if info.get('life') == 255
@@ -464,7 +501,8 @@ class MarioObserver(AlgoObserver):
             for i in range(n):
                 fin.setdefault(i, 'running')
             counts = {k: sum(1 for v in fin.values() if v == k) / n
-                      for k in ('death', 'loop', 'victory', 'idle', 'offroute')}
+                      for k in ('death', 'loop', 'victory', 'idle', 'offroute',
+                                'running')}
             self.writer.add_scalar('eval/door_max_x_mean', float(max_x.mean()),
                                    epoch_num)
             self.writer.add_scalar('eval/door_max_x_max', float(max_x.max()),

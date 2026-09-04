@@ -75,6 +75,9 @@ class Snap:
         self.lists = {k: copy.deepcopy(v) for k, v in vars(env).items()
                       if isinstance(v, list) and len(v) == n}
         self.scalars = {k: v for k, v in vars(env).items() if k in ('_ptr',)}
+        # the env RNG picks the next level on a reset: without it a rewind
+        # replays a DIFFERENT game after the next death
+        self.rngst = env.rng.get_state()
         self.terms = env.rewards.state()
 
     def restore(self, env):
@@ -85,6 +88,7 @@ class Snap:
             setattr(env, k, copy.deepcopy(v))
         for k, v in self.scalars.items():
             setattr(env, k, v)
+        env.rng.set_state(self.rngst)
         env.rewards.restore(self.terms)
         env._fetch_obs(0)
 

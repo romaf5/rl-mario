@@ -94,6 +94,8 @@ class _Lib:
                                          ctypes.c_char_p]
             lib.benv_set_skip.argtypes = [ctypes.c_void_p, ctypes.c_int]
             lib.benv_transit.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+            lib.benv_ram.restype = ctypes.POINTER(ctypes.c_uint8)
+            lib.benv_ram.argtypes = [ctypes.c_void_p, ctypes.c_int]
             cls._inst = lib
         return cls._inst
 
@@ -125,7 +127,8 @@ class MarioNativeVecEnv(IVecEnv):
         self.single_stage = (not full_game) and (random_stages is not None)
         self.env = self.lib.benv_create(rom, len(rom), n, n_threads,
                                         int(self.single_stage))
-        self.skip = int(skip)
+        # C clamps to >= 2; keep Python in step or the rgb4 buffer is short
+        self.skip = max(2, int(skip))
         if self.skip != 4:
             self.lib.benv_set_skip(self.env, self.skip)
         self.state_size = self.lib.benv_state_size()
@@ -142,6 +145,8 @@ class MarioNativeVecEnv(IVecEnv):
         # given explicitly: tools that start on ONE level (tools/play.py
         # --level 1-2) must not turn the rest of the route into dead ends
         route = route_levels or random_stages
+        self._route_levels = list(route) if route else None
+        self._full_game = bool(full_game)
         if full_game and route and self.offroute_penalty > 0:
             self.route_gps = np.array(sorted(
                 (int(s.split('-')[0]) - 1) * 4 + int(s.split('-')[1]) - 1
@@ -237,8 +242,14 @@ class MarioNativeVecEnv(IVecEnv):
             novelty_y_band=novelty_y_band, novelty_global=novelty_global)
         self.reward_specs = specs
         self.rewards = RewardSet(n, specs)
-        self.loop_on = loop_penalty > 0 or any(
-            t.name == 'loop' for t in self.rewards.terms)
+        # detection follows the reward SET (a term list expressing the same
+        # rewards must not silently disable a terminal), so scan nested terms
+        self.loop_on = loop_penalty > 0 or self.rewards.has('loop')
+        if (self.route_gps is None and self._full_game and self._route_levels
+                and self.rewards.has('offroute')):
+            self.route_gps = np.array(sorted(
+                (int(s.split('-')[0]) - 1) * 4 + int(s.split('-')[1]) - 1
+                for s in self._route_levels), dtype=np.int32)
         self.last_terms = {}
         self.last_signals = None
         # play_mode (tools/play.py): loop / off-route / idle timeout still
@@ -257,9 +268,8 @@ class MarioNativeVecEnv(IVecEnv):
             # win counts persist as entry[3] (backward-chaining state)
             self.cell_wins = {c: e[3] for c, e in self.archive.items()
                               if len(e) > 3}
-            # tries default to wins for entries saved before the counter
-            self.cell_tries = {c: (e[4] if len(e) > 4 else e[3])
-                               for c, e in self.archive.items() if len(e) > 3}
+            self.cell_tries = {c: e[4] for c, e in self.archive.items()
+                               if len(e) > 4}
         self.ep_cells = [set() for _ in range(n)]
         self._sbuf = ctypes.create_string_buffer(self.state_size)
         self._rgb4 = None      # (4,224,240,3) capture buffer when recording
@@ -357,6 +367,14 @@ class MarioNativeVecEnv(IVecEnv):
         self.ep_cells[i] = set()
         self.rewards.reset([i], None, hard=True)
         self.ep_steps[i] = 0
+
+    def _forget_cell(self, cell):
+        """Remove a cell and all of its counters (a cell rediscovered later
+        must start unproven; stale wins made it satisfy transitive credit)."""
+        self.archive.pop(cell, None)
+        self.cell_wins.pop(cell, None)
+        self.cell_tries.pop(cell, None)
+        self.cell_early.pop(cell, None)
 
     def _post_reset_init(self, idx, ram):
         """Re-init per-env python state for envs in idx from fresh RAM."""
@@ -504,6 +522,11 @@ class MarioNativeVecEnv(IVecEnv):
         ram = self.ram
 
         x = self._x(); t = self._time(); gp = self._gp()
+        # world byte > 7 = a glitch world (the 1-2 warp-zone drops Mario into
+        # world 36, an endless water level). _gp() clips it to 31, so without
+        # this it reads as on-route 8-4: unlimited x reward, archived under
+        # '8-4', and the wrap guard can never fire because the clip pins gp.
+        bad_world = self._field(0x75F) > 7
         # transition frames can leave garbage in the x page byte. A hard
         # x>4000 cutoff is WRONG (8-4's post-water corridor runs to ~4830
         # in the same coordinate frame); instead debounce: accept a
@@ -586,7 +609,7 @@ class MarioNativeVecEnv(IVecEnv):
                      legit
         t_last = self.time_last.copy()
         x_last = self.x_last.copy()
-        self.x_last = x
+        self.x_last = x.copy()
         self.time_last = t
 
         # ---- score delta ----
@@ -601,7 +624,7 @@ class MarioNativeVecEnv(IVecEnv):
         ok = confirm & (delta <= 15)
         # off-route level entry: no bonus, a penalty, and terminal (below)
         if self.route_gps is not None:
-            off = ok & ~np.isin(gp, self.route_gps)
+            off = (ok & ~np.isin(gp, self.route_gps)) | bad_world
         else:
             off = np.zeros(n, dtype=bool)
         good = ok & ~off
@@ -619,7 +642,8 @@ class MarioNativeVecEnv(IVecEnv):
         self.vic_paid |= victory
 
         # ---- movement trackers / loop bookkeeping / idle ----
-        xd = x - self.prev_x
+        prev_x_before = self.prev_x.copy()
+        xd = x - prev_x_before
         self.looped |= loop
         area_changed = area_b != self.prev_area
         self.prev_area = np.where(held, self.prev_area, area)
@@ -635,18 +659,18 @@ class MarioNativeVecEnv(IVecEnv):
         # capped drip alone made stalling FREE once paid; unbounded drip
         # made dying cheaper than trying)
         idle_to = self.idle >= self.idle_timeout
-        self.prev_x = x
+        self.prev_x = x.copy()
         self.max_x = np.maximum(self.max_x, x)
         ypix = self._field(0x3B8)
 
         # ---- rewards: decomposed terms (mario_rewards) ----
-        sig = Signals(n=n, x=x, x_last=x_last, prev_x=self.prev_x, xd=xd,
+        sig = Signals(n=n, x=x, x_last=x_last, prev_x=prev_x_before, xd=xd,
                       fwd=fwd, new_ground=new_ground, ctx_change=ctx_change,
                       t=t, t_last=t_last, died=died, game_over=(life == 0xFF),
                       loop=loop, legit=legit, off=off, level_up=good,
                       level_delta=delta, newflag=newflag, victory_new=vpay,
                       score_delta=score_delta, idle=self.idle, idle_to=idle_to,
-                      area=area, swim=swim, ypix=ypix, held=held,
+                      area=area, swim=swim, ypix=ypix, held=held, gp=gp,
                       single_stage=self.single_stage)
         reward = self.rewards(sig)
         self.last_terms = self.rewards.last
@@ -663,7 +687,8 @@ class MarioNativeVecEnv(IVecEnv):
             # and a state with ~25s is still a practiceable episode.
             can = (((fstate == 0) | (swim_a == 1)) & ~dying & ~dead
                    & (gmode == 1) & (t > 25)
-                   & ~held & ~died & ~area_changed & ~jump_c & ~off)
+                   & ~held & ~died & ~area_changed & ~jump_c & ~off
+                   & ~bad_world)
             # no phantom cells; never archive a state in a level outside the
             # training set (the off-route confirm step used to save one, and
             # restarts then practised 4-3 for free)
@@ -685,13 +710,16 @@ class MarioNativeVecEnv(IVecEnv):
                 self.ep_cells[i].add(cell)
                 if cell not in self.archive:
                     if len(self.archive) >= self.sr_cells:
-                        # evict the OLDEST cell without wins (evicting the
-                        # most-used one made practice impossible at cap)
-                        losers = [c for c in self.archive
-                                  if self.cell_wins.get(c, 0) == 0]
-                        worst = losers[0] if losers else min(
-                            self.archive, key=lambda c: self.cell_wins.get(c, 0))
-                        del self.archive[worst]
+                        # evict the OLDEST cell that no episode is currently
+                        # practising (evicting the most-used one made
+                        # practice impossible at cap; evicting an in-use
+                        # cell threw away the win that episode was earning)
+                        in_use = {c for c in self.start_cell if c is not None}
+                        cand = [c for c in self.archive if c not in in_use]
+                        losers = [c for c in cand
+                                  if self.cell_wins.get(c, 0) == 0] or cand
+                        if losers:
+                            self._forget_cell(losers[0])
                     self.lib.benv_save(self.env, int(i), self._sbuf)
                     self.archive[cell] = [[bytes(self._sbuf.raw)], 0,
                                           int(t[i])]
@@ -730,7 +758,7 @@ class MarioNativeVecEnv(IVecEnv):
         zombie = self.nongame >= 8
         # wrap guard: progress below the episode's start can only mean the
         # game rolled through the ending into a new quest -- terminal
-        wrapped = gp < self.start_progress
+        wrapped = (gp < self.start_progress) | bad_world
         # a loop is a real terminal ("die immediately"): the env resets to a
         # fresh start, nothing is played on from the teleport point
         if self.single_stage:
@@ -797,17 +825,20 @@ class MarioNativeVecEnv(IVecEnv):
                     c[0] != cell[0] or c[1] != cell[1] or c[4] != cell[4]
                     or c[2] >= cell[2] + 4)
                 for c in self.ep_cells[i] if c != cell)
-            if victory[i] or self.cleared[i] > 0 or reached:
+            won = victory[i] or self.cleared[i] > 0 or reached
+            if won:
                 self.cell_wins[cell] = self.cell_wins.get(cell, 0) + 1
-            if self.ep_steps[i] > 8:
+            # short WINNING episodes are not doomed: a cell one step from a
+            # pipe/area change wins and ends immediately, and the prune was
+            # deleting exactly those backward-chaining links
+            if won or self.ep_steps[i] > 8:
                 continue
             n_early = self.cell_early.get(cell, 0) + 1
             self.cell_early[cell] = n_early
             ent = self.archive.get(cell)
             if (ent is not None and n_early >= 12
                     and n_early > 0.5 * max(ent[1], 1)):
-                del self.archive[cell]
-                del self.cell_early[cell]
+                self._forget_cell(cell)
                 self._archive_dirty += 1
 
         # frame stack (ring)
@@ -836,6 +867,7 @@ class MarioNativeVecEnv(IVecEnv):
                 # a door-like continuation and credits no cell
                 self.start_cell[i] = None
                 self.ep_cells[i] = set()
+                self.explorer[i] = 0      # macro noise must not leak on
             # new episode = fresh frame stack: the first observation of
             # the next life (or post-loop run) must not carry death /
             # pre-teleport frames from the episode that just ended
@@ -868,13 +900,15 @@ class MarioNativeVecEnv(IVecEnv):
             import pickle
             # fold win counts into entries (entry[3]) so backward-chaining
             # state survives restarts
-            for c, w in self.cell_wins.items():
-                e = self.archive.get(c)
-                if e is not None:
-                    while len(e) < 5:
-                        e.append(0)
-                    e[3] = w
-                    e[4] = self.cell_tries.get(c, 0)
+            # every archived cell, not just winners: iterating cell_wins
+            # left never-winning cells as 3-slot entries, and the loader
+            # then dropped their try counts -- the failure weight of the
+            # hardest (never-winning) cells collapsed on every reload
+            for c, e in self.archive.items():
+                while len(e) < 5:
+                    e.append(0)
+                e[3] = self.cell_wins.get(c, 0)
+                e[4] = self.cell_tries.get(c, 0)
             tmp = self.archive_path + '.tmp'
             with open(tmp, 'wb') as f:
                 pickle.dump(self.archive, f)

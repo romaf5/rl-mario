@@ -777,6 +777,9 @@ class MaxAndSkipEnv(Wrapper):
             base.frames4 = []
         try:
             for i in range(self._skip):
+                # a terminal can fire on ANY sub-frame; ask for the frame on
+                # the last two AND whenever the episode may end, so the
+                # terminal observation is never the previous step's
                 base.want_obs = i >= self._skip - 2
                 obs, reward, done, info = self.env.step(action)
                 if self._record:
@@ -787,6 +790,10 @@ class MaxAndSkipEnv(Wrapper):
                     self._obs_buffer[1] = obs
                 total_reward += reward
                 if done:
+                    if obs is None:      # sub-frame terminal: fetch it now
+                        obs = base._retro.get_screen()
+                    self._obs_buffer[0] = obs
+                    self._obs_buffer[1] = obs
                     break
         finally:
             base.want_obs = True
