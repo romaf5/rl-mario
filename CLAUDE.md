@@ -33,6 +33,9 @@ python play.py runs/<run_dir>/nn/<checkpoint>.pth --games 5 --save-video eval.mp
 # Re-run env backend validation (obs/reward/RAM semantics, stage states, smoke train)
 python validate_env.py
 
+# Play the training env yourself with per-term rewards, rewind and a CSV trace
+python tools/play.py --config configs/mario_ppo_native_84.yaml --level 8-4
+
 # TensorBoard (runs dir contains all experiment logs)
 tensorboard --logdir runs --bind_all --port 6006
 ```
