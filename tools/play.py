@@ -12,8 +12,8 @@ Controls
   W A S D        move (S = down / enter pipe, W = up)     arrows also work
   J              A (jump)          K   B (run)
   Space          play / pause
-  R (hold)       rewind, one step per tick               ,  step back one
-  .              step forward one (replays your recorded action after a rewind)
+  R or , (hold)  rewind, one step per tick while held
+  . (hold)       step forward, replaying your recorded actions after a rewind
   [  ]           slower / faster    -  =   timeline zoom
   1..9           plot that reward term in the timeline (0 = total)
   B  /  M        set / jump to bookmark
@@ -283,7 +283,7 @@ class Inspector:
             self.text('  %5d  %-11s %+.0f' % (st, e, r), x0, y, EVENT_COLORS.get(e, TEXT)); y += 16
         hy = self.GH - 60
         for line in ('WASD move   J jump   K run   Space play/pause',
-                     'R hold: rewind   , back   . forward   B/M bookmark',
+                     'hold R or , : rewind   hold . : forward   B/M bookmark',
                      '[ ] speed   - = zoom   1-9 term / 0 total   Q quit'):
             self.text(line, x0, hy, DIM, self.small); hy += 15
 
@@ -397,13 +397,6 @@ class Inspector:
                     elif e.key == pg.K_SPACE:
                         self.paused = not self.paused
                         self.mode = 'paused' if self.paused else 'playing'
-                    elif e.key == pg.K_COMMA:
-                        self.paused = True
-                        self.rewind(1)
-                    elif e.key == pg.K_PERIOD:
-                        self.paused = True
-                        self.redo()
-                        self.mode = 'paused'
                     elif e.key == pg.K_LEFTBRACKET:
                         self.fps = max(2, self.fps - 3)
                     elif e.key == pg.K_RIGHTBRACKET:
@@ -423,9 +416,13 @@ class Inspector:
                         self.paused, self.mode = True, 'paused'
                     elif pg.K_0 <= e.key <= pg.K_9:
                         self.plot_term = e.key - pg.K_0
-            if keys[pg.K_r]:
+            if keys[pg.K_r] or keys[pg.K_COMMA]:
                 self.paused = True
                 self.rewind(1)
+            elif keys[pg.K_PERIOD]:
+                self.paused = True
+                self.redo()
+                self.mode = 'paused'
             elif not self.paused:
                 if self.future:
                     self.future = []          # new input branches off the old future
