@@ -332,6 +332,13 @@ class MarioNativeVecEnv(IVecEnv):
                                   / (max(self.cell_tries.get(c, 0),
                                          self.cell_wins.get(c, 0)) + 2.0), 0.0)
                               + 0.05 for c in cells])
+                # concentrate on the k hardest points (self_restart_frontier_k
+                # was stored and never used, so the draw was spread over the
+                # whole archive and the failing links got a thin slice)
+                k = self.sr_frontier_k
+                if k and 0 < k < len(cells):
+                    top = np.argpartition(-w, k - 1)[:k]
+                    cells = [cells[j] for j in top]; w = w[top]
                 cell = cells[self.rng.choice(len(cells), p=w / w.sum())]
             else:
                 w = np.array([1.0 / (1 + self.archive[c][1]) for c in cells])
@@ -670,7 +677,7 @@ class MarioNativeVecEnv(IVecEnv):
                       loop=loop, legit=legit, off=off, level_up=good,
                       level_delta=delta, newflag=newflag, victory_new=vpay,
                       score_delta=score_delta, idle=self.idle, idle_to=idle_to,
-                      area=area, swim=swim, ypix=ypix, held=held, gp=gp,
+                      area=area_b, swim=swim_b, ypix=ypix, held=held, gp=gp,
                       single_stage=self.single_stage)
         reward = self.rewards(sig)
         self.last_terms = self.rewards.last
@@ -794,7 +801,7 @@ class MarioNativeVecEnv(IVecEnv):
                 'world': int(ram[i, 0x75F]) + 1,
                 'stage': int(ram[i, 0x75C]) + 1,
                 'time': int(t[i]), 'coins': int(ram[i, 0x7ED]),
-                'score': 0,
+                'score': int(self.prev_score[i]),
                 'start_stage': self.start_stage[i],
                 'self_restart': bool(self.was_restart[i]),
                 'idle_timeout': bool(idle_to[i]),

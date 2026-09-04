@@ -170,8 +170,18 @@ class MarioObserver(AlgoObserver):
             self.writer.add_scalar('mario/best_stage_progress', self.best_progress, epoch_num)
 
         if len(self.episode_flags) > 0:
-            flag_rate = np.mean(self.episode_flags)
-            self.writer.add_scalar('mario/flag_get_rate', flag_rate, epoch_num)
+            # NB in full-game mode the flag is not a terminal, so this only
+            # catches episodes that happened to end on a flag frame; the
+            # meaningful signal is mario/clear/<level> and the rate below
+            self.writer.add_scalar('mario/flag_get_rate',
+                                   float(np.mean(self.episode_flags)),
+                                   epoch_num)
+        if self.stage_records:
+            tot = [r for recs in self.stage_records.values() for r in recs]
+            self.writer.add_scalar(
+                'mario/level_clear_rate',
+                float(np.mean([(r[3] > 0) or (r[2] > 0) for r in tot])),
+                epoch_num)
 
         if len(self.episode_lives) > 0:
             mean_lives = np.mean(self.episode_lives)
@@ -300,7 +310,12 @@ class MarioObserver(AlgoObserver):
         kwargs.pop('video_levels', None)        # recorder options, not env
         kwargs.pop('video_level_steps', None)
         kwargs.update(overrides)
-        backend = kwargs.pop('backend', 'retro')
+        # default to the training backend: silently falling back to retro
+        # would record a different observation distribution
+        default_backend = ('lockstep' if (self.algo.env_config or {}).get(
+            'archive_path') or 'obs_mode' in (self.algo.env_config or {})
+            else 'retro')
+        backend = kwargs.pop('backend', default_backend)
         if backend in ('native', 'lockstep'):
             from mario_native_vecenv import NativeEvalEnv, LockstepVideoEnv
             kwargs.pop('name', None)
