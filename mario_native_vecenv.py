@@ -19,6 +19,9 @@ from gymnasium import spaces
 
 from rl_games.common import vecenv
 from rl_games.common.ivecenv import IVecEnv
+from types import SimpleNamespace
+
+from mario_rewards import Signals, RewardSet, legacy_specs, ProgressHighwater
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LIB = os.path.join(HERE, 'native', 'libbatchenv.so')
@@ -113,7 +116,7 @@ class MarioNativeVecEnv(IVecEnv):
                  self_restart_frontier_prob=0.0,
                  self_restart_frontier_k=16, idle_timeout=150,
                  offroute_penalty=0.0, fail_penalty=15.0, obs_mode='pixels',
-                 **unknown):
+                 reward=None, **unknown):
         assert action_type == 'complex'
         n = self.num_actors = num_actors
         self.lib = _Lib()
@@ -171,9 +174,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.cell_early = {}
         self.cell_wins = {}
         self.cell_tries = {}      # restarts since the last credit reset
-        self._novelty_tick = 0
         self.nongame = np.zeros(num_actors, dtype=np.int32)
-        self.novelty_counts = {}    # cross-episode cell visit counts
 
         self.rng = np.random.RandomState(seed)
         self.obs_u8 = np.zeros((n, 84, 84), dtype=np.uint8)
@@ -208,19 +209,33 @@ class MarioNativeVecEnv(IVecEnv):
 
         # per-env python-side state
         z = lambda dt=np.int32: np.zeros(n, dtype=dt)
-        self.x_last = z(); self.time_last = z(); self.hw = z()
+        self.x_last = z(); self.time_last = z()
         self.x_pending = z()
         self.lives = z(); self.prev_flag = z(bool)
         self.progress = z(); self.pending = np.full(n, -1, np.int32)
         self.start_progress = z(); self.cleared = z()
         self.warped = z(bool); self.looped = z(bool); self.vic_paid = z(bool)
         self.idle = z(); self.prev_x = z(); self.max_x = z()
-        self.idle_paid = np.zeros(n, dtype=np.float32)
         self.prev_area = z(); self.last_action = z()
         self.start_stage = [''] * n
         self.was_restart = z(bool)
         self.prev_score = np.zeros(n, dtype=np.int64)
-        self.novelty_sets = [set() for _ in range(n)]
+        # reward terms (mario_rewards): explicit spec list from config, else
+        # the legacy-equivalent set built from the flat kwargs
+        specs = reward or legacy_specs(
+            x_reward=x_reward, fail_penalty=fail_penalty,
+            loop_penalty=loop_penalty, offroute_penalty=offroute_penalty,
+            stage_bonus=stage_bonus, score_reward=score_reward,
+            progress_reward=progress_reward,
+            backtrack_penalty=backtrack_penalty, idle_penalty=idle_penalty,
+            idle_threshold=idle_threshold, novelty_bonus=novelty_bonus,
+            novelty_y_band=novelty_y_band, novelty_global=novelty_global)
+        self.reward_specs = specs
+        self.rewards = RewardSet(n, specs)
+        self.loop_on = loop_penalty > 0 or any(
+            t.name == 'loop' for t in self.rewards.terms)
+        self.last_terms = {}
+        self.last_signals = None
         # SHARED self-restart archive: all envs contribute and draw from one
         # pool (per-env archives dilute frontier discovery at large N)
         self.archive = {}                           # cell -> [state, uses]
@@ -331,17 +346,19 @@ class MarioNativeVecEnv(IVecEnv):
                                      int(self.rng.randint(
                                          0, self.reset_noops + 1)), 0)
         self.ep_cells[i] = set()
-        self.novelty_sets[i] = set()
+        self.rewards.reset([i], None, hard=True)
         self.ep_steps[i] = 0
 
     def _post_reset_init(self, idx, ram):
         """Re-init per-env python state for envs in idx from fresh RAM."""
+        x0 = np.zeros(self.num_actors, dtype=np.int64)
         for i in idx:
             r = ram[i]
             x = int(r[0x6D]) * 256 + int(r[0x86])
+            x0[i] = x
             gp = min(max(int(r[0x75F]) * 4 + int(r[0x75C]), 0), 31)
             self.x_last[i] = x; self.prev_x[i] = 0; self.max_x[i] = 0
-            self.hw[i] = x; self.x_pending[i] = x
+            self.x_pending[i] = x
             self.time_last[i] = (int(r[0x7F8]) * 100 + int(r[0x7F9]) * 10
                                  + int(r[0x7FA]))
             self.lives[i] = int(r[0x75A])
@@ -354,7 +371,6 @@ class MarioNativeVecEnv(IVecEnv):
             self.warped[i] = False; self.looped[i] = False
             self.vic_paid[i] = False
             self.idle[i] = 0
-            self.idle_paid[i] = 0.0
             self.nongame[i] = 0
             self.prev_area[i] = int(r[0x760])
             self.prev_swim[i] = int(r[0x704])
@@ -363,6 +379,13 @@ class MarioNativeVecEnv(IVecEnv):
             self.prev_in_play[i] = not (r[0x0E] <= 5 or r[0x0E] == 7)
             self.play_x[i] = x; self.play_area[i] = int(r[0x760])
             self.play_swim[i] = int(r[0x704]); self.play_life[i] = -1   # anchor invalid until the next in-play step (a respawn is never a loop)
+        # (x_last may alias prev_x after a step, so pass the RAM x explicitly)
+        self.rewards.reset(list(idx), SimpleNamespace(x=x0), hard=False)
+
+    @property
+    def hw(self):
+        t = self.rewards.get(ProgressHighwater)
+        return t.hw if t is not None else np.zeros(self.num_actors, dtype=np.int64)
 
     # ------------------------------------------------------------- IVecEnv
     def _features(self, ram):
@@ -541,42 +564,28 @@ class MarioNativeVecEnv(IVecEnv):
         for i in np.nonzero((jump_c & ~same_frame) | (r_back & ~r_same))[0]:
             revisit[i] = int(cid[i]) in self.visited[i]
         loop = ((jump_c & ((same_frame & (x < self.x_last)) | revisit))
-                | (r_back & (r_same | revisit))) & (self.loop_penalty > 0)
+                | (r_back & (r_same | revisit))) & self.loop_on
         legit = (jump_c | resume) & ~loop
         self.play_x = np.where(in_play, x, self.play_x)
         self.play_area = np.where(in_play, area, self.play_area)
         self.play_swim = np.where(in_play, swim, self.play_swim)
         self.play_life = np.where(in_play, life, self.play_life)
 
-        # ---- base reward (block granularity) ----
-        if self.x_reward == 'highwater':
-            ctx_change = (life != self.lives) | (area_b != self.prev_area) | \
-                         (swim_b != self.prev_swim) | (gp != self.progress) | \
-                         legit
-            self.hw = np.where(ctx_change, x, self.hw)
-            # (max_x is NOT reset on transitions: it is the episode's deepest
-            # coordinate for the door metrics -- resetting it made a run that
-            # reached the water report max_x ~600 and looked like a regression)
-            r_x = np.clip(x - self.hw, 0, 20).astype(np.float32)
-            self.hw = np.maximum(self.hw, x)
-        else:
-            dx = x - self.x_last
-            r_x = np.where(np.abs(dx) > 24, 0, dx).astype(np.float32)
-        r_t = np.minimum(t - self.time_last, 0).astype(np.float32)
-        reward = np.clip(r_x + r_t, -15, 20) - \
-            np.where(died, self.fail_penalty, 0.0).astype(np.float32)
+        # ---- context change (drives highwater rebase in the progress term) ----
+        ctx_change = (life != self.lives) | (area_b != self.prev_area) | \
+                     (swim_b != self.prev_swim) | (gp != self.progress) | \
+                     legit
+        t_last = self.time_last.copy()
+        x_last = self.x_last.copy()
         self.x_last = x
         self.time_last = t
 
-        # ---- score reward: the game's own signal (coins, stomps, blocks;
-        # notably the hidden-block reveal pays +200) ----
-        if self.score_reward > 0:
-            sc = self._score()
-            ds = np.clip(sc - self.prev_score, 0, 2000)
-            reward = reward + ds * self.score_reward
-            self.prev_score = sc
+        # ---- score delta ----
+        sc = self._score()
+        score_delta = np.clip(sc - self.prev_score, 0, 2000)
+        self.prev_score = sc
 
-        # ---- progress bonus (debounced, monotonic, jump-capped) ----
+        # ---- level progress (debounced, monotonic, jump-capped) ----
         inc = gp > self.progress
         confirm = inc & (gp == self.pending)
         delta = gp - self.progress
@@ -586,11 +595,8 @@ class MarioNativeVecEnv(IVecEnv):
             off = ok & ~np.isin(gp, self.route_gps)
         else:
             off = np.zeros(n, dtype=bool)
+        good = ok & ~off
         if ok.any():
-            good = ok & ~off
-            if not self.single_stage:
-                reward = reward + np.where(good, self.stage_bonus * delta, 0)
-                reward = reward - np.where(off, self.offroute_penalty, 0)
             self.cleared += good.astype(np.int32)
             self.warped |= good & (delta >= 2)
             self.progress = np.where(ok, gp, self.progress)
@@ -598,19 +604,13 @@ class MarioNativeVecEnv(IVecEnv):
             self.max_x = np.where(ok, 0, self.max_x)
             self.prev_x = np.where(ok, 0, self.prev_x)
         self.pending = np.where(inc, gp, -1)
-        if self.single_stage:
-            newflag = flag & ~self.prev_flag
-            reward = reward + np.where(newflag, self.stage_bonus, 0)
+        newflag = flag & ~self.prev_flag
         self.prev_flag = flag
-
-        # victory terminal bonus
         vpay = victory & ~self.vic_paid
-        reward = reward + np.where(vpay, self.stage_bonus, 0)
         self.vic_paid |= victory
 
-        # ---- loop penalty / x shaping / idle ----
+        # ---- movement trackers / loop bookkeeping / idle ----
         xd = x - self.prev_x
-        reward = reward - np.where(loop, self.loop_penalty, 0)
         self.looped |= loop
         area_changed = area_b != self.prev_area
         self.prev_area = np.where(held, self.prev_area, area)
@@ -619,52 +619,29 @@ class MarioNativeVecEnv(IVecEnv):
         for i in np.nonzero(~held & in_play & (cid != self.last_cid))[0]:
             self.visited[i].add(int(cid[i]))
             self.last_cid[i] = cid[i]
-
         fwd = xd > 0
         new_ground = x > self.max_x
-        grow = np.minimum(xd, 20) * self.progress_reward * x
-        reward = reward + np.where(fwd & new_ground, grow, 0)
-        reward = reward - np.where(fwd & ~new_ground,
-                                   self.backtrack_penalty, 0)
         self.idle = np.where(fwd, 0, self.idle + 1)
-        # idle drip (config may zero it) capped at one death's worth
-        idle_hit = (self.idle > self.idle_threshold) & (self.idle_paid < 15.0)
-        reward = reward - np.where(idle_hit, self.idle_penalty, 0)
-        self.idle_paid += np.where(idle_hit, self.idle_penalty, 0)
-        # idle timeout: camping ends the episode at death cost. A capped
-        # drip alone made stalling FREE once the cap was paid (policies
-        # learned to park); unbounded drip made dying cheaper than trying.
-        # Equal terminal cost removes both attractors.
+        # idle timeout: camping ends the episode at the failure cost (a
+        # capped drip alone made stalling FREE once paid; unbounded drip
+        # made dying cheaper than trying)
         idle_to = self.idle >= self.idle_timeout
-        reward = reward - np.where(idle_to, self.fail_penalty, 0)
         self.prev_x = x
         self.max_x = np.maximum(self.max_x, x)
+        ypix = self._field(0x3B8)
 
-        # ---- novelty (python sets; ~N ops/step) ----
-        if self.novelty_bonus > 0:
-            # annealing: counts decay so often-visited cells slowly regain
-            # pull -- keeps a standing gradient toward the least-visited
-            # corners of a stuck frontier instead of a fully depleted map
-            self._novelty_tick += 1
-            if self.novelty_global and self._novelty_tick % 3000 == 0:
-                self.novelty_counts = {k: v * 0.5
-                                       for k, v in self.novelty_counts.items()
-                                       if v * 0.5 >= 0.1}
-            ypix = self._field(0x3B8)
-            for i in range(n):
-                cell = (int(area[i]), int(x[i]) // 64,
-                        int(ypix[i]) // self.novelty_y_band)
-                if self.novelty_global:
-                    # cross-episode decaying counts: mundane cells deplete,
-                    # never-reached cells keep a standing bonus
-                    c = self.novelty_counts.get(cell, 0)
-                    if cell not in self.novelty_sets[i]:
-                        self.novelty_sets[i].add(cell)
-                        self.novelty_counts[cell] = c + 1
-                        reward[i] += self.novelty_bonus / (1 + c) ** 0.5
-                elif cell not in self.novelty_sets[i]:
-                    self.novelty_sets[i].add(cell)
-                    reward[i] += self.novelty_bonus
+        # ---- rewards: decomposed terms (mario_rewards) ----
+        sig = Signals(n=n, x=x, x_last=x_last, prev_x=self.prev_x, xd=xd,
+                      fwd=fwd, new_ground=new_ground, ctx_change=ctx_change,
+                      t=t, t_last=t_last, died=died, game_over=(life == 0xFF),
+                      loop=loop, legit=legit, off=off, level_up=good,
+                      level_delta=delta, newflag=newflag, victory_new=vpay,
+                      score_delta=score_delta, idle=self.idle, idle_to=idle_to,
+                      area=area, swim=swim, ypix=ypix, held=held,
+                      single_stage=self.single_stage)
+        reward = self.rewards(sig)
+        self.last_terms = self.rewards.last
+        self.last_signals = sig
 
         # ---- self-restart archiving ----
         if self.sr_prob > 0:

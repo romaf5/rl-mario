@@ -20,3 +20,4 @@ train_retro_smoke.log
 native/*.pkl
 native/*.pkl.tmp
 native/*.pkl.*
+traces/
