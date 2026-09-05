@@ -56,9 +56,9 @@ params:
       # every other failure (a non-terminal loop let the door policy quit into
       # the cheap loop instead of attempting the hidden block: clean-eval loops
       # went 9% -> 97% within 90 minutes)
-      loop_penalty: 30
+      loop_penalty: 100
       loop_terminal: always
-      fail_penalty: 30
+      fail_penalty: 100
       backtrack_penalty: 0
       novelty_bonus: 3.0
       full_game: true

@@ -61,9 +61,9 @@ params:
       # every other failure (a non-terminal loop let the door policy quit into
       # the cheap loop instead of attempting the hidden block: clean-eval loops
       # went 9% -> 97% within 90 minutes)
-      loop_penalty: 30
+      loop_penalty: 100
       loop_terminal: always
-      fail_penalty: 30
+      fail_penalty: 100
       backtrack_penalty: 0
       novelty_bonus: 3.0
       full_game: true
@@ -90,7 +90,7 @@ params:
       # -100 and terminal. Bigger than a death (-15) so the wrong exit is
       # clearly bad; smaller than the ~+300 x-reward of finishing the level
       # so idling/dying before the exit never becomes the better option.
-      offroute_penalty: 30
+      offroute_penalty: 100
       explore_eps: 0.02
       novelty_global: true
       novelty_y_band: 24
