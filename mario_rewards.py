@@ -25,6 +25,7 @@ Config:
     reward:
       - {type: first_visit_progress, cap: 20}
       - {type: level_clear, base: 500, per_extra: 100}
+      - {type: first_visit_cells, bonus: 2, x_bin: 64, y_bin: 32}   # optional: 2D first-visit
 """
 from dataclasses import dataclass, field
 
@@ -146,9 +147,45 @@ class LevelClear(Term):
         return r.astype(np.float32)
 
 
+class FirstVisitCells(Term):
+    """+bonus for every (frame, x-bin, y-band) cell visited for the first
+    time in this life: progress in 2D. Getting ON TOP of something at the
+    same x is a new cell and pays; jumping in place does not (visited).
+    Bounded per life by the number of cells, never negative."""
+    name = 'cells'
+
+    def __init__(self, n, bonus=2.0, x_bin=64, y_bin=32, **kw):
+        super().__init__(n, bonus=bonus, x_bin=x_bin, y_bin=y_bin)
+        self.bonus = float(bonus); self.xb = int(x_bin); self.yb = int(y_bin)
+        self.seen = [set() for _ in range(n)]
+
+    def reset(self, idx, sig, hard=False):
+        for i in idx:
+            self.seen[i] = set()
+
+    def __call__(self, s):
+        r = np.zeros(s.n, dtype=np.float32)
+        for i in range(s.n):
+            if s.hold[i]:
+                continue
+            key = (int(s.frame[i]), int(s.x[i]) // self.xb,
+                   int(s.ypix[i]) // self.yb)
+            if key not in self.seen[i]:
+                self.seen[i].add(key)
+                r[i] = self.bonus
+        return r
+
+    def state(self):
+        return {'seen': [set(v) for v in self.seen]}
+
+    def restore(self, st):
+        self.seen = [set(v) for v in st['seen']]
+
+
 TERMS = {
     'first_visit_progress': FirstVisitProgress,
     'level_clear': LevelClear,
+    'first_visit_cells': FirstVisitCells,
 }
 
 

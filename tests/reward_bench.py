@@ -141,5 +141,24 @@ if rst:
     check('bot after reset: ends within the 60-step grace window', len(tail) <= 61 and (tail[-1][3] or tail[-1][6]), (len(tail), tail[-1]))
     check('bot after reset: the loop cutoff is NOT a time-out (no bootstrap into a dead end)', not tail[-1][4])
 
+# ---------------------------------------------------------------- 2D first-visit cells term
+CELLS = [{'type': 'first_visit_progress', 'cap': 20}, {'type': 'level_clear', 'base': 500, 'per_extra': 100},
+         {'type': 'first_visit_cells', 'bonus': 2, 'x_bin': 64, 'y_bin': 32}]
+env = make('8-4', play_mode=True, reward=CELLS)
+rs = []; cells = []
+for s in range(120):
+    a = 5 if s % 20 == 10 else 0            # stand still, jump in place every 20 steps
+    obs, r, d, inf = env.step(np.array([a])); rs.append(float(r[0])); cells.append(env.last_terms['cells'][0])
+env.close()
+check('cells: standing still pays the start cell once, then 0', cells[0] == 2 and all(c == 0 for c in cells[1:10]), cells[:10])
+check('cells: a jump in place pays the higher y-band once, repeats pay 0', sum(1 for c in cells if c > 0) <= 4 and max(cells) == 2, sum(1 for c in cells if c > 0))
+check('cells: never negative', min(rs) >= 0)
+env = make('8-4', play_mode=True, reward=CELLS); tot = 0.0
+for s in range(300):
+    obs, r, d, inf = env.step(np.array([3 if s % 3 else 4])); tot += float(env.last_terms['cells'][0])
+    if d[0]: break
+env.close()
+check('cells: a run pays a bounded amount (%.0f over %d steps, < progress)' % (tot, s + 1), 0 < tot < 400)
+
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)
