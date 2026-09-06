@@ -314,7 +314,7 @@ class MarioObserver(AlgoObserver):
         # fail penalties default to 0/15 and made loops look free)
         env_cfg = self.algo.env_config or {}
         for k in ('unpaid_timeout', 'page_reset_grace', 'page_reset_px',
-                  'obs_mode', 'stage_bonus', 'reward'):
+                  'stage_bonus', 'reward'):
             if k in env_cfg:
                 kwargs[k] = env_cfg[k]
         # the on-route set follows the CONFIG, never the clip's start level:
@@ -330,8 +330,7 @@ class MarioObserver(AlgoObserver):
         # default to the training backend: silently falling back to retro
         # would record a different observation distribution
         default_backend = ('lockstep' if (self.algo.env_config or {}).get(
-            'archive_path') or 'obs_mode' in (self.algo.env_config or {})
-            else 'retro')
+            'archive_path') else 'retro')
         backend = kwargs.pop('backend', default_backend)
         if backend in ('native', 'lockstep'):
             from mario_native_vecenv import NativeEvalEnv, LockstepVideoEnv
