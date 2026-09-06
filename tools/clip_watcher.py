@@ -1,0 +1,91 @@
+"""Sidecar clip recorder for trainers that don't record video (grpo/).
+
+Watches a checkpoint file; whenever it advances, plays a few clean door
+episodes with the current policy (3 lives, no noise), writes the best one as
+<run>/videos/clip_<step>.mp4 (+ .npz replay trace) and publishes the GIF to
+the run's TensorBoard under gameplay/clip, like the rl_games runs get.
+
+  python tools/clip_watcher.py --run runs/Mario_GRPO84_* --ckpt nn/grpo_last.pth --every 300
+"""
+import argparse, glob, os, sys, time
+import numpy as np, torch
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0, ROOT); sys.path.insert(0, os.path.join(ROOT, 'tools'))
+from render_ckpt import build
+from mario_native_vecenv import NativeEvalEnv
+from callbacks import MarioObserver
+
+
+def record(model, cfg, level, episodes, max_steps, seed):
+    ec = dict(cfg['env_config']); [ec.pop(k, None) for k in ('name', 'action_type', 'archive_path')]
+    ec.update(random_stages=[level], sticky_actions=0, explore_eps=0, self_restart_prob=0, reset_noops=0, episode_life=False)
+    torch.manual_seed(seed); best = None
+    for ep in range(episodes):
+        env = NativeEvalEnv(**ec); v = env.v; obs = env.reset()
+        v.lib.benv_save(v.env, 0, v._sbuf); start = bytes(v._sbuf.raw)
+        frames, acts, total, info = [], [], 0.0, {}
+        for step in range(max_steps):
+            with torch.no_grad():
+                lg = model({'obs': torch.from_numpy(obs[None]).float(), 'is_train': False})['logits']
+            act = int(torch.distributions.Categorical(logits=lg).sample())
+            obs, r, done, info = env.step(act); total += r; acts.append(act); frames.extend(env.frames4)
+            if done: break
+        env.close()
+        mx = info.get('max_x_pos', 0)
+        if best is None or mx > best[0]:
+            best = (mx, frames, acts, start, total, info)
+    return best
+
+
+def publish(run_dir, step, frames, acts, start, mx, total, info, level):
+    from PIL import Image, ImageDraw
+    import imageio
+    from tensorboardX import SummaryWriter
+    try:
+        from tensorboardX.proto.summary_pb2 import Summary
+    except ImportError:
+        from tensorboard.compat.proto.summary_pb2 import Summary
+    vdir = os.path.join(run_dir, 'videos'); os.makedirs(vdir, exist_ok=True)
+    base = os.path.join(vdir, 'clip_%06d_x%d' % (step, mx))
+    imageio.mimsave(base + '.mp4', frames, fps=60, macro_block_size=None)
+    np.savez_compressed(base + '.npz', state=np.frombuffer(start, dtype=np.uint8), actions=np.array(acts, dtype=np.int16), level=level, raw=0, step=step)
+    pil = []
+    for i, f in enumerate(frames[::2]):
+        im = Image.fromarray(f); d = ImageDraw.Draw(im)
+        d.rectangle((0, 214, 240, 224), fill=(0, 0, 0)); d.text((3, 213), 'step %d  x %d  R %.0f' % (step, mx, total), fill=(255, 255, 255))
+        pil.append(im)
+    gif = MarioObserver._gif_bytes(pil, per_step=2)     # auto-thin long clips (~3000 GIF frames max)
+    w = SummaryWriter(os.path.join(run_dir, 'summaries'))
+    w.file_writer.add_summary(Summary(value=[Summary.Value(tag='gameplay/clip', image=Summary.Image(height=224, width=240, colorspace=3, encoded_image_string=gif))]), step)
+    w.add_scalar('gameplay/clip_max_x', mx, step); w.add_scalar('gameplay/clip_reward', total, step); w.flush(); w.close()
+    return base + '.mp4', len(gif)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--run', required=True); ap.add_argument('--ckpt', default='nn/grpo_last.pth')
+    ap.add_argument('--config', default='configs/mario_ppo_native_84.yaml'); ap.add_argument('--level', default='8-4')
+    ap.add_argument('--every', type=int, default=300, help='seconds between checks'); ap.add_argument('--episodes', type=int, default=3)
+    ap.add_argument('--max-steps', type=int, default=3000); ap.add_argument('--once', action='store_true')
+    a = ap.parse_args()
+    run_dir = glob.glob(a.run)[0] if '*' in a.run else a.run
+    ck = os.path.join(run_dir, a.ckpt); last = None
+    while True:
+        if os.path.exists(ck):
+            try:
+                stamp = os.path.getmtime(ck)
+                if stamp != last:
+                    model, cfg = build(a.config, ck)
+                    step = int(torch.load(ck, map_location='cpu', weights_only=False).get('iter', 0))
+                    mx, frames, acts, start, total, info = record(model, cfg, a.level, a.episodes, a.max_steps, seed=step)
+                    path, n = publish(run_dir, step, frames, acts, start, mx, total, info, a.level)
+                    print(time.strftime('%H:%M:%S'), 'step %d: clip %s (%d frames, max x %d, R %.0f, gif %dKB)' % (step, os.path.basename(path), len(frames), mx, total, n // 1024), flush=True)
+                    last = stamp
+            except Exception as e:
+                print(time.strftime('%H:%M:%S'), 'clip failed:', e, flush=True)
+        if a.once:
+            break
+        time.sleep(a.every)
+
+
+if __name__ == '__main__':
+    main()
