@@ -137,7 +137,8 @@ class MarioNativeVecEnv(IVecEnv):
                  page_reset_grace=60, page_reset_px=600,
                  reward=None, play_mode=False,
                  route_levels=None, cell_tiles=False,
-                 frontier_predecessors=0, cell_y_band=64, **unknown):
+                 frontier_predecessors=0, cell_y_band=64, explore_pure=False,
+                 **unknown):
         assert action_type == 'complex'
         gone = [k for k in unknown if k in self.REMOVED_KWARGS]
         if gone:
@@ -203,6 +204,10 @@ class MarioNativeVecEnv(IVecEnv):
         # vertical resolution of archive cells (px): 32 separates standing on
         # a block (ypix 112) from standing on the pipe top above it (64)
         self.cell_y_band = int(cell_y_band)
+        # explore episodes: pure random with mixed persistence (True) or the
+        # legacy 60% policy / 40% 8-step macro mix
+        self.explore_pure = bool(explore_pure)
+        self.exp_persist = np.ones(num_actors, dtype=np.int64)
         self.explorer = np.zeros(num_actors, dtype=np.int32)
         self.exp_action = np.zeros(num_actors, dtype=np.int64)
         self.ep_steps = np.zeros(num_actors, dtype=np.int32)
@@ -481,17 +486,31 @@ class MarioNativeVecEnv(IVecEnv):
         acts = np.asarray(actions).astype(np.int64).ravel()
         exp_mask = self.explorer > 0
         if exp_mask.any():
-            # macro-action random walk: hold each random action ~8 steps.
-            # Per-step uniform noise cannot produce directed multi-step
-            # maneuvers (e.g. sustained sink or approach); persistence can.
-            keep = self.rng.random_sample(n) >= 1.0 / 8
-            macro = np.where(keep, self.exp_action,
-                             self.rng.randint(0, 12, size=n))
-            self.exp_action[:] = macro
-            # 60% policy / 40% macro: keep the policy's behavioral prior
-            # (pure uniform flail dies to hazards before it can discover)
-            use_macro = self.rng.random_sample(n) < 0.4
-            acts = np.where(exp_mask & use_macro, macro, acts)
+            # macro-action random walk: hold each random action for a
+            # while. Per-step uniform noise cannot produce directed
+            # multi-step maneuvers; persistence can.
+            if self.explore_pure:
+                # Go-Explore phase 1 proper: pure random actions with a MIX
+                # of persistence (1..8 steps) -- short hops and nudges
+                # exist in this distribution, the policy+8-step-macro mix
+                # never produced the precision jump onto the 8-4 block in
+                # ~4000 tries from the right cell
+                new = self.rng.random_sample(n) >= 1.0 / self.exp_persist
+                keep = new & (self.exp_persist > 1)
+                self.exp_persist = np.where(keep, self.exp_persist,
+                                            2 ** self.rng.randint(0, 4, size=n))
+                macro = np.where(keep, self.exp_action,
+                                 self.rng.randint(0, 12, size=n))
+                self.exp_action[:] = macro
+                acts = np.where(exp_mask, macro, acts)
+            else:
+                keep = self.rng.random_sample(n) >= 1.0 / 8
+                macro = np.where(keep, self.exp_action,
+                                 self.rng.randint(0, 12, size=n))
+                self.exp_action[:] = macro
+                # 60% policy / 40% macro: keep the policy's behavioral prior
+                use_macro = self.rng.random_sample(n) < 0.4
+                acts = np.where(exp_mask & use_macro, macro, acts)
             self.explorer = np.maximum(self.explorer - 1, 0)
         if self.explore_eps > 0:
             # permanent action-diversity floor: collapsed policy entropy
