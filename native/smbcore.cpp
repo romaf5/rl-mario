@@ -147,9 +147,8 @@ void write8(Core& c, uint16_t addr, uint8_t val) {
                 if (!was && (val & 0x80) && (c.ppu.status & 0x80))
                     c.cpu.nmi_pending = true;
                 c.ppu.t = (uint16_t)((c.ppu.t & 0xF3FF) | ((val & 3) << 10));
-                if (c.ppu.slog_n < 16)
-                    c.ppu.slog[c.ppu.slog_n++] = {c.ppu.scanline, c.ppu.t,
-                                                  c.ppu.fine_x, c.ppu.ctrl};
+                c.ppu.slog[c.ppu.slog_n < 16 ? c.ppu.slog_n++ : 15] = {c.ppu.scanline, c.ppu.t,
+                                                  (uint8_t)(c.ppu.fine_x | ((c.ppu.status & 0x40) ? 0x80 : 0)), c.ppu.ctrl};
                 return;
             }
             case 1: c.ppu.mask = val; return;
@@ -164,9 +163,9 @@ void write8(Core& c, uint16_t addr, uint8_t val) {
                               | ((val & 0xF8) << 2) | ((val & 7) << 12));
                 }
                 c.ppu.latch = !c.ppu.latch;
-                if (!c.ppu.latch && c.ppu.slog_n < 16)
-                    c.ppu.slog[c.ppu.slog_n++] = {c.ppu.scanline, c.ppu.t,
-                                                  c.ppu.fine_x, c.ppu.ctrl};
+                if (!c.ppu.latch)
+                    c.ppu.slog[c.ppu.slog_n < 16 ? c.ppu.slog_n++ : 15] = {c.ppu.scanline, c.ppu.t,
+                                                  (uint8_t)(c.ppu.fine_x | ((c.ppu.status & 0x40) ? 0x80 : 0)), c.ppu.ctrl};
                 return;
             case 6:
                 if (!c.ppu.latch)
@@ -175,9 +174,8 @@ void write8(Core& c, uint16_t addr, uint8_t val) {
                 else {
                     c.ppu.t = (uint16_t)((c.ppu.t & 0xFF00) | val);
                     c.ppu.v = c.ppu.t;
-                    if (c.ppu.slog_n < 16)
-                        c.ppu.slog[c.ppu.slog_n++] = {c.ppu.scanline, c.ppu.t,
-                                                      c.ppu.fine_x, c.ppu.ctrl};
+                    c.ppu.slog[c.ppu.slog_n < 16 ? c.ppu.slog_n++ : 15] = {c.ppu.scanline, c.ppu.t,
+                                                      (uint8_t)(c.ppu.fine_x | ((c.ppu.status & 0x40) ? 0x80 : 0)), c.ppu.ctrl};
                 }
                 c.ppu.latch = !c.ppu.latch;
                 return;
@@ -518,14 +516,17 @@ void ppu_apply(Core& c, int dots) {
                 // (Resetting at FRAME_MARK erased the log at the exact
                 // moment the caller renders -- HUD scrolled with Mario.)
                 {
-                    int m = 0;
+                    int last = -1;
                     for (int i = 0; i < u.slog_n; i++)
-                        if (u.slog[i].line >= 240) {
-                            u.slog[m] = u.slog[i];
-                            u.slog[m].line = 0;
-                            m++;
-                        }
-                    u.slog_n = m;
+                        if (u.slog[i].line >= 240) last = i;
+                    if (last >= 0) {
+                        u.slog[0] = u.slog[last];
+                        u.slog[0].line = 0;
+                        u.slog[0].fx &= 7;          // baseline, not a split
+                        u.slog_n = 1;
+                    } else {
+                        u.slog_n = 0;
+                    }
                 }
             } else if (idx == FRAME_MARK) {
                 u.frame++;
@@ -587,19 +588,26 @@ void render_lut(Core& c, uint8_t* out /*240*224*/, const uint8_t* lut) {
         int si = 0;
         // state at frame start: earliest snapshot from pre-render/NMI writes
         uint16_t st = u.slog_n ? u.slog[0].t : u.t;
-        uint8_t sfx = u.slog_n ? u.slog[0].fx : u.fine_x;
+        uint8_t sfx = (uint8_t)((u.slog_n ? u.slog[0].fx : u.fine_x) & 7);
         uint8_t sctrl = u.slog_n ? u.slog[0].ctrl : u.ctrl;
-        // visible-frame scroll changes cannot land above the sprite-0
-        // split: on lag frames the CPU slice skews write attribution to
-        // early scanlines, which made the HUD flicker. Clamp them down.
+        // The CPU runs in slices, so the scanline a write is dated with can
+        // be skewed by many lines. What is reliable is the sprite-0 flag at
+        // the moment of the write (bit 7 of fx): the game writes the
+        // playfield scroll only after polling the hit, so a tagged write is
+        // the split and lands no higher than the hit line; an untagged
+        // write is the status-bar baseline (an NMI write dated into the
+        // next frame's first lines used to be clamped down to the split,
+        // which scrolled the HUD with Mario on ~30% of frames).
         int s0l = s0_line(u);
         auto eff_line = [&](int i) {
             int l = u.slog[i].line;
-            return (l >= 1 && l < 240 && l < s0l) ? s0l : l;
+            bool hit = u.slog[i].fx & 0x80;
+            if (!hit) return 0;
+            return (l < 240 && l < s0l) ? s0l : l;
         };
         for (int y = 0; y < 240; y++) {
             while (si < u.slog_n && eff_line(si) <= y) {
-                st = u.slog[si].t; sfx = u.slog[si].fx;
+                st = u.slog[si].t; sfx = (uint8_t)(u.slog[si].fx & 7);
                 sctrl = u.slog[si].ctrl; si++;
             }
             int coarse_x = st & 0x1F;
