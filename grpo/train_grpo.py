@@ -243,7 +243,11 @@ def main():
             for k, v in ev.items():
                 writer.add_scalar(f'eval/door_{k}', v, it)
             print(f'  [eval] door: mean_x {ev["mean_x"]:.0f} max_x {ev["max_x"]:.0f} victory {ev["victory"]:.3f} loops {ev["loop"]:.2f}', flush=True)
-            torch.save({'model': model.state_dict(), 'iter': it, 'frames': frames}, os.path.join(run_dir, 'nn', 'grpo_last.pth'))
+            ck = {'model': model.state_dict(), 'iter': it, 'frames': frames}
+            torch.save(ck, os.path.join(run_dir, 'nn', 'grpo_last.pth'))
+            # numbered copy per eval: clips / ghosts for ANY step can be
+            # rendered later (tools/clip_watcher.py, tools/ghosts.py)
+            torch.save(ck, os.path.join(run_dir, 'nn', 'grpo_it%06d.pth' % it))
         writer.flush()
     torch.save({'model': model.state_dict(), 'iter': it, 'frames': frames}, os.path.join(run_dir, 'nn', 'grpo_last.pth'))
     env.close(); eval_env.close()
