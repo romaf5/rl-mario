@@ -506,13 +506,14 @@ class MarioObserver(AlgoObserver):
             with open(os.path.join(out, tag + '.csv'), 'w') as f:
                 f.write(','.join(['step', 'action', 'x', 'ypix', 'life', 'reward']
                                  + term_names + ['page_reset', 'timeout', 'died',
-                                                 'transition', 'clear', 'done']) + '\n')
+                                                 'transition', 'level_clear', 'done']) + '\n')
                 for r in rows:
                     f.write(','.join(str(v) for v in r) + '\n')
             np.savez_compressed(os.path.join(out, tag + '.npz'),
                                 state=np.frombuffer(state, dtype=np.uint8),
                                 actions=np.array(acts, dtype=np.int16),
-                                term_names=np.array(term_names), epoch=epoch_num)
+                                term_names=np.array(term_names), epoch=epoch_num,
+                                raw=1)      # recorded with hack-free stepping
         except Exception as e:
             print(f'  [Video] trace dump failed: {e}')
 
@@ -645,7 +646,8 @@ class MarioObserver(AlgoObserver):
                             actions=np.array(acts[i], dtype=np.int16),
                             terms=np.array(terms[i], dtype=np.float32),
                             term_names=np.array(term_names), x=np.array(xs[i]),
-                            level=str((stages or ['?'])[0]), epoch=epoch_num)
+                            level=str((stages or ['?'])[0]), epoch=epoch_num,
+                            raw=0)      # recorded with the hacked training step
                     f.write(f'{i},{fin.get(i, "running")},{int(max_x[i])},'
                             f'{len(acts[i])},{tot:.1f},{fn}\n')
         except Exception as e:
