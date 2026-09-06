@@ -242,6 +242,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.prev_frame = z(np.int64)
         self.unpaid = z(); self.max_gap = z(); self.page_resets = z()
         self.after_reset = z(bool)
+        self.forced_timeup = z()      # eval: cutoffs turned into time-ups
         self.prev_in_play = np.ones(n, dtype=bool)
         self.pending_life = z(bool); self.pending_life_at_resume = z(bool)
         self.start_stage = [''] * n
@@ -309,6 +310,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.was_restart[i] = False
         self.start_cell[i] = None      # door episodes credit no cell
         self.explorer[i] = 0           # no macro-noise leak across episodes
+        self.forced_timeup[i] = 0
         if (self.sr_prob > 0 and self.archive
                 and self.rng.random_sample() < self.sr_prob):
             # soft least-practiced: p(cell) ~ 1/(1+uses). Uniform-ish
@@ -741,6 +743,19 @@ class MarioNativeVecEnv(IVecEnv):
         if self.play_mode:
             # inspection: flag, keep the highwater, keep playing
             real_done = real_done & ~(timeout | wrong_exit)
+        elif not self.episode_life:
+            # multi-life eval (videos): a stuck life must cost ONE life, as
+            # in the real game, not the whole run -- zero the game timer so
+            # the game itself runs the time-up death and the next life
+            # starts. (Ending the run here made a loop fatal while a death
+            # was not, which inverted the eval's incentives.)
+            stuck = timeout & ~game_over & ~victory & ~zombie & ~wrapped
+            for i in np.nonzero(stuck)[0]:
+                self.ram[i, 0x7F8:0x7FB] = 0
+                self.lib.benv_set_ram(self.env, int(i), self.ram[i].tobytes())
+                self.unpaid[i] = 0
+                self.forced_timeup[i] += 1
+            real_done = real_done & ~timeout
         # rl_games value bootstrap: the plain cutoff is not part of the
         # game; the post-reset cutoff IS a dead end (no bootstrap)
         time_outs = timeout & ~self.after_reset & \
@@ -784,6 +799,7 @@ class MarioNativeVecEnv(IVecEnv):
                 'page_resets': int(self.page_resets[i]),
                 'wrong_exit': bool(wrong_exit[i]),
                 'max_unpaid_gap': int(self.max_gap[i]),
+                'forced_timeups': int(self.forced_timeup[i]),
                 'frontier_cells': n_front,
             })
 

@@ -23,20 +23,25 @@ def record(model, cfg, level, episodes, max_steps, seed):
         env = NativeEvalEnv(**ec); v = env.v; obs = env.reset()
         v.lib.benv_save(v.env, 0, v._sbuf); start = bytes(v._sbuf.raw)
         frames, acts, total, info = [], [], 0.0, {}
+        life_r, prev_life, per_frame_r = 0.0, None, []
         for step in range(max_steps):
             with torch.no_grad():
                 lg = model({'obs': torch.from_numpy(obs[None]).float(), 'is_train': False})['logits']
             act = int(torch.distributions.Categorical(logits=lg).sample())
             obs, r, done, info = env.step(act); total += r; acts.append(act); frames.extend(env.frames4)
+            if prev_life is not None and info.get('life') != prev_life:
+                life_r = 0.0
+            prev_life = info.get('life'); life_r += r
+            per_frame_r.extend([life_r] * len(env.frames4))
             if done: break
         env.close()
         mx = info.get('max_x_pos', 0)
         if best is None or mx > best[0]:
-            best = (mx, frames, acts, start, total, info)
+            best = (mx, frames, acts, start, total, info, per_frame_r)
     return best
 
 
-def publish(run_dir, step, frames, acts, start, mx, total, info, level):
+def publish(run_dir, step, frames, acts, start, mx, total, info, level, per_frame_r=None):
     from PIL import Image, ImageDraw
     import imageio
     from tensorboardX import SummaryWriter
@@ -52,9 +57,10 @@ def publish(run_dir, step, frames, acts, start, mx, total, info, level):
     # (30 fps at 33 ms = real time) or every 4th for long clips (15 fps at
     # 67 ms = real time). Feeding it pre-thinned frames played 2-4x too fast.
     pil = []
-    for f in frames:
+    for k, f in enumerate(frames):
         im = Image.fromarray(f); d = ImageDraw.Draw(im)
-        d.rectangle((0, 214, 240, 224), fill=(0, 0, 0)); d.text((3, 213), 'step %d  x %d  R %.0f' % (step, mx, total), fill=(255, 255, 255))
+        lr = per_frame_r[k] if per_frame_r is not None and k < len(per_frame_r) else total
+        d.rectangle((0, 214, 240, 224), fill=(0, 0, 0)); d.text((3, 213), 'step %d  x %d  R(life) %.0f' % (step, mx, lr), fill=(255, 255, 255))
         pil.append(im)
     gif = MarioObserver._gif_bytes(pil, per_step=4)
     w = SummaryWriter(os.path.join(run_dir, 'summaries'))
@@ -79,8 +85,8 @@ def main():
                 if stamp != last:
                     model, cfg = build(a.config, ck)
                     step = int(torch.load(ck, map_location='cpu', weights_only=False).get('iter', 0))
-                    mx, frames, acts, start, total, info = record(model, cfg, a.level, a.episodes, a.max_steps, seed=step)
-                    path, n = publish(run_dir, step, frames, acts, start, mx, total, info, a.level)
+                    mx, frames, acts, start, total, info, pfr = record(model, cfg, a.level, a.episodes, a.max_steps, seed=step)
+                    path, n = publish(run_dir, step, frames, acts, start, mx, total, info, a.level, pfr)
                     print(time.strftime('%H:%M:%S'), 'step %d: clip %s (%d frames, max x %d, R %.0f, gif %dKB)' % (step, os.path.basename(path), len(frames), mx, total, n // 1024), flush=True)
                     last = stamp
             except Exception as e:

@@ -344,7 +344,7 @@ class MarioObserver(AlgoObserver):
     @staticmethod
     def draw_strip(frame, epoch_num, stat, font):
         """Frame + 2-line stats strip below it (gameplay pixels untouched):
-        line 1 = epoch, level, x, cumulative R, this step's reward;
+        line 1 = epoch, level, x, this LIFE's cumulative R, this step's reward;
         line 2 = reward event flash (LOOP/DEATH/OFF-ROUTE/IDLE/CLEAR)."""
         from PIL import Image, ImageDraw
         world, stage, x_pos, rew, r_step, event, lives = stat
@@ -384,7 +384,8 @@ class MarioObserver(AlgoObserver):
         frames, step_stats = [], []
         obs = env.reset()
         total_reward, info = 0, {}
-        gp0 = None
+        life_reward = 0.0       # the strip shows THIS life's reward: a sum
+        gp0 = None              # across lives grew with every death
         # sidecar trace of the clip: start state + actions + per-term rewards
         # + flags, replayable with tools/play.py --replay <file>.npz
         tr_env = getattr(env.unwrapped, 'v', None)
@@ -420,6 +421,9 @@ class MarioObserver(AlgoObserver):
                 logits=res['logits']).sample().item()
             obs, reward, done, info = env.step(action)
             total_reward += reward
+            if prev_life is not None and info.get('life', prev_life) != prev_life:
+                life_reward = 0.0
+            life_reward += reward
             if tr_env is not None:
                 sg = tr_env.last_signals
                 tr_acts.append(int(action))
@@ -439,7 +443,7 @@ class MarioObserver(AlgoObserver):
             elif info.get('wrong_exit'):
                 event, event_ttl = 'OFF-ROUTE %+.0f' % reward, 60
             elif info.get('timeout'):
-                event, event_ttl = 'IDLE TIMEOUT %+.0f' % reward, 60
+                event, event_ttl = 'STUCK -> TIME-UP', 60
             elif life == 255 and prev_life is not None and prev_life != 255:
                 event, event_ttl = 'GAME OVER %+.0f' % reward, 60
             elif prev_life is not None and life < prev_life:
@@ -448,7 +452,7 @@ class MarioObserver(AlgoObserver):
                 event, event_ttl = 'CLEAR %+.0f' % reward, 60
             prev_life = life
             stat = (info.get('world', 1), info.get('stage', 1),
-                    info.get('x_pos', 0), total_reward, reward,
+                    info.get('x_pos', 0), life_reward, reward,
                     event if event_ttl > 0 else '',
                     (life if life != 255 else 0))
             event_ttl -= per_step_frames
