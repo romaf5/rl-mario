@@ -11,6 +11,7 @@ are equivalent-in-expectation rather than bit-identical to the retro chain.
 """
 
 import ctypes
+import zlib
 import gzip
 import os
 
@@ -135,7 +136,7 @@ class MarioNativeVecEnv(IVecEnv):
                  self_restart_frontier_k=16, unpaid_timeout=250,
                  page_reset_grace=60, page_reset_px=600,
                  reward=None, play_mode=False,
-                 route_levels=None, **unknown):
+                 route_levels=None, cell_tiles=False, **unknown):
         assert action_type == 'complex'
         gone = [k for k in unknown if k in self.REMOVED_KWARGS]
         if gone:
@@ -193,6 +194,8 @@ class MarioNativeVecEnv(IVecEnv):
         # ground (pipe 1: climb in, ~35 steps) before a dead-end cutoff
         self.page_reset_grace = int(page_reset_grace)
         self.page_reset_px = int(page_reset_px)
+        # archive cells also keyed by the level tiles of the current x-bin
+        self.cell_tiles = bool(cell_tiles)
         self.explorer = np.zeros(num_actors, dtype=np.int32)
         self.exp_action = np.zeros(num_actors, dtype=np.int64)
         self.ep_steps = np.zeros(num_actors, dtype=np.int32)
@@ -376,6 +379,19 @@ class MarioNativeVecEnv(IVecEnv):
         section, vine to a bonus area, water) starts a new frame."""
         return (((np.asarray(gp, dtype=np.int64) * 256 + area) * 8 + atype)
                 * 2 + swim)
+
+    def _tile_sig(self, i, x):
+        """Signature of the level geometry in Mario's current 128-px bin
+        (8 metatile columns x 13 rows of the game's $0500 buffer). Changes
+        exactly when a block is revealed / broken in that bin; ignores
+        enemies and animation. Part of the archive cell key so a revealed
+        hidden block is its own cell (Go-Explore: the cell representation
+        must see the state that matters, or it can never be practised)."""
+        col0 = (int(x) // 128) * 8
+        cx = (col0 + np.arange(8)) * 16
+        base = 0x500 + ((cx // 256) % 2) * 0xD0 + (cx % 256) // 16
+        idx = base[:, None] + (np.arange(13) * 16)[None, :]
+        return int(zlib.crc32(self.ram[i][idx].tobytes()) & 0xFFFF)
 
     def _post_reset_init(self, idx, ram):
         """Re-init per-env python state for envs in idx from fresh RAM
@@ -604,7 +620,8 @@ class MarioNativeVecEnv(IVecEnv):
                 g = int(gp[i])
                 cell = ('%d-%d' % (g // 4 + 1, g % 4 + 1), int(area[i]),
                         int(x[i]) // 128, int(ypix[i]) // 64, int(swim[i]),
-                        int(atype[i]))
+                        int(atype[i]),
+                        self._tile_sig(i, x[i]) if self.cell_tiles else 0)
                 if cell in self.ep_cells[i]:
                     continue
                 self.ep_cells[i].add(cell)

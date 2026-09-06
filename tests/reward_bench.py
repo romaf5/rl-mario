@@ -160,5 +160,15 @@ for s in range(300):
 env.close()
 check('cells: a run pays a bounded amount (%.0f over %d steps, < progress)' % (tot, s + 1), 0 < tot < 400)
 
+# ---------------------------------------------------------------- archive cell key: tile signature sees the reveal
+if os.path.exists(T84):
+    env = make('8-4', play_mode=True, cell_tiles=True); h = trace_actions(T84); sigs = {}
+    for s in range(1412):
+        env.step(np.array([h[s]]))
+        if s + 1 in (1402, 1410):
+            sigs[s + 1] = env._tile_sig(0, 2406)
+    env.close()
+    check('archive key: tile signature differs before/after the hidden block is revealed (s1402 vs s1410)', sigs[1402] != sigs[1410], sigs)
+
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)
