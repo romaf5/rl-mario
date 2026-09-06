@@ -48,12 +48,15 @@ def publish(run_dir, step, frames, acts, start, mx, total, info, level):
     base = os.path.join(vdir, 'clip_%06d_x%d' % (step, mx))
     imageio.mimsave(base + '.mp4', frames, fps=60, macro_block_size=None)
     np.savez_compressed(base + '.npz', state=np.frombuffer(start, dtype=np.uint8), actions=np.array(acts, dtype=np.int16), level=level, raw=0, step=step)
+    # all 60 fps frames, like the observer's clips: _gif_bytes picks every 2nd
+    # (30 fps at 33 ms = real time) or every 4th for long clips (15 fps at
+    # 67 ms = real time). Feeding it pre-thinned frames played 2-4x too fast.
     pil = []
-    for i, f in enumerate(frames[::2]):
+    for f in frames:
         im = Image.fromarray(f); d = ImageDraw.Draw(im)
         d.rectangle((0, 214, 240, 224), fill=(0, 0, 0)); d.text((3, 213), 'step %d  x %d  R %.0f' % (step, mx, total), fill=(255, 255, 255))
         pil.append(im)
-    gif = MarioObserver._gif_bytes(pil, per_step=2)     # auto-thin long clips (~3000 GIF frames max)
+    gif = MarioObserver._gif_bytes(pil, per_step=4)
     w = SummaryWriter(os.path.join(run_dir, 'summaries'))
     w.file_writer.add_summary(Summary(value=[Summary.Value(tag='gameplay/clip', image=Summary.Image(height=224, width=240, colorspace=3, encoded_image_string=gif))]), step)
     w.add_scalar('gameplay/clip_max_x', mx, step); w.add_scalar('gameplay/clip_reward', total, step); w.flush(); w.close()
