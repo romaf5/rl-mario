@@ -199,8 +199,10 @@ class MarioNativeVecEnv(IVecEnv):
         self.visited = [set() for _ in range(n)]
         self.last_cid = np.full(n, -1, dtype=np.int64)
         self.prev_swim = np.zeros(n, dtype=np.int32)
+        self.prev_atype = np.zeros(n, dtype=np.int32)   # AreaType 0x74E
         self.prev_in_play = np.ones(n, dtype=bool)
         self.play_x = np.zeros(n, dtype=np.int32); self.play_area = np.zeros(n, dtype=np.int32); self.play_swim = np.zeros(n, dtype=np.int32)
+        self.play_atype = np.zeros(n, dtype=np.int32)
         self.play_life = np.zeros(n, dtype=np.int32)
 
         # obs_mode 'pixels': 84x84x4 frame stack (default); 'ram': flat
@@ -419,6 +421,7 @@ class MarioNativeVecEnv(IVecEnv):
             self.nongame[i] = 0
             self.prev_area[i] = int(r[0x760])
             self.prev_swim[i] = int(r[0x704])
+            self.prev_atype[i] = int(r[0x74E])
             self.visited[i] = set()
             self.last_cid[i] = -1
             self.prev_in_play[i] = not (r[0x0E] <= 5 or r[0x0E] == 7)
@@ -591,6 +594,13 @@ class MarioNativeVecEnv(IVecEnv):
         # this life already visited (re-entering a bonus room = cycle).
         swim = ram[:, 0x704].astype(np.int32)
         swim_b = np.where(held, self.prev_swim, swim)
+        # AreaType (0x74E): distinguishes a bonus/vine area from the main
+        # section that shares the area byte -- e.g. the 4-2 vine warp lifts
+        # Mario to the coin-heaven area (x restarts at ~75, area byte still
+        # 2, AreaType 2->1). Part of the frame so it reads as a transition,
+        # not a same-frame backward loop.
+        atype = ram[:, 0x74E].astype(np.int32)
+        atype_b = np.where(held, self.prev_atype, atype)
         # player control ($0E not in 0-5,7). The hacked training step
         # always ends in control; the hack-free replay path (eval video)
         # exposes death/respawn and pipe frames step by step, so a jump only
@@ -606,10 +616,13 @@ class MarioNativeVecEnv(IVecEnv):
         # respawn (life changed meanwhile) is not.
         r_back = resume & (x < self.play_x - 96) & (life == self.play_life) & \
                  (gp == self.progress) & ~flag
-        r_same = (area == self.play_area) & (swim == self.play_swim)
+        r_same = ((area == self.play_area) & (swim == self.play_swim)
+                  & (atype == self.play_atype))
         self.prev_in_play = in_play
-        same_frame = (area_b == self.prev_area) & (swim_b == self.prev_swim)
-        cid = ((gp.astype(np.int64) * 8 + area) * 2 + swim) * 64 + x // 128
+        same_frame = ((area_b == self.prev_area) & (swim_b == self.prev_swim)
+                      & (atype_b == self.prev_atype))
+        cid = ((((gp.astype(np.int64) * 8 + area) * 4 + atype) * 2 + swim)
+               * 64 + x // 128)
         revisit = np.zeros(n, dtype=bool)
         for i in np.nonzero((jump_c & ~same_frame) | (r_back & ~r_same))[0]:
             revisit[i] = int(cid[i]) in self.visited[i]
@@ -619,12 +632,13 @@ class MarioNativeVecEnv(IVecEnv):
         self.play_x = np.where(in_play, x, self.play_x)
         self.play_area = np.where(in_play, area, self.play_area)
         self.play_swim = np.where(in_play, swim, self.play_swim)
+        self.play_atype = np.where(in_play, atype, self.play_atype)
         self.play_life = np.where(in_play, life, self.play_life)
 
         # ---- context change (drives highwater rebase in the progress term) ----
         ctx_change = (life != self.lives) | (area_b != self.prev_area) | \
-                     (swim_b != self.prev_swim) | (gp != self.progress) | \
-                     legit
+                     (swim_b != self.prev_swim) | (atype_b != self.prev_atype) | \
+                     (gp != self.progress) | legit
         t_last = self.time_last.copy()
         x_last = self.x_last.copy()
         self.x_last = x.copy()
@@ -673,6 +687,7 @@ class MarioNativeVecEnv(IVecEnv):
         area_changed = area_b != self.prev_area
         self.prev_area = np.where(held, self.prev_area, area)
         self.prev_swim = np.where(held, self.prev_swim, swim)
+        self.prev_atype = np.where(held, self.prev_atype, atype)
         # mark the (confirmed) current cell as visited this life
         for i in np.nonzero(~held & in_play & (cid != self.last_cid))[0]:
             self.visited[i].add(int(cid[i]))
@@ -707,6 +722,7 @@ class MarioNativeVecEnv(IVecEnv):
             fstate = self._field(0x1D)
             ypix_a = self._field(0x3B8)
             swim_a = self.ram[:, 0x704].astype(np.int32)
+            atype_a = self.ram[:, 0x74E].astype(np.int32)
             # grounded on land; swimming counts as controlled in water
             # (float_state never returns to 0 while afloat). Timer floor
             # stays low: chains reach deep cells with little time left,
@@ -730,7 +746,8 @@ class MarioNativeVecEnv(IVecEnv):
                 # same states 3-4x over and crowded world 8 out at the cap.
                 g = int(gp[i])
                 cell = ('%d-%d' % (g // 4 + 1, g % 4 + 1), int(area[i]),
-                        int(x[i]) // 128, int(ypix_a[i]) // 64, int(swim_a[i]))
+                        int(x[i]) // 128, int(ypix_a[i]) // 64, int(swim_a[i]),
+                        int(atype_a[i]))
                 if cell in self.ep_cells[i]:
                     continue
                 self.ep_cells[i].add(cell)
