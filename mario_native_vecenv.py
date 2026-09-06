@@ -235,6 +235,8 @@ class MarioNativeVecEnv(IVecEnv):
         self.prev_frame = z(np.int64)
         self.unpaid = z(); self.max_gap = z(); self.page_resets = z()
         self.after_reset = z(bool)
+        self.prev_in_play = np.ones(n, dtype=bool)
+        self.pending_life = z(bool); self.pending_life_at_resume = z(bool)
         self.start_stage = [''] * n
         self.was_restart = z(bool)
         self.prev_score = np.zeros(n, dtype=np.int64)
@@ -443,6 +445,8 @@ class MarioNativeVecEnv(IVecEnv):
             self.prev_frame[i] = f0[i]
             self.unpaid[i] = 0; self.max_gap[i] = 0; self.page_resets[i] = 0
             self.after_reset[i] = False
+            self.pending_life[i] = False; self.pending_life_at_resume[i] = False
+            self.prev_in_play[i] = not (r[0x0E] <= 5 or r[0x0E] == 7)
         self.rewards.reset(list(idx), SimpleNamespace(x=x0, frame=f0),
                            hard=False)
 
@@ -531,19 +535,30 @@ class MarioNativeVecEnv(IVecEnv):
         ypix = self._field(0x3B8)
         frame = self._frame_of(gp, area, atype, swim)
         frame_change = frame != self.prev_frame
+        pstate = self._field(0x0E)
+        # player control ($0E not in 0-5,7). The hacked training step always
+        # ends in control; the hack-free eval path (videos) exposes the
+        # dying / intermission / pipe frames step by step: those score
+        # nothing, and the first control step afterwards re-anchors x so a
+        # respawn or pipe exit is never read as a page reset.
+        in_play = ~((pstate <= 5) | (pstate == 7))
+        resume = in_play & ~self.prev_in_play
+        self.prev_in_play = in_play
+        self.x_last = np.where(resume, x_raw, self.x_last)
+        self.x_pending = np.where(resume, x_raw, self.x_pending)
         # transition frames can leave garbage in the x page byte: a
         # teleport-scale jump INSIDE a frame only counts once it persists
         # two consecutive steps (the carried x pays nothing meanwhile)
         jump = (np.abs(x_raw - self.x_last) > 600) & ~frame_change
         confirm = np.abs(x_raw - self.x_pending) <= 64
-        hold = jump & ~confirm
+        hold = (jump & ~confirm) | ~in_play
         x = np.where(hold, self.x_last, x_raw)
-        self.x_pending = x_raw
+        self.x_pending = np.where(in_play, x_raw, self.x_pending)
         # death = life decrement (0 is the last playable life; 0xFF = game
         # over). The C++ kill-dying hack skips the dying frames inside the
         # step, so pstate can never be relied on for it.
         died = (life == 0xFF) | (life < self.lives)
-        pstate = self._field(0x0E); yvp = self._field(0xB5)
+        yvp = self._field(0xB5)
         dying = (pstate == 0x0B) | (yvp > 1)
         dead = pstate == 0x06
         flag = self._flag()
@@ -711,6 +726,12 @@ class MarioNativeVecEnv(IVecEnv):
             ~(died | game_over | victory | zombie | wrapped)
         life_lost = life < self.lives
         self.lives = life
+        # the new-life re-sync must see the RESPAWN position: in the
+        # hack-free path the life counter drops during the intermission, so
+        # defer it to the first control step (immediate in the hacked path)
+        self.pending_life = (self.pending_life | life_lost) & ~in_play
+        life_sync = (life_lost & in_play) | (resume & self.pending_life_at_resume)
+        self.pending_life_at_resume = self.pending_life.copy()
 
         infos = Infos()
         infos.time_outs = time_outs
@@ -789,7 +810,7 @@ class MarioNativeVecEnv(IVecEnv):
                                  / 255.0)[..., None]
             self._post_reset_init(realdone_idx, self.ram)
         # life-loss boundaries: re-init episode trackers but keep playing
-        soft_idx = list(np.nonzero(life_lost & ~real_done)[0])
+        soft_idx = list(np.nonzero(life_sync & ~real_done)[0])
         if soft_idx:
             self._post_reset_init(soft_idx, self.ram)
             for i in soft_idx:

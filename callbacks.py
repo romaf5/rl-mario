@@ -385,6 +385,13 @@ class MarioObserver(AlgoObserver):
         obs = env.reset()
         total_reward, info = 0, {}
         gp0 = None
+        # sidecar trace of the clip: start state + actions + per-term rewards
+        # + flags, replayable with tools/play.py --replay <file>.npz
+        tr_env = getattr(env.unwrapped, 'v', None)
+        tr_state, tr_rows, tr_acts = None, [], []
+        if tr_env is not None:
+            tr_env.lib.benv_save(tr_env.env, 0, tr_env._sbuf)
+            tr_state = bytes(tr_env._sbuf.raw)
         prev_life, event, event_ttl = None, '', 0
         per_step_frames = getattr(env.unwrapped, 'frames_per_step',
                                   4 if hasattr(env.unwrapped, 'frames4')
@@ -413,6 +420,16 @@ class MarioObserver(AlgoObserver):
                 logits=res['logits']).sample().item()
             obs, reward, done, info = env.step(action)
             total_reward += reward
+            if tr_env is not None:
+                sg = tr_env.last_signals
+                tr_acts.append(int(action))
+                tr_rows.append([step, int(action), info.get('x_pos', 0),
+                                int(sg.ypix[0]), info.get('life', -1),
+                                round(float(reward), 3)]
+                               + [round(float(v[0]), 3) for v in tr_env.last_terms.values()]
+                               + [int(sg.page_reset[0]), int(sg.timeout[0]),
+                                  int(sg.died[0]), int(sg.frame_change[0]),
+                                  int(sg.level_delta[0] > 0), int(done)])
             # reward events, flashed on the strip for ~1s so penalties
             # are auditable from the video (R alone hides a -100 that
             # lands on the same step as a +8)
@@ -464,7 +481,40 @@ class MarioObserver(AlgoObserver):
         font = ImageFont.load_default()
         pil_frames = [self.draw_strip(f, epoch_num, s, font)
                       for s, f in zip(step_stats, frames)]
+        if tr_env is not None and tr_rows:
+            self._dump_video_trace(epoch_num, info, tr_state, tr_acts, tr_rows,
+                                   list(tr_env.last_terms.keys()))
         return frames, pil_frames, step_stats, info, total_reward, per_step_frames
+
+    def _dump_video_trace(self, epoch_num, info, state, acts, rows, term_names):
+        """<run>/eval_traces/epoch_N/video_<start level>.csv (+ .npz with the
+        start state and actions for tools/play.py --replay)."""
+        try:
+            try:
+                run_dir = os.path.dirname(os.path.dirname(
+                    self.writer.file_writer.event_writer._ev_writer._file_name))
+            except AttributeError:
+                logdir = getattr(self.writer, 'logdir', None) or \
+                    getattr(self.writer, 'log_dir', None)
+                if not logdir:
+                    return
+                run_dir = os.path.dirname(os.path.normpath(logdir))
+            out = os.path.join(run_dir, 'eval_traces', f'epoch_{epoch_num}')
+            os.makedirs(out, exist_ok=True)
+            lvl = '%s-%s' % (rows[0][2] and info.get('world', '?'), info.get('stage', '?'))
+            tag = f'video_{lvl}_{len(os.listdir(out)):02d}'
+            with open(os.path.join(out, tag + '.csv'), 'w') as f:
+                f.write(','.join(['step', 'action', 'x', 'ypix', 'life', 'reward']
+                                 + term_names + ['page_reset', 'timeout', 'died',
+                                                 'transition', 'clear', 'done']) + '\n')
+                for r in rows:
+                    f.write(','.join(str(v) for v in r) + '\n')
+            np.savez_compressed(os.path.join(out, tag + '.npz'),
+                                state=np.frombuffer(state, dtype=np.uint8),
+                                actions=np.array(acts, dtype=np.int16),
+                                term_names=np.array(term_names), epoch=epoch_num)
+        except Exception as e:
+            print(f'  [Video] trace dump failed: {e}')
 
     @staticmethod
     def _gif_bytes(pil_frames, per_step, every=None):
