@@ -137,7 +137,7 @@ class MarioNativeVecEnv(IVecEnv):
                  page_reset_grace=60, page_reset_px=600,
                  reward=None, play_mode=False,
                  route_levels=None, cell_tiles=False,
-                 frontier_predecessors=0, **unknown):
+                 frontier_predecessors=0, cell_y_band=64, **unknown):
         assert action_type == 'complex'
         gone = [k for k in unknown if k in self.REMOVED_KWARGS]
         if gone:
@@ -200,6 +200,9 @@ class MarioNativeVecEnv(IVecEnv):
         # frontier practice pool also includes never-won cells up to this
         # many x-bins before a winning cell (0 = winners only, legacy)
         self.frontier_pred = int(frontier_predecessors)
+        # vertical resolution of archive cells (px): 32 separates standing on
+        # a block (ypix 112) from standing on the pipe top above it (64)
+        self.cell_y_band = int(cell_y_band)
         self.explorer = np.zeros(num_actors, dtype=np.int32)
         self.exp_action = np.zeros(num_actors, dtype=np.int64)
         self.ep_steps = np.zeros(num_actors, dtype=np.int32)
@@ -639,7 +642,8 @@ class MarioNativeVecEnv(IVecEnv):
                 # episode reached it
                 g = int(gp[i])
                 cell = ('%d-%d' % (g // 4 + 1, g % 4 + 1), int(area[i]),
-                        int(x[i]) // 128, int(ypix[i]) // 64, int(swim[i]),
+                        int(x[i]) // 128, int(ypix[i]) // self.cell_y_band,
+                        int(swim[i]),
                         int(atype[i]),
                         self._tile_sig(i, x[i]) if self.cell_tiles else 0)
                 if cell in self.ep_cells[i]:
