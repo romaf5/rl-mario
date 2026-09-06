@@ -21,7 +21,9 @@ params:
     score_to_win: 100000
     normalize_value: true
     normalize_input: true
-    reward_shaper: {scale_value: 1.0}
+    # rewards are in game units (px, +500 clear); scale so raw returns are
+    # O(1-10) instead of leaning on the lifetime value normaliser alone
+    reward_shaper: {scale_value: 0.01}
     normalize_advantage: true
     gamma: 0.995
     tau: 0.95
@@ -49,35 +51,27 @@ params:
     env_config:
       name: SuperMarioBros-v0
       action_type: complex
-      obs_mode: ram
       episode_life: true
-      x_reward: highwater
-      # a backward teleport ends the episode at the same time-sized cost as
-      # every other failure (a non-terminal loop let the door policy quit into
-      # the cheap loop instead of attempting the hidden block: clean-eval loops
-      # went 9% -> 97% within 90 minutes)
-      loop_penalty: 100
-      loop_terminal: always
-      fail_penalty: 100
-      backtrack_penalty: 0
-      novelty_bonus: 3.0
       full_game: true
-      stage_bonus: 500
-      idle_penalty: 0
-      idle_timeout: 450
-      idle_threshold: 10
-      progress_reward: 0
+      random_stages: [8-4]
+      obs_mode: ram
+      # ---- rewards: positive-only (mario_rewards.py, 2026-09-05) ----
+      # every failure just ends the episode; nothing is ever negative
+      reward:
+        - {type: first_visit_progress, cap: 20}    # new ground this life, per frame
+        - {type: level_clear, base: 500, per_extra: 100}
+      unpaid_timeout: 250     # contiguous steps with no positive reward -> cutoff (bootstrapped)
+      page_reset_grace: 60    # after the game's page reset: unpaid steps left to reach paid ground
+      page_reset_px: 600      # x drop within one frame that counts as a page reset
+      # ---- env ----
       skip: 4
       sticky_actions: 0.05
       reset_noops: 30
-      random_stages: [8-4]
-      self_restart_prob: 0.3
-      n_threads: 12
-      self_restart_cells: 512
-      novelty_y_band: 24
-      score_reward: 0.1
-      novelty_global: true
+      n_threads: 16
       explore_eps: 0.02
+      # ---- Go-Explore archive / restarts ----
+      self_restart_prob: 0.3
+      self_restart_cells: 512
       archive_path: native/archive_84ram.pkl
       explore_episode_prob: 0.4
       explore_episode_steps: 300
@@ -89,4 +83,3 @@ params:
       skip: 4
       random_stages: [8-4]
       full_game: true
-      x_reward: highwater

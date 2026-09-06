@@ -39,7 +39,9 @@ from mario_native_vecenv import MarioNativeVecEnv  # noqa: E402
 
 ACT = ['NOOP', 'R', 'R+A', 'R+B', 'R+A+B', 'A', 'L', 'L+A', 'L+B', 'L+A+B',
        'DOWN', 'UP']
-EVENT_COLORS = {'LOOP': (255, 70, 70), 'DEATH': (255, 90, 200),
+EVENT_COLORS = {'PAGE RESET': (255, 160, 60), 'LOOP END': (255, 70, 70),
+                'TIMEOUT': (200, 200, 60), 'WRONG EXIT': (255, 70, 70),
+                'DEATH': (255, 90, 200),
                 'IDLE': (255, 170, 60), 'OFF-ROUTE': (255, 120, 40),
                 'CLEAR': (90, 255, 120), 'VICTORY': (90, 255, 120),
                 'transition': (90, 200, 255), 'GAME OVER': (255, 60, 60)}
@@ -105,7 +107,7 @@ class Inspector:
         ec.update(sticky_actions=0.0, explore_eps=0.0, self_restart_prob=0.0,
                   explore_episode_prob=0.0, reset_noops=0, n_threads=1,
                   dense_infos=True, episode_life=True, play_mode=True,
-                  idle_timeout=10 ** 9)
+                  unpaid_timeout=10 ** 9)
         # --level changes only the START level; the config's level list stays
         # the on-route set, so a warp out of 1-2 is still on-route
         if args.level:
@@ -146,6 +148,29 @@ class Inspector:
         self.bookmark = None
         self.mode = 'playing'
         self.last = None
+        if args.replay:
+            self.replay(args.replay)
+
+    def replay(self, path):
+        """Reproduce a recorded episode step by step (deterministic env), then
+        hand over paused with the full rewind history: a play-tool trace
+        (actions column) or an eval trace .npz (start state + actions)."""
+        if path.endswith('.npz'):
+            z = np.load(path, allow_pickle=True)
+            acts = [int(a) for a in z['actions']]
+            if 'state' in z:
+                self.env.lib.benv_load(self.env.env, 0, bytes(z['state']))
+                self.env._fetch_obs(0)
+                self.env._post_reset_init([0], self.env.ram)
+                self.env._ring[0] = (self.env.obs_u8[0].astype(np.float32) / 255.0)[..., None]
+                self.snaps = [Snap(self.env)]
+        else:
+            idx = {a: i for i, a in enumerate(ACT)}
+            acts = [idx[r['action']] for r in csv.DictReader(open(path))]
+        for a in acts:
+            self.step(a)
+        self.paused, self.mode = True, 'paused'
+        print('replayed %d steps from %s (total reward %.1f); paused at the end, rewind with , / R' % (len(acts), path, self.total))
 
     # ------------------------------------------------------------ stepping
     def step(self, action):
@@ -159,20 +184,20 @@ class Inspector:
         terms = {k: float(v[0]) for k, v in env.last_terms.items()}
         r = float(r[0])
         ev = []
-        if sig.loop[0]:
-            ev.append('LOOP')
+        if sig.page_reset[0]:
+            ev.append('PAGE RESET')       # game reset its page counter: unpaid ground ahead
         if sig.died[0]:
             ev.append('GAME OVER' if sig.game_over[0] else 'DEATH')
-        if sig.idle_to[0]:
-            ev.append('IDLE')
-        if sig.off[0]:
-            ev.append('OFF-ROUTE')
-        if sig.level_up[0] or sig.newflag[0]:
+        if sig.timeout[0]:
+            ev.append('LOOP END' if env.after_reset[0] else 'TIMEOUT')
+        if sig.wrong_exit[0]:
+            ev.append('WRONG EXIT')
+        if sig.level_delta[0] > 0:
             ev.append('CLEAR')
         if sig.victory_new[0]:
             ev.append('VICTORY')
-        if sig.legit[0]:
-            ev.append('transition')
+        if sig.frame_change[0]:
+            ev.append('transition')       # new frame: pipe/vine/water
         ram = env.ram[0]
         rec = dict(step=len(self.records) + 1, action=action, x=info['x_pos'],
                    y=int(ram[0x3B8]), hw=int(env.hw[0]), life=info['life'],
@@ -461,6 +486,7 @@ def main():
     ap.add_argument('--steps', type=int, default=0, help='auto-quit after N steps (testing)')
     ap.add_argument('--screenshot', default=None, help='save the final frame (testing)')
     ap.add_argument('--demo', action='store_true', help='scripted run/jump inputs, rewind 60 at the end (testing)')
+    ap.add_argument('--replay', default=None, help='replay a trace .csv (actions) or an eval .npz (state+actions), then inspect')
     Inspector(ap.parse_args()).run()
 
 

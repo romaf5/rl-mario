@@ -3,8 +3,8 @@
 The C++ side steps N emulators on a threadpool (4 frames + RAM hacks +
 render/pool/resize per agent step) and returns 84x84 uint8 frames plus a
 2KB RAM snapshot per env. ALL game semantics -- rewards (high-water x,
-time, death), progress/warp bonus with debounce, loop/backtrack penalties,
-novelty, episodic life, victory/done, stage sampling, self-restarts --
+positive-only rewards: first-visit progress + level clear (mario_rewards),
+episodic life, victory/done, stage sampling, self-restarts --
 live here, vectorized in numpy. Reward constants match mario_env.py; the
 granularity is per agent step (4 frames) instead of per frame, so numbers
 are equivalent-in-expectation rather than bit-identical to the retro chain.
@@ -21,7 +21,7 @@ from rl_games.common import vecenv
 from rl_games.common.ivecenv import IVecEnv
 from types import SimpleNamespace
 
-from mario_rewards import Signals, RewardSet, legacy_specs, ProgressHighwater
+from mario_rewards import Signals, RewardSet, FirstVisitProgress
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 LIB = os.path.join(HERE, 'native', 'libbatchenv.so')
@@ -100,27 +100,50 @@ class _Lib:
         return cls._inst
 
 
+class Infos(list):
+    """Per-env info dicts (list) that also answers rl_games' vectorised
+    `'time_outs' in infos` / `infos['time_outs']` (value bootstrap at our
+    unpaid-steps cutoff, which is not a game terminal)."""
+    time_outs = None
+
+    def __contains__(self, k):
+        if k == 'time_outs':
+            return self.time_outs is not None
+        return list.__contains__(self, k)
+
+    def __getitem__(self, k):
+        if k == 'time_outs':
+            return self.time_outs
+        return list.__getitem__(self, k)
+
+
 class MarioNativeVecEnv(IVecEnv):
     """rl_games IVecEnv over the native batched core."""
 
+    REMOVED_KWARGS = ('idle_penalty', 'idle_threshold', 'idle_timeout',
+                      'progress_reward', 'x_reward', 'loop_penalty',
+                      'loop_terminal', 'backtrack_penalty', 'novelty_bonus',
+                      'novelty_y_band', 'novelty_global', 'score_reward',
+                      'fail_penalty', 'offroute_penalty')
+
     def __init__(self, config_name, num_actors, name='SuperMarioBros-v0',
                  action_type='complex', episode_life=True, stage_bonus=500.0,
-                 idle_penalty=0.5, idle_threshold=10, progress_reward=0.001,
                  skip=4, sticky_actions=0.0, random_stages=None,
-                 full_game=False, reset_noops=0, x_reward='highwater',
-                 loop_penalty=0.0, backtrack_penalty=0.0, novelty_bonus=0.0,
+                 full_game=False, reset_noops=0,
                  self_restart_prob=0.0, self_restart_cells=96,
                  n_threads=32, seed=None, dense_infos=False,
-                 novelty_y_band=48, score_reward=0.0,
-                 novelty_global=False, explore_eps=0.0,
-                 archive_path=None, explore_episode_prob=0.0,
-                 explore_episode_steps=150,
-                 self_restart_frontier_prob=0.0,
-                 self_restart_frontier_k=16, idle_timeout=150,
-                 offroute_penalty=0.0, fail_penalty=15.0, obs_mode='pixels',
-                 reward=None, play_mode=False, route_levels=None,
-                 loop_terminal='always', **unknown):
+                 explore_eps=0.0, archive_path=None, explore_episode_prob=0.0,
+                 explore_episode_steps=150, self_restart_frontier_prob=0.0,
+                 self_restart_frontier_k=16, unpaid_timeout=250,
+                 page_reset_grace=60, page_reset_px=600,
+                 obs_mode='pixels', reward=None, play_mode=False,
+                 route_levels=None, **unknown):
         assert action_type == 'complex'
+        gone = [k for k in unknown if k in self.REMOVED_KWARGS]
+        if gone:
+            print('[env] ignoring removed reward knobs: %s (rewards are '
+                  'positive-only since 2026-09-05, see mario_rewards.py)'
+                  % ', '.join(gone))
         n = self.num_actors = num_actors
         self.lib = _Lib()
         rom = open(ROM, 'rb').read()
@@ -135,41 +158,26 @@ class MarioNativeVecEnv(IVecEnv):
 
         self.stages = list(random_stages) if random_stages else ['FullGame']
         self.states = {s: _load_state(s) for s in self.stages}
-        # off-route guard (full-game training on a level SET): a confirmed
-        # move into a level outside the set is a dead end -- penalised and
-        # terminal. Without it the 1-2 flag paid +500 and then unlimited
-        # x-reward in 1-3, so the flag beat the warp (which pays +5500 once).
-        self.offroute_penalty = float(offroute_penalty)
-        self.route_gps = None
-        # the on-route set defaults to the levels we start from, but can be
-        # given explicitly: tools that start on ONE level (tools/play.py
-        # --level 1-2) must not turn the rest of the route into dead ends
+        # on-route set (full-game training on a level SET): a confirmed move
+        # into a level outside it is a wrong exit -- the episode ends, reward
+        # 0. Explicit route_levels lets a tool start on ONE level without
+        # turning the rest of the route into dead ends.
         route = route_levels or random_stages
         self._route_levels = list(route) if route else None
         self._full_game = bool(full_game)
-        if full_game and route and self.offroute_penalty > 0:
+        self.route_gps = None
+        if full_game and route:
             self.route_gps = np.array(sorted(
                 (int(s.split('-')[0]) - 1) * 4 + int(s.split('-')[1]) - 1
                 for s in route), dtype=np.int32)
         self.stage_weights = None
         self.episode_life = episode_life
         self.stage_bonus = stage_bonus
-        self.idle_penalty = idle_penalty
-        self.idle_threshold = idle_threshold
-        self.idle_timeout = idle_timeout
-        self.progress_reward = progress_reward
         self.sticky = sticky_actions
         self.reset_noops = reset_noops
-        self.x_reward = x_reward
-        self.loop_penalty = loop_penalty
-        self.backtrack_penalty = backtrack_penalty
-        self.novelty_bonus = novelty_bonus
         self.sr_prob = self_restart_prob
         self.sr_cells = self_restart_cells
         self.dense_infos = dense_infos
-        self.novelty_y_band = novelty_y_band
-        self.score_reward = score_reward
-        self.novelty_global = novelty_global
         self.explore_eps = explore_eps
         self.archive_path = archive_path
         self._archive_dirty = 0
@@ -177,6 +185,16 @@ class MarioNativeVecEnv(IVecEnv):
         self.exp_ep_steps = explore_episode_steps
         self.sr_frontier_prob = self_restart_frontier_prob
         self.sr_frontier_k = self_restart_frontier_k
+        # X contiguous steps without a positive reward end the episode
+        # (reported to rl_games as a time-out so the critic bootstraps: it
+        # is our cutoff, not part of the game)
+        self.unpaid_timeout = int(unpaid_timeout)
+        # the game's page-counter reset (x falls far below the frame's
+        # highwater within the same frame): not terminal, highwater kept,
+        # and only `page_reset_grace` unpaid steps remain to reach paid
+        # ground (pipe 1: climb in, ~35 steps) before a dead-end cutoff
+        self.page_reset_grace = int(page_reset_grace)
+        self.page_reset_px = int(page_reset_px)
         self.explorer = np.zeros(num_actors, dtype=np.int32)
         self.exp_action = np.zeros(num_actors, dtype=np.int64)
         self.ep_steps = np.zeros(num_actors, dtype=np.int32)
@@ -190,20 +208,6 @@ class MarioNativeVecEnv(IVecEnv):
         self.obs_u8 = np.zeros((n, 84, 84), dtype=np.uint8)
         self.ram = np.zeros((n, 0x800), dtype=np.uint8)
         self.actions_buf = np.zeros(n, dtype=np.int32)
-        # uniform cost of every attempt-ending failure (death, idle timeout;
-        # loop/off-route use their own knobs): equal costs leave no reason
-        # to prefer one failure over another (e.g. suicide over a loop)
-        self.fail_penalty = float(fail_penalty)
-        # per-life visited cells (level, area, swim, x//128) as ints: a jump
-        # into a visited cell is a cycle whatever mechanism produced it
-        self.visited = [set() for _ in range(n)]
-        self.last_cid = np.full(n, -1, dtype=np.int64)
-        self.prev_swim = np.zeros(n, dtype=np.int32)
-        self.prev_atype = np.zeros(n, dtype=np.int32)   # AreaType 0x74E
-        self.prev_in_play = np.ones(n, dtype=bool)
-        self.play_x = np.zeros(n, dtype=np.int32); self.play_area = np.zeros(n, dtype=np.int32); self.play_swim = np.zeros(n, dtype=np.int32)
-        self.play_atype = np.zeros(n, dtype=np.int32)
-        self.play_life = np.zeros(n, dtype=np.int32)
 
         # obs_mode 'pixels': 84x84x4 frame stack (default); 'ram': flat
         # feature vector decoded from RAM (see _features) for an MLP policy
@@ -221,54 +225,33 @@ class MarioNativeVecEnv(IVecEnv):
 
         # per-env python-side state
         z = lambda dt=np.int32: np.zeros(n, dtype=dt)
-        self.x_last = z(); self.time_last = z()
-        self.x_pending = z()
+        self.x_last = z(np.int64); self.x_pending = z(np.int64)
+        self.time_last = z()
         self.lives = z(); self.prev_flag = z(bool)
         self.progress = z(); self.pending = np.full(n, -1, np.int32)
         self.start_progress = z(); self.cleared = z()
-        self.warped = z(bool); self.looped = z(bool); self.vic_paid = z(bool)
-        self.idle = z(); self.prev_x = z(); self.max_x = z()
-        self.prev_area = z(); self.last_action = z()
+        self.warped = z(bool); self.vic_paid = z(bool)
+        self.max_x = z(np.int64); self.last_action = z()
+        self.prev_frame = z(np.int64)
+        self.unpaid = z(); self.max_gap = z(); self.page_resets = z()
+        self.after_reset = z(bool)
         self.start_stage = [''] * n
         self.was_restart = z(bool)
         self.prev_score = np.zeros(n, dtype=np.int64)
-        # reward terms (mario_rewards): explicit spec list from config, else
-        # the legacy-equivalent set built from the flat kwargs
-        specs = reward or legacy_specs(
-            x_reward=x_reward, fail_penalty=fail_penalty,
-            loop_penalty=loop_penalty, offroute_penalty=offroute_penalty,
-            stage_bonus=stage_bonus, score_reward=score_reward,
-            progress_reward=progress_reward,
-            backtrack_penalty=backtrack_penalty, idle_penalty=idle_penalty,
-            idle_threshold=idle_threshold, novelty_bonus=novelty_bonus,
-            novelty_y_band=novelty_y_band, novelty_global=novelty_global)
+        # reward terms (mario_rewards): positive-only set from config, else
+        # the default (first-visit progress + level clear at stage_bonus)
+        specs = reward or [
+            {'type': 'first_visit_progress', 'cap': 20},
+            {'type': 'level_clear', 'base': stage_bonus, 'per_extra': 100}]
         self.reward_specs = specs
         self.rewards = RewardSet(n, specs)
-        # detection follows the reward SET (a term list expressing the same
-        # rewards must not silently disable a terminal), so scan nested terms
-        self.loop_on = loop_penalty > 0 or self.rewards.has('loop')
-        if (self.route_gps is None and self._full_game and self._route_levels
-                and self.rewards.has('offroute')):
-            self.route_gps = np.array(sorted(
-                (int(s.split('-')[0]) - 1) * 4 + int(s.split('-')[1]) - 1
-                for s in self._route_levels), dtype=np.int32)
+        self._prog = self.rewards.get(FirstVisitProgress)
         self.last_terms = {}
         self.last_signals = None
-        # play_mode (tools/play.py): loop / off-route / idle timeout still
-        # flag and pay, but never reset the game -- it continues from the
-        # teleport point with the trackers re-synced, for human inspection
+        # play_mode (tools/play.py): cutoffs and wrong exits are flagged but
+        # never reset the game, so a human can inspect what follows; the
+        # highwater is kept, exactly as in training minus the terminal
         self.play_mode = bool(play_mode)
-        # what a backward teleport (the game's loop) does to the episode:
-        #   'always' : ends it (legacy: loop == death)
-        #   'repeat' : a first teleport in a life is a SETBACK -- costs the
-        #              loop term, play continues from where the game put
-        #              Mario, and the highwater is kept so the re-run pays
-        #              nothing until new ground; a second teleport in the
-        #              same life is cycling and ends the episode
-        #   'never'  : never terminal
-        assert loop_terminal in ('always', 'repeat', 'never')
-        self.loop_terminal = loop_terminal
-        self.loops = np.zeros(n, dtype=np.int32)    # teleports this life
         # SHARED self-restart archive: all envs contribute and draw from one
         # pool (per-env archives dilute frontier discovery at large N)
         self.archive = {}                           # cell -> [state, uses]
@@ -396,16 +379,27 @@ class MarioNativeVecEnv(IVecEnv):
         self.cell_tries.pop(cell, None)
         self.cell_early.pop(cell, None)
 
+    @staticmethod
+    def _frame_of(gp, area, atype, swim):
+        """Frame id: the coordinate system x lives in. A level's sections
+        that share it are monotone in x; anything else (pipe to a new
+        section, vine to a bonus area, water) starts a new frame."""
+        return (((np.asarray(gp, dtype=np.int64) * 256 + area) * 8 + atype)
+                * 2 + swim)
+
     def _post_reset_init(self, idx, ram):
-        """Re-init per-env python state for envs in idx from fresh RAM."""
+        """Re-init per-env python state for envs in idx from fresh RAM
+        (new episode or new life)."""
         x0 = np.zeros(self.num_actors, dtype=np.int64)
+        f0 = np.zeros(self.num_actors, dtype=np.int64)
         for i in idx:
             r = ram[i]
             x = int(r[0x6D]) * 256 + int(r[0x86])
-            x0[i] = x
             gp = min(max(int(r[0x75F]) * 4 + int(r[0x75C]), 0), 31)
-            self.x_last[i] = x; self.prev_x[i] = 0; self.max_x[i] = 0
-            self.x_pending[i] = x
+            x0[i] = x
+            f0[i] = self._frame_of(gp, int(r[0x760]), int(r[0x74E]),
+                                   int(r[0x704]))
+            self.x_last[i] = x; self.x_pending[i] = x; self.max_x[i] = x
             self.time_last[i] = (int(r[0x7F8]) * 100 + int(r[0x7F9]) * 10
                                  + int(r[0x7FA]))
             self.lives[i] = int(r[0x75A])
@@ -415,25 +409,20 @@ class MarioNativeVecEnv(IVecEnv):
             self.prev_flag[i] = False
             self.progress[i] = gp; self.start_progress[i] = gp
             self.pending[i] = -1; self.cleared[i] = 0
-            self.warped[i] = False; self.looped[i] = False; self.loops[i] = 0
-            self.vic_paid[i] = False
-            self.idle[i] = 0
+            self.warped[i] = False; self.vic_paid[i] = False
             self.nongame[i] = 0
-            self.prev_area[i] = int(r[0x760])
-            self.prev_swim[i] = int(r[0x704])
-            self.prev_atype[i] = int(r[0x74E])
-            self.visited[i] = set()
-            self.last_cid[i] = -1
-            self.prev_in_play[i] = not (r[0x0E] <= 5 or r[0x0E] == 7)
-            self.play_x[i] = x; self.play_area[i] = int(r[0x760])
-            self.play_swim[i] = int(r[0x704]); self.play_life[i] = -1   # anchor invalid until the next in-play step (a respawn is never a loop)
-        # (x_last may alias prev_x after a step, so pass the RAM x explicitly)
-        self.rewards.reset(list(idx), SimpleNamespace(x=x0), hard=False)
+            self.prev_frame[i] = f0[i]
+            self.unpaid[i] = 0; self.max_gap[i] = 0; self.page_resets[i] = 0
+            self.after_reset[i] = False
+        self.rewards.reset(list(idx), SimpleNamespace(x=x0, frame=f0),
+                           hard=False)
 
     @property
     def hw(self):
-        t = self.rewards.get(ProgressHighwater)
-        return t.hw if t is not None else np.zeros(self.num_actors, dtype=np.int64)
+        """Highwater of each env's current frame (for tools/video)."""
+        if self._prog is None:
+            return np.zeros(self.num_actors, dtype=np.int64)
+        return self._prog.hw_for(self.prev_frame, self.x_last)
 
     # ------------------------------------------------------------- IVecEnv
     def _features(self, ram):
@@ -537,36 +526,30 @@ class MarioNativeVecEnv(IVecEnv):
 
     def _after_step(self):
         """Score the step from the freshly fetched RAM: rewards, dones,
-        archive, infos, resets. Split from the emulation so external
-        drivers (tas/replay_tas.py) can advance frames themselves."""
+        archive, infos, resets."""
         n = self.num_actors
         ram = self.ram
 
-        x = self._x(); t = self._time(); gp = self._gp()
+        x_raw = self._x(); t = self._time(); gp = self._gp()
         # world byte > 7 = a glitch world (the 1-2 warp-zone drops Mario into
-        # world 36, an endless water level). _gp() clips it to 31, so without
-        # this it reads as on-route 8-4: unlimited x reward, archived under
-        # '8-4', and the wrap guard can never fire because the clip pins gp.
+        # world 36, an endless water level); _gp() clips it to 31
         bad_world = self._field(0x75F) > 7
-        # transition frames can leave garbage in the x page byte. A hard
-        # x>4000 cutoff is WRONG (8-4's post-water corridor runs to ~4830
-        # in the same coordinate frame); instead debounce: accept a
-        # teleport-scale jump only when it persists two consecutive steps.
-        raw = x
-        jump = np.abs(raw - self.x_last) > 600
-        confirm = np.abs(raw - self.x_pending) <= 64
-        held = jump & ~confirm          # x carried this step, decided next
-        x = np.where(held, self.x_last, raw)
-        self.x_pending = raw
         life = self._field(0x75A); area = self._field(0x760)
-        # on a held step the area/context bookkeeping is deferred too, so
-        # the rebase and the loop-penalty exemption land on the CONFIRMED
-        # step with the true x (otherwise pipe exits paid -30 and hw
-        # rebased to the stale pre-teleport x)
-        area_b = np.where(held, self.prev_area, area)
+        atype = self._field(0x74E); swim = self._field(0x704)
+        ypix = self._field(0x3B8)
+        frame = self._frame_of(gp, area, atype, swim)
+        frame_change = frame != self.prev_frame
+        # transition frames can leave garbage in the x page byte: a
+        # teleport-scale jump INSIDE a frame only counts once it persists
+        # two consecutive steps (the carried x pays nothing meanwhile)
+        jump = (np.abs(x_raw - self.x_last) > 600) & ~frame_change
+        confirm = np.abs(x_raw - self.x_pending) <= 64
+        hold = jump & ~confirm
+        x = np.where(hold, self.x_last, x_raw)
+        self.x_pending = x_raw
         # death = life decrement (0 is the last playable life; 0xFF = game
         # over). The C++ kill-dying hack skips the dying frames inside the
-        # step, so pstate can never be relied on for the death penalty.
+        # step, so pstate can never be relied on for it.
         died = (life == 0xFF) | (life < self.lives)
         pstate = self._field(0x0E); yvp = self._field(0xB5)
         dying = (pstate == 0x0B) | (yvp > 1)
@@ -578,185 +561,103 @@ class MarioNativeVecEnv(IVecEnv):
         else:
             victory = (gmode == 2) & (gp == 31)
 
-        # ---- backward x jumps: legit transition vs loop ----
-        # A scripted transition (pipe/vine/entrance) seen by the C++ skip
-        # loop explains a backward jump (8-4 pipe 3 -> water: same area
-        # byte, x frame restarts at 0). Carried across a held step so it
-        # lands on the CONFIRMED step with the jump. A backward jump with no
-        # transition is a maze loop teleport: penalised and (in training)
-        # terminal, so no state ever earns different rewards for the same
-        # forward run depending on invisible history.
-        # Cycle rule (frame = level, area byte, swim flag): SMB never scrolls
-        # left, so a backward jump INSIDE one frame is never progress --
-        # whether it came from a wrong pipe (scripted) or a maze teleport
-        # (instant). A jump that changes frame is a transition (8-4 pipe 3
-        # -> water: same area byte, swim 0->1) UNLESS it lands in a cell
-        # this life already visited (re-entering a bonus room = cycle).
-        swim = ram[:, 0x704].astype(np.int32)
-        swim_b = np.where(held, self.prev_swim, swim)
-        # AreaType (0x74E): distinguishes a bonus/vine area from the main
-        # section that shares the area byte -- e.g. the 4-2 vine warp lifts
-        # Mario to the coin-heaven area (x restarts at ~75, area byte still
-        # 2, AreaType 2->1). Part of the frame so it reads as a transition,
-        # not a same-frame backward loop.
-        atype = ram[:, 0x74E].astype(np.int32)
-        atype_b = np.where(held, self.prev_atype, atype)
-        # player control ($0E not in 0-5,7). The hacked training step
-        # always ends in control; the hack-free replay path (eval video)
-        # exposes death/respawn and pipe frames step by step, so a jump only
-        # counts between two control steps and the first control step after
-        # a scripted sequence is a context change (respawn, pipe exit).
-        in_play = ~((pstate <= 5) | (pstate == 7))
-        resume = in_play & ~self.prev_in_play
-        jump_c = (np.abs(x - self.x_last) > 96) & ~held & ~died & ~flag & \
-                 (gp == self.progress) & in_play & self.prev_in_play
-        # hack-free path: a scripted sequence spans several steps, so the
-        # resume step is judged against the last in-play anchor (position
-        # before the sequence). A wrong pipe is then a loop here too; a
-        # respawn (life changed meanwhile) is not.
-        r_back = resume & (x < self.play_x - 96) & (life == self.play_life) & \
-                 (gp == self.progress) & ~flag
-        r_same = ((area == self.play_area) & (swim == self.play_swim)
-                  & (atype == self.play_atype))
-        self.prev_in_play = in_play
-        same_frame = ((area_b == self.prev_area) & (swim_b == self.prev_swim)
-                      & (atype_b == self.prev_atype))
-        cid = ((((gp.astype(np.int64) * 8 + area) * 4 + atype) * 2 + swim)
-               * 64 + x // 128)
-        revisit = np.zeros(n, dtype=bool)
-        for i in np.nonzero((jump_c & ~same_frame) | (r_back & ~r_same))[0]:
-            revisit[i] = int(cid[i]) in self.visited[i]
-        loop = ((jump_c & ((same_frame & (x < self.x_last)) | revisit))
-                | (r_back & (r_same | revisit))) & self.loop_on
-        legit = (jump_c | resume) & ~loop
-        self.play_x = np.where(in_play, x, self.play_x)
-        self.play_area = np.where(in_play, area, self.play_area)
-        self.play_swim = np.where(in_play, swim, self.play_swim)
-        self.play_atype = np.where(in_play, atype, self.play_atype)
-        self.play_life = np.where(in_play, life, self.play_life)
-
-        # ---- context change (drives highwater rebase in the progress term) ----
-        ctx_change = (life != self.lives) | (area_b != self.prev_area) | \
-                     (swim_b != self.prev_swim) | (atype_b != self.prev_atype) | \
-                     (gp != self.progress) | legit
-        t_last = self.time_last.copy()
-        x_last = self.x_last.copy()
-        self.x_last = x.copy()
-        self.time_last = t
-
-        # ---- score delta ----
-        sc = self._score()
-        score_delta = np.clip(sc - self.prev_score, 0, 2000)
-        self.prev_score = sc
-
         # ---- level progress (debounced, monotonic, jump-capped) ----
         inc = gp > self.progress
-        confirm = inc & (gp == self.pending)
+        confirm_gp = inc & (gp == self.pending)
         delta = gp - self.progress
-        ok = confirm & (delta <= 15)
-        # off-route level entry: no bonus, a penalty, and terminal (below)
+        ok = confirm_gp & (delta <= 15)
         if self.route_gps is not None:
-            off = (ok & ~np.isin(gp, self.route_gps)) | bad_world
+            wrong_exit = (ok & ~np.isin(gp, self.route_gps)) | bad_world
         else:
-            off = np.zeros(n, dtype=bool)
-        good = ok & ~off
+            wrong_exit = bad_world.copy()
+        good = ok & ~wrong_exit
         if ok.any():
             self.cleared += good.astype(np.int32)
             self.warped |= good & (delta >= 2)
             self.progress = np.where(ok, gp, self.progress)
-            # rebase within-stage x tracking on level change
-            self.max_x = np.where(ok, 0, self.max_x)
-            self.prev_x = np.where(ok, 0, self.prev_x)
         self.pending = np.where(inc, gp, -1)
-        newflag = flag & ~self.prev_flag
-        self.prev_flag = flag
+        level_delta = np.where(good, delta, 0).astype(np.int32)
         vpay = victory & ~self.vic_paid
         self.vic_paid |= victory
+        self.prev_flag = flag
 
-        # ---- movement trackers / loop bookkeeping / idle ----
-        prev_x_before = self.prev_x.copy()
-        xd = x - prev_x_before
-        self.looped |= loop
-        self.loops = self.loops + loop.astype(np.int32)
-        if self.loop_terminal == 'always':
-            loop_term = loop
-        elif self.loop_terminal == 'repeat':
-            loop_term = loop & (self.loops >= 2)
-        else:
-            loop_term = np.zeros(n, dtype=bool)
-        area_changed = area_b != self.prev_area
-        self.prev_area = np.where(held, self.prev_area, area)
-        self.prev_swim = np.where(held, self.prev_swim, swim)
-        self.prev_atype = np.where(held, self.prev_atype, atype)
-        # mark the (confirmed) current cell as visited this life
-        for i in np.nonzero(~held & in_play & (cid != self.last_cid))[0]:
-            self.visited[i].add(int(cid[i]))
-            self.last_cid[i] = cid[i]
-        fwd = xd > 0
-        new_ground = x > self.max_x
-        self.idle = np.where(fwd, 0, self.idle + 1)
-        # idle timeout: camping ends the episode at the failure cost (a
-        # capped drip alone made stalling FREE once paid; unbounded drip
-        # made dying cheaper than trying)
-        idle_to = self.idle >= self.idle_timeout
-        self.prev_x = x.copy()
-        self.max_x = np.maximum(self.max_x, x)
-        ypix = self._field(0x3B8)
+        # ---- page reset: x far below this frame's highwater, same frame ----
+        # (the game's page-counter reset: pipe 1 when approached on the
+        # ground, the corridor end). Not terminal: the highwater is kept so
+        # the re-run pays nothing, and the agent has `page_reset_grace`
+        # unpaid steps to reach paid ground (pipe 1: climb in and land in
+        # section 2, ~35 steps) before the episode ends at 0.
+        hw_now = self._prog.hw_for(frame, x) if self._prog is not None \
+            else x
+        # the reset is the STEP the drop happens (confirmed jump), not every
+        # step spent below the highwater afterwards
+        page_reset = (~hold & ~frame_change & ~died
+                      & (self.x_last - x > self.page_reset_px)
+                      & (x < hw_now - self.page_reset_px))
+        self.page_resets += page_reset.astype(np.int32)
 
-        # ---- rewards: decomposed terms (mario_rewards) ----
-        sig = Signals(n=n, x=x, x_last=x_last, prev_x=prev_x_before, xd=xd,
-                      fwd=fwd, new_ground=new_ground, ctx_change=ctx_change,
-                      t=t, t_last=t_last, died=died, game_over=(life == 0xFF),
-                      loop=loop, legit=legit, off=off, level_up=good,
-                      loop_count=self.loops.copy(), loop_terminal=loop_term,
-                      level_delta=delta, newflag=newflag, victory_new=vpay,
-                      score_delta=score_delta, idle=self.idle, idle_to=idle_to,
-                      area=area_b, swim=swim_b, ypix=ypix, held=held, gp=gp,
+        # ---- rewards (positive-only terms, mario_rewards) ----
+        x_last = self.x_last.copy(); t_last = self.time_last.copy()
+        sig = Signals(n=n, x=x, x_last=x_last, frame=frame,
+                      frame_change=frame_change, hold=hold, t=t, died=died,
+                      game_over=(life == 0xFF), level_delta=level_delta,
+                      wrong_exit=wrong_exit, victory_new=vpay,
+                      page_reset=page_reset,
+                      timeout=np.zeros(n, dtype=bool), gp=gp, area=area,
+                      atype=atype, swim=swim, ypix=ypix,
                       single_stage=self.single_stage)
         reward = self.rewards(sig)
+        paid = reward > 0
+        # contiguous steps without a positive reward -> cutoff. After a page
+        # reset the remaining budget shrinks to the grace window and the
+        # cutoff is a TRUE terminal (the post-reset state looks like fresh
+        # ground to the critic; bootstrapping there would reward looping).
+        self.unpaid = np.where(paid, 0, self.unpaid + 1)
+        self.max_gap = np.maximum(self.max_gap, self.unpaid)
+        self.after_reset = (self.after_reset | page_reset) & ~paid
+        self.unpaid = np.where(
+            page_reset & ~paid,
+            np.maximum(self.unpaid, self.unpaid_timeout - self.page_reset_grace),
+            self.unpaid)
+        timeout = self.unpaid >= self.unpaid_timeout
+        sig.timeout = timeout
         self.last_terms = self.rewards.last
         self.last_signals = sig
+
+        # ---- trackers ----
+        self.prev_frame = frame
+        self.x_last = x.copy()
+        self.time_last = t
+        self.max_x = np.maximum(self.max_x, x)
+        self.prev_score = self._score()
 
         # ---- self-restart archiving ----
         if self.sr_prob > 0:
             fstate = self._field(0x1D)
-            ypix_a = self._field(0x3B8)
-            swim_a = self.ram[:, 0x704].astype(np.int32)
-            atype_a = self.ram[:, 0x74E].astype(np.int32)
             # grounded on land; swimming counts as controlled in water
             # (float_state never returns to 0 while afloat). Timer floor
             # stays low: chains reach deep cells with little time left,
             # and a state with ~25s is still a practiceable episode.
-            can = (((fstate == 0) | (swim_a == 1)) & ~dying & ~dead
+            can = (((fstate == 0) | (swim == 1)) & ~dying & ~dead
                    & (gmode == 1) & (t > 25)
-                   & ~held & ~died & ~area_changed & ~jump_c & ~off
-                   & ~bad_world)
-            # no phantom cells; never archive a state in a level outside the
-            # training set (the off-route confirm step used to save one, and
-            # restarts then practised 4-3 for free)
+                   & ~hold & ~died & ~frame_change & ~wrong_exit
+                   & ~bad_world & ~page_reset & ~self.after_reset)
             if self.route_gps is not None:
                 can &= np.isin(gp, self.route_gps)
             for i in np.nonzero(can)[0]:
-                # y-band in the key: standing ON a block/pipe is a different
-                # rung than the floor below it; swim flag disambiguates the
-                # water zone (same area byte + low x as the level start)
-                # keyed by the level Mario is IN (not the episode's start
-                # stage): the same physical spot reached via 1-1 -> 1-2 or
-                # from the 1-2 door is one cell. Start-stage keys held the
-                # same states 3-4x over and crowded world 8 out at the cap.
+                # keyed by the level Mario is IN, area, x-bin, y-band, swim
+                # and AreaType: the same physical spot is one cell whatever
+                # episode reached it
                 g = int(gp[i])
                 cell = ('%d-%d' % (g // 4 + 1, g % 4 + 1), int(area[i]),
-                        int(x[i]) // 128, int(ypix_a[i]) // 64, int(swim_a[i]),
-                        int(atype_a[i]))
+                        int(x[i]) // 128, int(ypix[i]) // 64, int(swim[i]),
+                        int(atype[i]))
                 if cell in self.ep_cells[i]:
                     continue
                 self.ep_cells[i].add(cell)
                 if cell not in self.archive:
                     if len(self.archive) >= self.sr_cells:
-                        # evict the OLDEST cell that no episode is currently
-                        # practising (evicting the most-used one made
-                        # practice impossible at cap; evicting an in-use
-                        # cell threw away the win that episode was earning)
+                        # evict the OLDEST cell no episode is practising
                         in_use = {c for c in self.start_cell if c is not None}
                         cand = [c for c in self.archive if c not in in_use]
                         losers = [c for c in cand
@@ -792,7 +693,7 @@ class MarioNativeVecEnv(IVecEnv):
             self._archive_dirty = 0
             self._save_archive()
 
-        # ---- dones ----
+        # ---- dones (every terminal pays 0) ----
         game_over = life == 0xFF
         # zombie guard: an env stuck outside normal gameplay (post-ending
         # screens, title/attract after a missed terminal) never comes back
@@ -802,22 +703,23 @@ class MarioNativeVecEnv(IVecEnv):
         # wrap guard: progress below the episode's start can only mean the
         # game rolled through the ending into a new quest -- terminal
         wrapped = (gp < self.start_progress) | bad_world
-        # a loop is a real terminal ("die immediately"): the env resets to a
-        # fresh start, nothing is played on from the teleport point
         if self.single_stage:
-            real_done = (dying | dead | flag | zombie | wrapped | idle_to
-                         | loop_term)
+            real_done = dying | dead | flag | zombie | wrapped | timeout
         else:
-            real_done = (game_over | victory | zombie | wrapped | idle_to | off
-                         | loop_term)
-        soft_extra = np.zeros(n, dtype=bool)
+            real_done = (game_over | victory | zombie | wrapped | timeout
+                         | wrong_exit)
         if self.play_mode:
-            soft_extra = (loop_term | off | idle_to) & ~game_over & ~victory & ~zombie
-            real_done = real_done & ~soft_extra
+            # inspection: flag, keep the highwater, keep playing
+            real_done = real_done & ~(timeout | wrong_exit)
+        # rl_games value bootstrap: the plain cutoff is not part of the
+        # game; the post-reset cutoff IS a dead end (no bootstrap)
+        time_outs = timeout & ~self.after_reset & \
+            ~(died | game_over | victory | zombie | wrapped)
         life_lost = life < self.lives
         self.lives = life
 
-        infos = []
+        infos = Infos()
+        infos.time_outs = time_outs
         n_front = sum(1 for c in self.archive if self.cell_wins.get(c, 0) > 0) \
             if self.archive else 0
         done_pre = real_done | (life_lost if self.episode_life else False)
@@ -833,7 +735,6 @@ class MarioNativeVecEnv(IVecEnv):
                 'stages_cleared': int(self.cleared[i]),
                 'warped': bool(self.warped[i]),
                 'victory': bool(victory[i]),
-                'looped': bool(self.looped[i]),
                 'flag_get': bool(flag[i]), 'life': int(life[i]),
                 'world': int(ram[i, 0x75F]) + 1,
                 'stage': int(ram[i, 0x75C]) + 1,
@@ -841,8 +742,12 @@ class MarioNativeVecEnv(IVecEnv):
                 'score': int(self.prev_score[i]),
                 'start_stage': self.start_stage[i],
                 'self_restart': bool(self.was_restart[i]),
-                'idle_timeout': bool(idle_to[i]),
-                'offroute': bool(off[i]),
+                'timeout': bool(timeout[i]),
+                'loop_timeout': bool(timeout[i] and self.after_reset[i]),
+                'page_reset': bool(page_reset[i]),
+                'page_resets': int(self.page_resets[i]),
+                'wrong_exit': bool(wrong_exit[i]),
+                'max_unpaid_gap': int(self.max_gap[i]),
                 'frontier_cells': n_front,
             })
 
@@ -856,25 +761,15 @@ class MarioNativeVecEnv(IVecEnv):
             if cell is None:
                 continue
             # transitive credit: reaching a DEEPER cell that already wins is
-            # a win for this cell. With victory-only credit the frontier
-            # never left the Bowser room (0 wins before x4100 over 200k
-            # restarts; the water and the corridor were unreachable for
-            # backward chaining).
-            # "deeper" = another frame (level/area/swim) or >= 4 x-bins
-            # (512 px) further: the next floor cell must not count, else
-            # every cell wins trivially and the hard links (hidden block,
-            # pipe entries) are invisible to practice allocation
+            # a win for this cell ("deeper" = another frame or >= 4 x-bins)
             reached = any(
                 self.cell_wins.get(c, 0) > 0 and (
                     c[0] != cell[0] or c[1] != cell[1] or c[4] != cell[4]
-                    or c[2] >= cell[2] + 4)
+                    or c[5] != cell[5] or c[2] >= cell[2] + 4)
                 for c in self.ep_cells[i] if c != cell)
             won = victory[i] or self.cleared[i] > 0 or reached
             if won:
                 self.cell_wins[cell] = self.cell_wins.get(cell, 0) + 1
-            # short WINNING episodes are not doomed: a cell one step from a
-            # pipe/area change wins and ends immediately, and the prune was
-            # deleting exactly those backward-chaining links
             if won or self.ep_steps[i] > 8:
                 continue
             n_early = self.cell_early.get(cell, 0) + 1
@@ -891,7 +786,6 @@ class MarioNativeVecEnv(IVecEnv):
         self._ring[..., self._ptr] = f
 
         # resets for finished episodes
-        done_idx = np.nonzero(done)[0]
         realdone_idx = np.nonzero(real_done)[0]
         if len(realdone_idx):
             for i in realdone_idx:
@@ -901,9 +795,7 @@ class MarioNativeVecEnv(IVecEnv):
                                  / 255.0)[..., None]
             self._post_reset_init(realdone_idx, self.ram)
         # life-loss boundaries: re-init episode trackers but keep playing
-        # (also with episode_life=False: the trackers still re-sync on a
-        # life loss / loop; only the PPO done differs)
-        soft_idx = list(np.nonzero((life_lost | soft_extra) & ~real_done)[0])
+        soft_idx = list(np.nonzero(life_lost & ~real_done)[0])
         if soft_idx:
             self._post_reset_init(soft_idx, self.ram)
             for i in soft_idx:
@@ -912,10 +804,7 @@ class MarioNativeVecEnv(IVecEnv):
                 self.start_cell[i] = None
                 self.ep_cells[i] = set()
                 self.explorer[i] = 0      # macro noise must not leak on
-            # new episode = fresh frame stack: the first observation of
-            # the next life (or post-loop run) must not carry death /
-            # pre-teleport frames from the episode that just ended
-            for i in soft_idx:
+                # new life = fresh frame stack
                 self._ring[i] = (self.obs_u8[i].astype(np.float32)
                                  / 255.0)[..., None]
 

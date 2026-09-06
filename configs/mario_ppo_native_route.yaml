@@ -26,7 +26,7 @@ params:
     score_to_win: 100000
     normalize_value: true
     normalize_input: false
-    reward_shaper: {scale_value: 1.0}
+    reward_shaper: {scale_value: 0.01}
     normalize_advantage: true
     gamma: 0.995
     tau: 0.95
@@ -55,23 +55,18 @@ params:
       name: SuperMarioBros-v0
       action_type: complex
       episode_life: true
-      x_reward: highwater
       # reward set v2 -- see mario_ppo_native_84.yaml for the rationale
       # a backward teleport ends the episode at the same time-sized cost as
       # every other failure (a non-terminal loop let the door policy quit into
       # the cheap loop instead of attempting the hidden block: clean-eval loops
       # went 9% -> 97% within 90 minutes)
-      loop_penalty: 100
-      loop_terminal: always
-      fail_penalty: 100
-      backtrack_penalty: 0
-      novelty_bonus: 3.0
       full_game: true
-      stage_bonus: 500
-      idle_penalty: 0
-      idle_timeout: 450
-      idle_threshold: 10
-      progress_reward: 0
+      reward:
+        - {type: first_visit_progress, cap: 20}
+        - {type: level_clear, base: 500, per_extra: 100}
+      unpaid_timeout: 250
+      page_reset_grace: 60
+      page_reset_px: 600
       skip: 4
       sticky_actions: 0.05
       reset_noops: 30
@@ -90,17 +85,12 @@ params:
       # -100 and terminal. Bigger than a death (-15) so the wrong exit is
       # clearly bad; smaller than the ~+300 x-reward of finishing the level
       # so idling/dying before the exit never becomes the better option.
-      offroute_penalty: 100
       explore_eps: 0.02
-      novelty_global: true
-      novelty_y_band: 24
-      score_reward: 0.1
       archive_path: native/archive_route.pkl
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
     eval_env_config:
       backend: lockstep
       full_game: true
-      x_reward: highwater
       # per-level clips (GIF per level in TB + mp4) at every video epoch,
       # each played until the level is cleared or the lives are gone
       video_levels: [1-1, 1-2, 4-1, 4-2, 8-1, 8-2, 8-3, 8-4]

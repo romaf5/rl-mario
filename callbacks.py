@@ -48,6 +48,8 @@ class MarioObserver(AlgoObserver):
         self.episode_loops = []
         self.episode_timeouts = []
         self.episode_offroute = []
+        self.episode_loop_timeouts = []
+        self.episode_gaps = []
         self.frontier_cells = None
         self._last_logged_epoch = -1
         self.door_x = []          # max_x of NON-restart (from-door) episodes
@@ -112,14 +114,18 @@ class MarioObserver(AlgoObserver):
                  float(not info.get('self_restart', False))))
         if 'victory' in info:
             self.episode_victories.append(float(info['victory']))
-        if 'looped' in info:
-            self.episode_loops.append(float(info['looped']))
+        if 'page_resets' in info:
+            self.episode_loops.append(float(info['page_resets'] > 0))
+        if 'loop_timeout' in info:
+            self.episode_loop_timeouts.append(float(info['loop_timeout']))
+        if 'max_unpaid_gap' in info:
+            self.episode_gaps.append(float(info['max_unpaid_gap']))
         if 'self_restart' in info and not info['self_restart']:
             self.door_x.append(info.get('max_x_pos', 0))
-        if 'idle_timeout' in info:
-            self.episode_timeouts.append(float(info['idle_timeout']))
-        if 'offroute' in info:
-            self.episode_offroute.append(float(info['offroute']))
+        if 'timeout' in info:
+            self.episode_timeouts.append(float(info['timeout']))
+        if 'wrong_exit' in info:
+            self.episode_offroute.append(float(info['wrong_exit']))
         if 'frontier_cells' in info:
             self.frontier_cells = info['frontier_cells']
 
@@ -214,19 +220,31 @@ class MarioObserver(AlgoObserver):
                                    float(np.mean(self.episode_victories)),
                                    epoch_num)
         if len(self.episode_loops) > 0:
-            self.writer.add_scalar('mario/loop_rate',
+            self.writer.add_scalar('mario/page_reset_rate',
                                    float(np.mean(self.episode_loops)),
                                    epoch_num)
         if self.frontier_cells is not None:
             self.writer.add_scalar('mario/frontier_cells',
                                    self.frontier_cells, epoch_num)
         if len(self.episode_offroute) > 0:
-            self.writer.add_scalar('mario/offroute_rate',
+            self.writer.add_scalar('mario/wrong_exit_rate',
                                    float(np.mean(self.episode_offroute)),
                                    epoch_num)
         if len(self.episode_timeouts) > 0:
-            self.writer.add_scalar('mario/idle_timeout_rate',
+            self.writer.add_scalar('mario/timeout_rate',
                                    float(np.mean(self.episode_timeouts)),
+                                   epoch_num)
+        if len(self.episode_loop_timeouts) > 0:
+            self.writer.add_scalar('mario/loop_timeout_rate',
+                                   float(np.mean(self.episode_loop_timeouts)),
+                                   epoch_num)
+        if len(self.episode_gaps) > 0:
+            # longest unpaid stretch per episode: tells whether the cutoff
+            # (unpaid_timeout) is cutting real play or genuinely stuck runs
+            self.writer.add_scalar('mario/max_unpaid_gap_mean',
+                                   float(np.mean(self.episode_gaps)), epoch_num)
+            self.writer.add_scalar('mario/max_unpaid_gap_p95',
+                                   float(np.percentile(self.episode_gaps, 95)),
                                    epoch_num)
         if len(self.door_x) > 0:
             self.writer.add_scalar('mario/door_max_x',
@@ -255,6 +273,8 @@ class MarioObserver(AlgoObserver):
         self.episode_loops.clear()
         self.episode_timeouts.clear()
         self.episode_offroute.clear()
+        self.episode_loop_timeouts.clear()
+        self.episode_gaps.clear()
         self.frontier_cells = None
         self.door_x.clear()
 
@@ -293,11 +313,8 @@ class MarioObserver(AlgoObserver):
         # the trained signal (idle default would silently be 150; loop and
         # fail penalties default to 0/15 and made loops look free)
         env_cfg = self.algo.env_config or {}
-        for k in ('idle_timeout', 'idle_penalty', 'idle_threshold',
-                  'loop_penalty', 'fail_penalty', 'backtrack_penalty',
-                  'progress_reward', 'score_reward', 'x_reward', 'obs_mode',
-                  'stage_bonus', 'offroute_penalty', 'novelty_bonus',
-                  'novelty_global', 'novelty_y_band', 'reward'):
+        for k in ('unpaid_timeout', 'page_reset_grace', 'page_reset_px',
+                  'obs_mode', 'stage_bonus', 'reward'):
             if k in env_cfg:
                 kwargs[k] = env_cfg[k]
         # the on-route set follows the CONFIG, never the clip's start level:
@@ -401,11 +418,11 @@ class MarioObserver(AlgoObserver):
             # are auditable from the video (R alone hides a -100 that
             # lands on the same step as a +8)
             life = info.get('life', prev_life)
-            if info.get('looped'):
+            if info.get('loop_timeout'):
                 event, event_ttl = 'LOOP %+.0f' % reward, 60
-            elif info.get('offroute'):
+            elif info.get('wrong_exit'):
                 event, event_ttl = 'OFF-ROUTE %+.0f' % reward, 60
-            elif info.get('idle_timeout'):
+            elif info.get('timeout'):
                 event, event_ttl = 'IDLE TIMEOUT %+.0f' % reward, 60
             elif life == 255 and prev_life is not None and prev_life != 255:
                 event, event_ttl = 'GAME OVER %+.0f' % reward, 60
@@ -438,9 +455,9 @@ class MarioObserver(AlgoObserver):
                     frames.append(frames[-1])
                     step_stats.append(stat)
                 break
-        cause = ('victory' if info.get('victory') else 'loop' if info.get('looped')
-                 else 'idle timeout' if info.get('idle_timeout') else 'off-route'
-                 if info.get('offroute') else 'game over' if info.get('life') == 255
+        cause = ('victory' if info.get('victory') else 'loop' if info.get('loop_timeout')
+                 else 'unpaid timeout' if info.get('timeout') else 'wrong exit'
+                 if info.get('wrong_exit') else 'game over' if info.get('life') == 255
                  else 'level cleared' if (gp0 is not None and info.get('game_progress') != gp0)
                  else 'step cap')
         print(f'  [Video] clip {info.get("world", "?")}-{info.get("stage", "?")}: '
@@ -484,7 +501,7 @@ class MarioObserver(AlgoObserver):
         from mario_native_vecenv import MarioNativeVecEnv
         ec = dict(self.algo.env_config or {})
         for k in ('explore_eps', 'sticky_actions', 'self_restart_prob',
-                  'explore_episode_prob', 'novelty_bonus'):
+                  'explore_episode_prob'):
             ec[k] = 0
         for k in ('name', 'action_type', 'archive_path'):
             ec.pop(k, None)
@@ -492,6 +509,15 @@ class MarioObserver(AlgoObserver):
         env = MarioNativeVecEnv('clean', n, dense_infos=False, **ec)
         try:
             obs = env.reset()
+            # replayable traces: start state + actions + per-term rewards per
+            # episode (tools/play.py --replay <file>.npz)
+            starts = []
+            for i in range(n):
+                env.lib.benv_save(env.env, i, env._sbuf)
+                starts.append(bytes(env._sbuf.raw))
+            acts_log = [[] for _ in range(n)]
+            terms_log = [[] for _ in range(n)]
+            xs_log = [[] for _ in range(n)]
             max_x = np.zeros(n); fin = {}
             for step in range(max_steps):
                 with torch.no_grad():
@@ -500,24 +526,28 @@ class MarioObserver(AlgoObserver):
                 a = torch.distributions.Categorical(
                     logits=res['logits']).sample().numpy()
                 obs, r, d, infos = env.step(a)
+                lt = env.last_terms
                 for i in range(n):
                     if i in fin:
                         continue
+                    acts_log[i].append(int(a[i]))
+                    terms_log[i].append([float(v[i]) for v in lt.values()])
+                    xs_log[i].append(int(env.last_signals.x[i]))
                     max_x[i] = max(max_x[i], env.max_x[i])
                     if d[i]:
                         inf = infos[i] if isinstance(infos, list) else {}
                         fin[i] = ('victory' if inf.get('victory') else
-                                  'loop' if inf.get('looped') else
-                                  'idle' if inf.get('idle_timeout') else
-                                  'offroute' if inf.get('offroute') else
+                                  'loop' if inf.get('loop_timeout') else
+                                  'timeout' if inf.get('timeout') else
+                                  'wrong_exit' if inf.get('wrong_exit') else
                                   'death')
                 if len(fin) == n:
                     break
             for i in range(n):
                 fin.setdefault(i, 'running')
             counts = {k: sum(1 for v in fin.values() if v == k) / n
-                      for k in ('death', 'loop', 'victory', 'idle', 'offroute',
-                                'running')}
+                      for k in ('death', 'loop', 'victory', 'timeout',
+                                'wrong_exit', 'running')}
             self.writer.add_scalar('eval/door_max_x_mean', float(max_x.mean()),
                                    epoch_num)
             self.writer.add_scalar('eval/door_max_x_max', float(max_x.max()),
@@ -527,8 +557,50 @@ class MarioObserver(AlgoObserver):
             print(f'  [Eval] clean door x{n}: max_x mean {max_x.mean():.0f} '
                   f'max {max_x.max():.0f} | ' + ' '.join(
                       f'{k} {v:.2f}' for k, v in counts.items()))
+            self._dump_eval_traces(epoch_num, ec.get('random_stages'), starts,
+                                   acts_log, terms_log, xs_log,
+                                   list(env.last_terms.keys()), fin, max_x)
         finally:
             env.close()
+
+    def _dump_eval_traces(self, epoch_num, stages, starts, acts, terms, xs,
+                          term_names, fin, max_x, keep=8):
+        """Write the best / worst / a few random clean-door episodes as
+        replayable .npz (start state, actions, per-step term rewards) under
+        <run>/eval_traces/epoch_<N>/, plus an index.csv summarising all."""
+        try:
+            try:      # same derivation the video recorder uses
+                run_dir = os.path.dirname(os.path.dirname(
+                    self.writer.file_writer.event_writer._ev_writer._file_name))
+            except AttributeError:
+                logdir = getattr(self.writer, 'logdir', None) or \
+                    getattr(self.writer, 'log_dir', None)
+                if not logdir:
+                    return
+                run_dir = os.path.dirname(os.path.normpath(logdir))
+            out = os.path.join(run_dir, 'eval_traces', f'epoch_{epoch_num}')
+            os.makedirs(out, exist_ok=True)
+            n = len(starts)
+            order = np.argsort(-max_x)
+            pick = list(order[:keep // 2]) + list(order[-(keep // 2):])
+            with open(os.path.join(out, 'index.csv'), 'w') as f:
+                f.write('episode,end,max_x,steps,total_reward,file\n')
+                for i in range(n):
+                    tot = float(np.sum(terms[i])) if terms[i] else 0.0
+                    fn = ''
+                    if i in pick:
+                        fn = f'ep_{i:02d}_{fin.get(i, "running")}_x{int(max_x[i])}.npz'
+                        np.savez_compressed(
+                            os.path.join(out, fn), state=np.frombuffer(
+                                starts[i], dtype=np.uint8),
+                            actions=np.array(acts[i], dtype=np.int16),
+                            terms=np.array(terms[i], dtype=np.float32),
+                            term_names=np.array(term_names), x=np.array(xs[i]),
+                            level=str((stages or ['?'])[0]), epoch=epoch_num)
+                    f.write(f'{i},{fin.get(i, "running")},{int(max_x[i])},'
+                            f'{len(acts[i])},{tot:.1f},{fn}\n')
+        except Exception as e:
+            print(f'  [Eval] trace dump failed: {e}')
 
     def _record_video(self, epoch_num, model):
         """Record gameplay: PIL GIF to TensorBoard + MP4 to disk.
