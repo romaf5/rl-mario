@@ -1,0 +1,100 @@
+# Tuning hypothesis 7 (2026-09-06 12:05): CREDIT FOR CLIMBING. Identical to the
+# pure-random-exploration config (mario_ppo_native_84_rand.yaml) except the
+# transitive credit rule also counts a winning cell in the SAME x-bin when it
+# is higher up (smaller y-band) or has another tile signature (the reveal).
+# The old rule (>= 4 bins deeper or another frame) never credited the climb
+# from the floor onto the block, so the floor cell only won if the same
+# episode also made the pipe top and entered the pipe: 0 wins in ~5000
+# tries. Fresh policy; archive seeded from Pos84rand at 12:05.
+params:
+  seed: 42
+  algo: {name: a2c_discrete}
+  model: {name: discrete_a2c}
+  network:
+    name: actor_critic
+    separate: false
+    space: {discrete: null}
+    cnn:
+      type: conv2d
+      activation: elu
+      initializer: {name: orthogonal_initializer, gain: 1.41421356237}
+      convs:
+      - {filters: 32, kernel_size: 8, strides: 4, padding: 0}
+      - {filters: 64, kernel_size: 4, strides: 2, padding: 0}
+      - {filters: 64, kernel_size: 3, strides: 1, padding: 0}
+    mlp:
+      units: [512]
+      activation: elu
+      initializer: {name: orthogonal_initializer, gain: 1.41421356237}
+  config:
+    name: Mario_Pos84credit
+    env_name: mario_native
+    score_to_win: 100000
+    normalize_value: true
+    normalize_input: false
+    # rewards are in game units (px, +500 clear); scale so raw returns are
+    # O(1-10) instead of leaning on the lifetime value normaliser alone
+    reward_shaper: {scale_value: 0.01}
+    normalize_advantage: true
+    gamma: 0.995
+    tau: 0.95
+    learning_rate: 0.00025
+    lr_schedule: adaptive
+    kl_threshold: 0.008
+    grad_norm: 0.5
+    entropy_coef: 0.02
+    truncate_grads: true
+    e_clip: 0.1
+    clip_value: true
+    num_actors: 128
+    horizon_length: 128
+    minibatch_size: 4096
+    mini_epochs: 4
+    critic_coef: 0.5
+    max_epochs: 4000
+    use_diagnostics: true
+    save_frequency: 500
+    save_best_after: 500
+    print_stats: true
+    device: cuda:0
+    multi_gpu: false
+    stage_curriculum_freq: 0
+    env_config:
+      name: SuperMarioBros-v0
+      action_type: complex
+      episode_life: true
+      full_game: true
+      random_stages: [8-4]
+      # ---- rewards: positive-only (mario_rewards.py, 2026-09-05) ----
+      # every failure just ends the episode; nothing is ever negative
+      reward:
+        - {type: first_visit_progress, cap: 20}    # new ground this life, per frame
+        - {type: level_clear, base: 500, per_extra: 100}
+      unpaid_timeout: 250     # contiguous steps with no positive reward -> cutoff (bootstrapped)
+      page_reset_grace: 60    # after the game's page reset: unpaid steps left to reach paid ground
+      page_reset_px: 600      # x drop within one frame that counts as a page reset
+      # ---- env ----
+      skip: 4
+      sticky_actions: 0.05
+      reset_noops: 30
+      n_threads: 16
+      explore_eps: 0.02
+      # ---- Go-Explore archive / restarts ----
+      self_restart_prob: 0.7
+      self_restart_cells: 1024
+      cell_tiles: true
+      frontier_predecessors: 4
+      cell_y_band: 32
+      explore_pure: true
+      credit_vertical: true     # transitive credit also for reaching a winning cell in the same x-bin that is higher up or has another tile signature        # explore episodes = pure random actions with 1..8-step persistence (Go-Explore phase 1), not policy + 8-step macros           # archive cell y resolution: block top (ypix 112) and pipe top (64) become separate rungs  # frontier practice pool = winning cells + never-won cells up to 4 x-bins before them (same frame)          # archive cell key includes the level tiles of the current x-bin (a revealed block = its own cell)
+      archive_path: native/archive_84v.pkl
+      explore_episode_prob: 0.4
+      explore_episode_steps: 300
+      self_restart_frontier_prob: 0.8
+      self_restart_frontier_k: 16
+    player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
+    eval_env_config:
+      backend: lockstep
+      skip: 4
+      random_stages: [8-4]
+      full_game: true

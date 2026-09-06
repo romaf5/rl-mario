@@ -198,5 +198,24 @@ for w in winners:
 env.close()
 check('predecessors of a winning pipe-top cell (bin 19) include the revealed on-block cell (18, y1, sig 99) and bins 15-18', K(18, 1, 99) in pool and K(15) in pool and K(14) not in pool, sorted(pool))
 
+# ---------------------------------------------------------------- transitive credit: vertical / reveal within a bin
+def credited(env, cell, visited):
+    env.start_cell[0] = cell; env.ep_cells[0] = set(visited) | {cell}
+    return any(env.cell_wins.get(c, 0) > 0 and (c[0] != cell[0] or c[1] != cell[1] or c[4] != cell[4] or c[5] != cell[5]
+               or c[2] >= cell[2] + 4 or (env.credit_vertical and c[2] == cell[2] and (c[3] < cell[3] or c[6] != cell[6])))
+               for c in env.ep_cells[0] if c != cell)
+K = lambda b, y, sig: ('8-4', 3, b, y, 0, 3, sig)
+floor_unrev, floor_rev, block_top, pipe_top, flat_next = K(18, 5, 43183), K(18, 5, 53465), K(18, 3, 53465), K(19, 2, 34528), K(19, 5, 43183)
+for cv in (False, True):
+    env = make('8-4', play_mode=False, credit_vertical=cv); env.cell_wins = {block_top: 3, pipe_top: 9, flat_next: 2}
+    r = (credited(env, floor_rev, [block_top]), credited(env, floor_unrev, [floor_rev]) if False else credited(env, floor_unrev, [floor_rev, block_top]), credited(env, floor_rev, [flat_next]))
+    env.close()
+    if cv:
+        check('credit_vertical: floor-revealed -> block-top (same bin, higher) is a win', r[0])
+        check('credit_vertical: floor-unrevealed -> revealed/block-top (same bin, other signature) is a win', r[1])
+        check('credit_vertical: the flat next-door cell (bin+1, same y) still does NOT count', not r[2])
+    else:
+        check('legacy credit: climbing onto the block in the same bin is NOT credited (the bug)', not r[0])
+
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)

@@ -138,7 +138,7 @@ class MarioNativeVecEnv(IVecEnv):
                  reward=None, play_mode=False,
                  route_levels=None, cell_tiles=False,
                  frontier_predecessors=0, cell_y_band=64, explore_pure=False,
-                 **unknown):
+                 credit_vertical=False, **unknown):
         assert action_type == 'complex'
         gone = [k for k in unknown if k in self.REMOVED_KWARGS]
         if gone:
@@ -207,6 +207,8 @@ class MarioNativeVecEnv(IVecEnv):
         # explore episodes: pure random with mixed persistence (True) or the
         # legacy 60% policy / 40% 8-step macro mix
         self.explore_pure = bool(explore_pure)
+        # transitive credit also for climbing / revealing within one x-bin
+        self.credit_vertical = bool(credit_vertical)
         self.exp_persist = np.ones(num_actors, dtype=np.int64)
         self.explorer = np.zeros(num_actors, dtype=np.int32)
         self.exp_action = np.zeros(num_actors, dtype=np.int64)
@@ -796,10 +798,20 @@ class MarioNativeVecEnv(IVecEnv):
                 continue
             # transitive credit: reaching a DEEPER cell that already wins is
             # a win for this cell ("deeper" = another frame or >= 4 x-bins)
+            # "deeper" = another frame, >= 4 x-bins further, or -- with
+            # credit_vertical -- a winning cell in the SAME bin that is
+            # higher up (smaller y-band) or has another tile signature
+            # (the reveal). The flat next-door cell never counts, so the
+            # trivial-credit failure stays closed, but climbing onto the
+            # 8-4 block from the floor is finally a win for the floor cell
+            # (without it the floor only won if the same episode also made
+            # the pipe top and entered the pipe: 0 wins in ~5000 tries).
             reached = any(
                 self.cell_wins.get(c, 0) > 0 and (
                     c[0] != cell[0] or c[1] != cell[1] or c[4] != cell[4]
-                    or c[5] != cell[5] or c[2] >= cell[2] + 4)
+                    or c[5] != cell[5] or c[2] >= cell[2] + 4
+                    or (self.credit_vertical and c[2] == cell[2]
+                        and (c[3] < cell[3] or c[6] != cell[6])))
                 for c in self.ep_cells[i] if c != cell)
             won = victory[i] or self.cleared[i] > 0 or reached
             if won:
