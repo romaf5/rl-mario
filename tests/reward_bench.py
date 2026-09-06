@@ -170,5 +170,33 @@ if os.path.exists(T84):
     env.close()
     check('archive key: tile signature differs before/after the hidden block is revealed (s1402 vs s1410)', sigs[1402] != sigs[1410], sigs)
 
+# ---------------------------------------------------------------- frontier pool with predecessors
+env = make('8-4', play_mode=False, self_restart_prob=1.0, self_restart_frontier_prob=1.0, frontier_predecessors=4, self_restart_frontier_k=64)
+K = lambda b, y=2, sig=0: ('8-4', 3, b, y, 0, 3, sig)
+env.archive = {K(b): [[b'x'], 1, 300] for b in (10, 14, 15, 16, 17, 18, 24, 30)}
+env.archive[K(18, 1, 99)] = [[b'x'], 1, 300]          # revealed-block on-block state, never won
+env.cell_wins = {K(24): 5, K(30): 3}; env.cell_tries = {c: 10 for c in env.archive}
+import collections; draws = collections.Counter()
+for _ in range(600):
+    cells = list(env.archive.keys())
+    winners = [c for c in cells if env.cell_wins.get(c, 0) > 0]; pool = set(winners)
+    for w in winners:
+        for c in cells:
+            if c[0] == w[0] and c[1] == w[1] and c[4] == w[4] and c[5] == w[5] and w[2] - env.frontier_pred <= c[2] <= w[2]: pool.add(c)
+    draws[len(pool)] += 1
+env.close()
+pool_sizes = set(draws)
+check('frontier pool = winners + predecessors within 4 bins (24 -> 24; 30 -> 30) => size 2 (no cells at 20-23/26-29)', pool_sizes == {2}, pool_sizes)
+env = make('8-4', play_mode=False, self_restart_prob=1.0, self_restart_frontier_prob=1.0, frontier_predecessors=4, self_restart_frontier_k=64)
+env.archive = {K(b): [[b'x'], 1, 300] for b in (14, 15, 16, 17, 18, 19, 24)}
+env.archive[K(18, 1, 99)] = [[b'x'], 1, 300]
+env.cell_wins = {K(19): 2, K(24): 5}; env.cell_tries = {c: 10 for c in env.archive}
+cells = list(env.archive.keys()); winners = [c for c in cells if env.cell_wins.get(c, 0) > 0]; pool = set(winners)
+for w in winners:
+    for c in cells:
+        if c[0] == w[0] and c[1] == w[1] and c[4] == w[4] and c[5] == w[5] and w[2] - env.frontier_pred <= c[2] <= w[2]: pool.add(c)
+env.close()
+check('predecessors of a winning pipe-top cell (bin 19) include the revealed on-block cell (18, y1, sig 99) and bins 15-18', K(18, 1, 99) in pool and K(15) in pool and K(14) not in pool, sorted(pool))
+
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)

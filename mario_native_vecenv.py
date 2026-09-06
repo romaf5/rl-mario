@@ -136,7 +136,8 @@ class MarioNativeVecEnv(IVecEnv):
                  self_restart_frontier_k=16, unpaid_timeout=250,
                  page_reset_grace=60, page_reset_px=600,
                  reward=None, play_mode=False,
-                 route_levels=None, cell_tiles=False, **unknown):
+                 route_levels=None, cell_tiles=False,
+                 frontier_predecessors=0, **unknown):
         assert action_type == 'complex'
         gone = [k for k in unknown if k in self.REMOVED_KWARGS]
         if gone:
@@ -196,6 +197,9 @@ class MarioNativeVecEnv(IVecEnv):
         self.page_reset_px = int(page_reset_px)
         # archive cells also keyed by the level tiles of the current x-bin
         self.cell_tiles = bool(cell_tiles)
+        # frontier practice pool also includes never-won cells up to this
+        # many x-bins before a winning cell (0 = winners only, legacy)
+        self.frontier_pred = int(frontier_predecessors)
         self.explorer = np.zeros(num_actors, dtype=np.int32)
         self.exp_action = np.zeros(num_actors, dtype=np.int64)
         self.ep_steps = np.zeros(num_actors, dtype=np.int32)
@@ -304,6 +308,22 @@ class MarioNativeVecEnv(IVecEnv):
             cells = list(self.archive.keys())
             if (self.sr_frontier_prob > 0
                     and self.rng.random_sample() < self.sr_frontier_prob):
+                if self.frontier_pred > 0:
+                    # the chain grows only when a never-won cell right
+                    # behind a winning one converts, so the practice pool
+                    # is the winners PLUS their predecessors (same frame,
+                    # up to frontier_pred x-bins before); failure weighting
+                    # below then puts those never-won links first
+                    winners = [c for c in cells if self.cell_wins.get(c, 0) > 0]
+                    pool = set(winners)
+                    for w in winners:
+                        for c in cells:
+                            if (c[0] == w[0] and c[1] == w[1] and c[4] == w[4]
+                                    and c[5] == w[5]
+                                    and w[2] - self.frontier_pred <= c[2] <= w[2]):
+                                pool.add(c)
+                    if pool:
+                        cells = list(pool)
                 # backward-chaining frontier: cells PROVEN to convert
                 # (1+ wins), least-practiced first. Newly-winning
                 # outer-ring cells have the fewest uses so they dominate
