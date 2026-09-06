@@ -202,7 +202,8 @@ check('predecessors of a winning pipe-top cell (bin 19) include the revealed on-
 def credited(env, cell, visited):
     env.start_cell[0] = cell; env.ep_cells[0] = set(visited) | {cell}
     return any(env.cell_wins.get(c, 0) > 0 and (c[0] != cell[0] or c[1] != cell[1] or c[4] != cell[4] or c[5] != cell[5]
-               or c[2] >= cell[2] + 4 or (env.credit_vertical and c[2] == cell[2] and (c[3] < cell[3] or c[6] != cell[6])))
+               or c[2] >= cell[2] + 4 or (env.credit_vertical and c[2] == cell[2] and (c[3] < cell[3] or c[6] != cell[6]))
+               or (env.credit_vertical and cell[2] < c[2] < cell[2] + 4 and c[3] < cell[3]))
                for c in env.ep_cells[0] if c != cell)
 K = lambda b, y, sig: ('8-4', 3, b, y, 0, 3, sig)
 floor_unrev, floor_rev, block_top, pipe_top, flat_next = K(18, 5, 43183), K(18, 5, 53465), K(18, 3, 53465), K(19, 2, 34528), K(19, 5, 43183)
@@ -216,6 +217,13 @@ for cv in (False, True):
         check('credit_vertical: the flat next-door cell (bin+1, same y) still does NOT count', not r[2])
     else:
         check('legacy credit: climbing onto the block in the same bin is NOT credited (the bug)', not r[0])
+
+env = make('8-4', play_mode=False, credit_vertical=True); env.cell_wins = {block_top: 3, pipe_top: 9, flat_next: 2, K(18, 5, 53465): 5}
+approach = K(17, 5, 21214)
+r_up = credited(env, approach, [block_top]); r_flat = credited(env, approach, [K(18, 5, 53465)]); r_far = credited(env, approach, [K(19, 5, 34528)])
+env.cell_wins[K(19, 5, 34528)] = 4; r_far2 = credited(env, approach, [K(19, 5, 34528)]); env.close()
+check('credit_vertical: approach (bin 17 floor) -> block top (bin 18, higher) is a win', r_up)
+check('credit_vertical: approach -> the winning floor cell one bin ahead (same height) is NOT a win', not r_flat and not r_far2)
 
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)

@@ -811,7 +811,13 @@ class MarioNativeVecEnv(IVecEnv):
                     c[0] != cell[0] or c[1] != cell[1] or c[4] != cell[4]
                     or c[5] != cell[5] or c[2] >= cell[2] + 4
                     or (self.credit_vertical and c[2] == cell[2]
-                        and (c[3] < cell[3] or c[6] != cell[6])))
+                        and (c[3] < cell[3] or c[6] != cell[6]))
+                    # ... or a HIGHER winning cell 1-3 bins ahead: the
+                    # approach to the block (bins 16-17) could only win by
+                    # reaching bin 20+, i.e. the whole reveal-climb-jump-
+                    # enter sequence in one episode (0 wins in ~28k tries)
+                    or (self.credit_vertical and cell[2] < c[2] < cell[2] + 4
+                        and c[3] < cell[3]))
                 for c in self.ep_cells[i] if c != cell)
             won = victory[i] or self.cleared[i] > 0 or reached
             if won:
