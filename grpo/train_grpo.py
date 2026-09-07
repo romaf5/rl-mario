@@ -163,7 +163,7 @@ class Prompts:
         live = [c for c in self.demos if self.tail[c] < len(self.demos[c][1])]
         if self.grad and (not live or rng.rand() < 0.2):
             gl = list(self.grad); c = gl[rng.randint(len(gl))]
-            return ('demo', c, self.grad[c][0], [])          # re-check: no prefix
+            return ('demo', c, self.grad[c][0], [], self.grad[c][1])   # re-check: no prefix
         if not live:
             return None
         # near-uniform over live demos (weighting by the target's prompt
@@ -172,7 +172,7 @@ class Prompts:
         # is the link being learned right now
         w = np.array([self._demo_w(c) for c in live]); w = w / w.sum()
         c = live[rng.choice(len(live), p=w)]; start, acts, _ = self.demos[c]
-        return ('demo', c, start, acts[:len(acts) - self.tail[c]])
+        return ('demo', c, start, acts[:len(acts) - self.tail[c]], acts)
 
     def demo_result(self, cell, frac_reached):
         self.hist.setdefault(cell, []).append(round(frac_reached, 2))
@@ -257,11 +257,11 @@ class Prompts:
                 grad = [c for c in self.grad if c[0] == l]
                 if grad and (not live or rng.random_sample() < 0.2):
                     c = grad[rng.randint(len(grad))]
-                    out.append(('demo', c, self.grad[c][0], [])); continue   # re-check, no prefix
+                    out.append(('demo', c, self.grad[c][0], [], self.grad[c][1])); continue   # re-check, no prefix
                 if live:
                     w = np.array([self._demo_w(c) for c in live]); w = w / w.sum()
                     c = live[rng.choice(len(live), p=w)]; start, acts, _ = self.demos[c]
-                    out.append(('demo', c, start, acts[:len(acts) - self.tail[c]])); continue
+                    out.append(('demo', c, start, acts[:len(acts) - self.tail[c]], acts)); continue
             w = self.score[ids] + 0.5; w = w / w.sum()
             i = ids[rng.choice(len(ids), p=w)]
             out.append((i, self.states[i][rng.randint(len(self.states[i]))]))
@@ -408,6 +408,7 @@ def main():
     ap.add_argument('--cell-variants', type=int, default=3, help='max tile-signature variants per spatial archive cell')
     ap.add_argument('--explorers', type=int, default=0, help='extra envs per iteration that random-walk from least-visited cells ONLY to grow the archive (never in the update)')
     ap.add_argument('--demo-eps', type=float, default=0.2, help='uniform-random action share in the free steps of demo groups (the collapsed policy puts ~0 on the actions a link needs)')
+    ap.add_argument('--hint', type=float, default=1.0, help='soft prefix: prob that a hinted rollout takes the demo action at its first free step (half the group is hinted; 0 = off)')
     ap.add_argument('--bc', type=float, default=0.1, help='self-imitation weight on the forced prefix steps of demo groups (negative log-likelihood of the demo action)')
     ap.add_argument('--init-prompts', default='', help='prompts.pkl of an earlier run: restore demos, graduated links, tails and prompt scores')
     ap.add_argument('--demo-share', type=float, default=0.0, help='fraction of cell groups started from an explorer demo with a forced prefix (backward chaining); needs --explorers')
@@ -485,6 +486,12 @@ def main():
         # ... and only for links near the door frontier: imitation on demos
         # all over the level (weight 0.1) broke pipe-1 entry within 4 iterations
         bc_ok = np.array([chosen[i // a.group][0] == 'demo' and prompts.near_frontier(chosen[i // a.group][1]) for i in range(N)])
+        # soft prefix: in half of each demo group the first free step takes
+        # the demo's own next action (the state still matches the demo
+        # there) and the second with prob 1/2; hits stop being luck. The
+        # unhinted half alone decides the tail.
+        full_acts = [chosen[i // a.group][4] if chosen[i // a.group][0] == 'demo' else None for i in range(N)]
+        hint_env = np.array([(i % a.group) < a.group // 2 for i in range(N)]) & (plen > 0) & (a.hint > 0)
         model.eval()
         for t in range(H):
             with torch.no_grad():
@@ -501,6 +508,14 @@ def main():
                     free = demo_env & torch.from_numpy(fz < 0).to(device)
                     flip = free & (torch.rand(N, device=device) < a.demo_eps)
                     act = torch.where(flip, torch.randint(0, 12, (N,), device=device), act)
+                if hint_env.any():
+                    hf = np.full(N, -1, np.int64)
+                    for i in np.nonzero(hint_env)[0]:
+                        tr = t - plen[i]
+                        if 0 <= tr <= 1 and t < len(full_acts[i]) and (tr == 0 or rng.rand() < 0.5) and rng.rand() < a.hint:
+                            hf[i] = full_acts[i][t]
+                    if (hf >= 0).any():
+                        hft = torch.from_numpy(hf).to(device); act = torch.where(hft >= 0, hft, act)
                 lp = dist.log_prob(act).clamp_min(-20.0)   # an eps-mixed action can have p=0 in float32: keep log-probs finite
             obs_buf[t] = obs                          # already uint8
             act_np = act.cpu().numpy()
@@ -542,7 +557,8 @@ def main():
                 cell = chosen[g][1]
                 # success = the rollout ENTERED the target cell (same key,
                 # incl. y-band and tile signature) at some step
-                fr = float(reached[sl].mean())
+                sel = ~hint_env[sl] if hint_env[sl].any() else np.ones(a.group, bool)
+                fr = float(reached[sl][sel].mean())          # judged on the unhinted rollouts only
                 prompts.demo_result(cell, fr)
                 if 16 <= cell[2] <= 25 and cell[4] == 0:
                     print(f'  [demo] it {it} target {cell[2]}/{cell[3]}/{cell[6]} len {len(prompts.demos.get(cell, (None, []))[1]) if cell in prompts.demos else "grad"} prefix {len(chosen[g][3])} reached {fr:.2f} maxx {maxx[sl].mean():.0f}', flush=True)
