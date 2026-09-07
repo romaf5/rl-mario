@@ -73,7 +73,7 @@ class Prompts:
         # actions and leaves the rest to the policy; the tail grows as the
         # policy succeeds (Go-Explore phase 2 / the backward algorithm,
         # from the run's OWN trajectories, no human data)
-        self.demos, self.tail = {}, {}
+        self.demos, self.tail, self.hist = {}, {}, {}
         arch = pickle.load(open(archive_path, 'rb')) if archive_path and os.path.exists(archive_path) else {}
         for k, e in arch.items():
             if k[0] not in self.doors:
@@ -100,6 +100,7 @@ class Prompts:
     def demo_result(self, cell, frac_reached):
         if cell not in self.demos:          # graduated by another group this iteration
             return
+        self.hist.setdefault(cell, []).append(round(frac_reached, 2))
         n = len(self.demos[cell][1])
         if frac_reached >= 0.5:
             self.tail[cell] = min(n, self.tail[cell] + 4)     # the policy handles more of it
@@ -470,6 +471,12 @@ def main():
                     writer.add_scalar(f'eval/fullgame_{k}', v, it)
                 lv = lambda g: '%d-%d' % (g // 4 + 1, g % 4 + 1)
                 print(f'  [fullgame] 3 lives from the start: level reached mean {fg["level_mean"]:.1f} ({lv(int(round(fg["level_mean"])))}) max {lv(fg["level_max"])} victory {fg["victory"]:.3f}', flush=True)
+            # prompt state on disk for inspection (demos, tails, per-demo
+            # success history, learnability scores)
+            with open(os.path.join(run_dir, 'nn', 'prompts.pkl'), 'wb') as f:
+                pickle.dump({'cells': prompts.cells, 'score': prompts.score, 'uses': prompts.uses,
+                             'demos': {c: (len(v[1]), v[1]) for c, v in prompts.demos.items()},
+                             'tail': prompts.tail, 'hist': prompts.hist, 'graduated': getattr(prompts, 'graduated', 0)}, f)
             ck = {'model': model.state_dict(), 'iter': it, 'frames': frames}
             torch.save(ck, os.path.join(run_dir, 'nn', 'grpo_last.pth'))
             # numbered copy per eval: clips / ghosts for ANY step can be
