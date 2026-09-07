@@ -59,6 +59,7 @@ class Prompts:
     (last group std of outcomes) so groups with zero variance are avoided."""
 
     demo_share = 0.0
+    round_robin = True
 
     def __init__(self, env, archive_path, door_share):
         # one door state per configured level (8-4 only, or the whole route)
@@ -129,6 +130,8 @@ class Prompts:
         return out
 
     def sample(self, k, rng):
+        if len(self.levels) > 1 and self.round_robin:
+            return self.sample_round_robin(k, rng)
         out = []
         n_door = max(1, int(round(k * self.door_share))) if self.cells else k
         # mastered doors fade (0.15 floor keeps every level in rotation)
@@ -150,6 +153,32 @@ class Prompts:
                     out.append(dp); continue
             l = lv[rng.choice(len(lv), p=wl)]
             ids = by_level[l]
+            w = self.score[ids] + 0.5; w = w / w.sum()
+            i = ids[rng.choice(len(ids), p=w)]
+            out.append((i, self.states[i][rng.randint(len(self.states[i]))]))
+        return out
+
+    def sample_round_robin(self, k, rng):
+        """Retention: every level gets a group each iteration (cyclic if
+        k != levels), so a mastered level keeps being trained instead of
+        drifting while its learnability is zero. Within a level: a door
+        prompt with prob door_share, else a demo (demo_share) or a cell by
+        learnability."""
+        out = []
+        by_level = {}
+        for i, c in enumerate(self.cells):
+            by_level.setdefault(c[0], []).append(i)
+        order = list(self.levels); rng.shuffle(order)
+        for g in range(k):
+            l = order[g % len(order)]
+            ids = by_level.get(l, [])
+            if not ids or rng.random_sample() < self.door_share:
+                out.append(('door:' + l, self.doors[l])); continue
+            if self.demos and rng.random_sample() < self.demo_share:
+                live = [c for c in self.demos if c[0] == l and self.tail[c] < len(self.demos[c][1])]
+                if live:
+                    c = live[rng.randint(len(live))]; start, acts = self.demos[c]
+                    out.append(('demo', c, start, acts[:len(acts) - self.tail[c]])); continue
             w = self.score[ids] + 0.5; w = w / w.sum()
             i = ids[rng.choice(len(ids), p=w)]
             out.append((i, self.states[i][rng.randint(len(self.states[i]))]))
