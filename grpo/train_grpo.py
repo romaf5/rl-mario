@@ -602,7 +602,7 @@ def main():
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5); opt.step()
                 with torch.no_grad():
                     stats['loss'] += pg.item(); stats['ent'] += ent.item()
-                    stats['kl'] += (olp[idx] - lp).mean().item()
+                    stats['kl'] += (olp[idx] - lp.clamp_min(-20.0)).mean().item()   # same clamp as the stored log-probs, else eps-mixed p~0 actions inflate the stat
                     stats['clipfrac'] += ((ratio - 1).abs() > a.clip).float().mean().item(); stats['n'] += 1
         n_upd = max(stats['n'], 1)
         door = np.array([isinstance(chosen[i // a.group][0], str) and chosen[i // a.group][0].startswith('door') for i in range(N)])
