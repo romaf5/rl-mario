@@ -75,6 +75,18 @@ class Prompts:
         self.uses = np.zeros(len(self.cells), int)
         print(f'[prompts] door + {len(self.cells)} archive cells')
 
+    def frontier(self, k, rng):
+        """k least-visited cells (Go-Explore's exploration rule) for the
+        archive-growing random walkers; door states when there are no cells."""
+        if not self.cells:
+            return [self.doors[self.levels[rng.randint(len(self.levels))]] for _ in range(k)]
+        w = 1.0 / (1.0 + self.uses); w = w / w.sum()
+        out = []
+        for _ in range(k):
+            i = rng.choice(len(self.cells), p=w)
+            out.append(self.states[i][rng.randint(len(self.states[i]))])
+        return out
+
     def sample(self, k, rng):
         out = []
         n_door = max(1, int(round(k * self.door_share))) if self.cells else k
@@ -236,6 +248,7 @@ def main():
     ap.add_argument('--rtg', action='store_true', help='per-step advantages from discounted reward-to-go, group-normalised at each step (temporal credit) instead of one outcome per rollout')
     ap.add_argument('--gamma', type=float, default=0.99)
     ap.add_argument('--cell-variants', type=int, default=3, help='max tile-signature variants per spatial archive cell')
+    ap.add_argument('--explorers', type=int, default=0, help='extra envs per iteration that random-walk from least-visited cells ONLY to grow the archive (never in the update)')
     a = ap.parse_args()
 
     params = yaml.safe_load(open(a.config))['params']; cfg = params['config']
@@ -252,7 +265,8 @@ def main():
                    self_restart_cells=a.max_cells, cell_tiles=True, cell_y_band=32, cell_max_variants=a.cell_variants,
                    sticky_actions=0.0, n_threads=a.n_threads, dense_infos=True, seed=a.seed))
     N = a.group * a.groups
-    env = MarioNativeVecEnv('grpo', N, **dict(ec, dense_infos=False)); env.reset(); env.enable_u8_obs()
+    NX = N + a.explorers              # explorers ride along in the same batch, outside the buffers
+    env = MarioNativeVecEnv('grpo', NX, **dict(ec, dense_infos=False, explore_pure=True)); env.reset(); env.enable_u8_obs()
     eval_env = MarioNativeVecEnv('grpo_eval', a.eval_episodes, **dict(ec, sticky_actions=0.0, n_threads=8, seed=a.seed + 1))
     eval_env.reset()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -274,8 +288,10 @@ def main():
     while time.time() - t0 < a.hours * 3600:
         it += 1
         chosen = prompts.sample(a.groups, rng)
-        states = [chosen[i // a.group][1] for i in range(N)]
-        obs = load_states(env, states)
+        states = [chosen[i // a.group][1] for i in range(N)] + prompts.frontier(a.explorers, rng)
+        obs = load_states(env, states)[:N]
+        if a.explorers:
+            env.explorer[N:] = H          # env substitutes persistent random actions for these
         alive = np.ones(N, bool); maxx = np.zeros(N); loops = np.zeros(N, bool); vics = np.zeros(N, bool)
         model.eval()
         for t in range(H):
@@ -285,20 +301,20 @@ def main():
                 act = dist.sample(); lp = dist.log_prob(act)
             obs_buf[t] = obs                          # already uint8
             act_buf[t] = act.cpu().numpy(); logp_buf[t] = lp.cpu().numpy(); mask_buf[t] = alive
-            _, r, d, inf = env.step(act_buf[t])
-            obs = env.obs_u8_stack()
+            _, r, d, inf = env.step(np.concatenate([act_buf[t], np.zeros(a.explorers, np.int64)]) if a.explorers else act_buf[t])
+            obs = env.obs_u8_stack()[:N]; r = r[:N]; d = d[:N]
             rew_buf[t] = np.where(alive, r, 0.0)
             # bookkeeping from env arrays; the env resets finished envs
             # inside step(), so their pre-reset values come from the info
             # dicts it still fills for done envs
-            maxx = np.where(alive & ~d, np.maximum(maxx, env.max_x), maxx)
+            maxx = np.where(alive & ~d, np.maximum(maxx, env.max_x[:N]), maxx)
             for i in np.nonzero(alive & d)[0]:
                 maxx[i] = max(maxx[i], inf[i]['max_x_pos'])
                 loops[i] = bool(inf[i].get('page_reset', False)); vics[i] = bool(inf[i].get('victory', False))
             alive &= ~d
             if not alive.any():
                 break
-        frames += N * H * 4
+        frames += NX * H * 4
         if a.grow_archive:
             prompts.refresh(env.archive)
         R = rew_buf.sum(0)                                        # outcome per rollout
