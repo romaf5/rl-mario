@@ -388,6 +388,12 @@ def main():
             # filter: that is how "drop from the pipe top" demos got in)
             xcell = [env.cell_of(N + j) for j in range(a.explorers)]
         alive = np.ones(N, bool); maxx = np.zeros(N); loops = np.zeros(N, bool); vics = np.zeros(N, bool)
+        # demo success is recorded at the step the target is ENTERED: the
+        # env clears ep_cells when it resets a finished env inside step(),
+        # so a post-rollout membership test scored every rollout that
+        # entered the target and then died or timed out as a failure
+        target_of = [chosen[i // a.group][1] if chosen[i // a.group][0] == 'demo' else None for i in range(N)]
+        reached = np.zeros(N, bool)
         model.eval()
         for t in range(H):
             with torch.no_grad():
@@ -400,6 +406,10 @@ def main():
             mask_buf[t] = alive & (fz < 0)             # forced steps are never trained on
             _, r, d, inf = env.step(np.concatenate([act_buf[t], np.zeros(a.explorers, np.int64)]) if a.explorers else act_buf[t])
             obs = env.obs_u8_stack()[:N]; r = r[:N]; d = d[:N]
+            ec = env.entered_cell
+            for i in range(N):
+                if target_of[i] is not None and ec[i] is not None and ec[i] == target_of[i]:
+                    reached[i] = True
             if a.explorers:
                 for j in range(a.explorers):
                     xacts[j].append(int(env.last_action[N + j]))
@@ -428,9 +438,8 @@ def main():
             if chosen[g][0] == 'demo':
                 cell = chosen[g][1]
                 # success = the rollout ENTERED the target cell (same key,
-                # incl. y-band and tile signature); an x-only test let
-                # floor rollouts "reach" the block top by standing there
-                fr = float(np.mean([cell in env.ep_cells[i] for i in range(sl.start, sl.stop)]))
+                # incl. y-band and tile signature) at some step
+                fr = float(reached[sl].mean())
                 prompts.demo_result(cell, fr)
                 if cell[2] >= 17 and cell[3] <= 3:
                     print(f'  [demo] it {it} target {cell[2]}/{cell[3]}/{cell[6]} len {len(prompts.demos.get(cell, (None, []))[1]) if cell in prompts.demos else "grad"} prefix {len(chosen[g][3])} reached {fr:.2f} maxx {maxx[sl].mean():.0f}', flush=True)
