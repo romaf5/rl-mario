@@ -58,6 +58,8 @@ class Prompts:
     """Start states: the door + archive cells, sampled by a learnability score
     (last group std of outcomes) so groups with zero variance are avoided."""
 
+    demo_share = 0.0
+
     def __init__(self, env, archive_path, door_share):
         # one door state per configured level (8-4 only, or the whole route)
         self.levels = [l for l in env.stages if l != 'FullGame']
@@ -65,6 +67,13 @@ class Prompts:
         self.door_share = door_share
         self.clear = {l: 0.0 for l in self.levels}      # EMA of eval clear rate
         self.cells, self.states = [], []
+        # demonstrations recorded from the explorers' random walks:
+        # cell -> (start state, actions that reached it). A demo prompt
+        # starts at the start state, forces all but the last `tail`
+        # actions and leaves the rest to the policy; the tail grows as the
+        # policy succeeds (Go-Explore phase 2 / the backward algorithm,
+        # from the run's OWN trajectories, no human data)
+        self.demos, self.tail = {}, {}
         arch = pickle.load(open(archive_path, 'rb')) if archive_path and os.path.exists(archive_path) else {}
         for k, e in arch.items():
             if k[0] not in self.doors:
@@ -74,6 +83,28 @@ class Prompts:
         self.score = np.ones(len(self.cells)) * 5.0     # (rescaled to the running max as scores arrive)
         self.uses = np.zeros(len(self.cells), int)
         print(f'[prompts] door + {len(self.cells)} archive cells')
+
+    def record_demo(self, cell, start, acts):
+        if cell not in self.demos or len(acts) < len(self.demos[cell][1]):
+            self.demos[cell] = (start, list(acts)); self.tail.setdefault(cell, 4)
+
+    def demo_prompt(self, rng):
+        live = [c for c in self.demos if self.tail[c] < len(self.demos[c][1])]
+        if not live:
+            return None
+        c = live[rng.randint(len(live))]; start, acts = self.demos[c]
+        return ('demo', c, start, acts[:len(acts) - self.tail[c]])
+
+    def demo_result(self, cell, frac_reached):
+        if cell not in self.demos:          # graduated by another group this iteration
+            return
+        n = len(self.demos[cell][1])
+        if frac_reached >= 0.5:
+            self.tail[cell] = min(n, self.tail[cell] + 4)     # the policy handles more of it
+        elif frac_reached == 0.0:
+            self.tail[cell] = max(2, self.tail[cell] - 1)
+        if self.tail[cell] >= n:
+            self.demos.pop(cell, None); self.tail.pop(cell, None)   # graduated
 
     def frontier(self, k, rng):
         """k least-visited cells (Go-Explore's exploration rule) for the
@@ -103,6 +134,10 @@ class Prompts:
         lv = [l for l in self.levels if l in by_level]
         wl = np.array([0.15 + (1.0 - self.clear[l]) for l in lv]); wl = wl / wl.sum()
         for _ in range(k - n_door):
+            if self.demos and rng.random_sample() < self.demo_share:
+                dp = self.demo_prompt(rng)
+                if dp is not None:
+                    out.append(dp); continue
             l = lv[rng.choice(len(lv), p=wl)]
             ids = by_level[l]
             w = self.score[ids] + 0.5; w = w / w.sum()
@@ -249,6 +284,7 @@ def main():
     ap.add_argument('--gamma', type=float, default=0.99)
     ap.add_argument('--cell-variants', type=int, default=3, help='max tile-signature variants per spatial archive cell')
     ap.add_argument('--explorers', type=int, default=0, help='extra envs per iteration that random-walk from least-visited cells ONLY to grow the archive (never in the update)')
+    ap.add_argument('--demo-share', type=float, default=0.0, help='fraction of cell groups started from an explorer demo with a forced prefix (backward chaining); needs --explorers')
     a = ap.parse_args()
 
     params = yaml.safe_load(open(a.config))['params']; cfg = params['config']
@@ -272,7 +308,7 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = build_model(params, cfg, env.observation_space.shape, a.init).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=a.lr)
-    prompts = Prompts(env, a.archive, a.door_share)
+    prompts = Prompts(env, a.archive, a.door_share); prompts.demo_share = a.demo_share
     rng = np.random.RandomState(a.seed)
 
     run_dir = os.path.join('runs', f'{a.run_name}_{time.strftime("%d-%H-%M-%S")}')
@@ -288,10 +324,19 @@ def main():
     while time.time() - t0 < a.hours * 3600:
         it += 1
         chosen = prompts.sample(a.groups, rng)
-        states = [chosen[i // a.group][1] for i in range(N)] + prompts.frontier(a.explorers, rng)
+        # demo prompts: ('demo', cell, start_state, forced_prefix)
+        state_of = lambda ch: ch[2] if ch[0] == 'demo' else ch[1]
+        xstates = prompts.frontier(a.explorers, rng)
+        states = [state_of(chosen[i // a.group]) for i in range(N)] + xstates
         obs = load_states(env, states)[:N]
+        forced = np.full((H, N), -1, np.int64)
+        for g in range(a.groups):
+            if chosen[g][0] == 'demo':
+                pre = chosen[g][3][:H]
+                forced[:len(pre), g * a.group:(g + 1) * a.group] = np.array(pre)[:, None]
         if a.explorers:
             env.explorer[N:] = H          # env substitutes persistent random actions for these
+            xacts = [[] for _ in range(a.explorers)]
         alive = np.ones(N, bool); maxx = np.zeros(N); loops = np.zeros(N, bool); vics = np.zeros(N, bool)
         model.eval()
         for t in range(H):
@@ -300,9 +345,17 @@ def main():
                 dist = torch.distributions.Categorical(logits=lg)
                 act = dist.sample(); lp = dist.log_prob(act)
             obs_buf[t] = obs                          # already uint8
-            act_buf[t] = act.cpu().numpy(); logp_buf[t] = lp.cpu().numpy(); mask_buf[t] = alive
+            act_np = act.cpu().numpy(); fz = forced[t]
+            act_buf[t] = np.where(fz >= 0, fz, act_np); logp_buf[t] = lp.cpu().numpy()
+            mask_buf[t] = alive & (fz < 0)             # forced steps are never trained on
             _, r, d, inf = env.step(np.concatenate([act_buf[t], np.zeros(a.explorers, np.int64)]) if a.explorers else act_buf[t])
             obs = env.obs_u8_stack()[:N]; r = r[:N]; d = d[:N]
+            if a.explorers:
+                for j in range(a.explorers):
+                    xacts[j].append(int(env.last_action[N + j]))
+                    c = env.entered_cell[N + j]
+                    if c is not None and len(xacts[j]) <= 96:
+                        prompts.record_demo(c, xstates[j], xacts[j])
             rew_buf[t] = np.where(alive, r, 0.0)
             # bookkeeping from env arrays; the env resets finished envs
             # inside step(), so their pre-reset values come from the info
@@ -322,7 +375,11 @@ def main():
         for g in range(a.groups):
             sl = slice(g * a.group, (g + 1) * a.group)
             m, s = R[sl].mean(), R[sl].std()
-            prompts.update(chosen[g][0], float(s))
+            if chosen[g][0] == 'demo':
+                cell = chosen[g][1]
+                prompts.demo_result(cell, float((maxx[sl] >= cell[2] * 128 + 16).mean()))
+            else:
+                prompts.update(chosen[g][0], float(s))
             if s > 1e-6:
                 n_live_groups += 1
                 adv[sl] = (R[sl] - m) / (1.0 if a.no_std else s + 1e-6)
@@ -382,9 +439,10 @@ def main():
         writer.add_scalar('mario/victory_rate', float(vics.mean()), it)
         writer.add_scalar('mario/cell_max_x', float(maxx[~door].mean()) if (~door).any() else 0.0, it)
         writer.add_scalar('grpo/prompt_cells', len(prompts.cells), it)
+        writer.add_scalar('grpo/demos', len(prompts.demos), it)
         if it % 5 == 0:
             print(f'it {it} {el/60:5.1f}min fps {frames/el:5.0f} R {R.mean():7.1f} door_x {maxx[door].mean() if door.any() else 0:6.0f} '
-                  f'live_groups {n_live_groups}/{a.groups} loops {loops.mean():.2f} ent {stats["ent"]/n_upd:.3f} kl {stats["kl"]/n_upd:.4f} cells {len(prompts.cells)}', flush=True)
+                  f'live_groups {n_live_groups}/{a.groups} loops {loops.mean():.2f} ent {stats["ent"]/n_upd:.3f} kl {stats["kl"]/n_upd:.4f} cells {len(prompts.cells)} demos {len(prompts.demos)}', flush=True)
         if a.clip_every and it % a.clip_every == 0 and not (clip_thread and clip_thread.is_alive()):
             m_cpu = copy.deepcopy(model).cpu().eval()
             lvl = prompts.levels[rng.randint(len(prompts.levels))]

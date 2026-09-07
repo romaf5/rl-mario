@@ -256,6 +256,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.after_reset = z(bool)
         self.forced_timeup = z()      # eval: cutoffs turned into time-ups
         self.hold_on_done = False     # video: never reset after done
+        self.entered_cell = [None] * n  # cell first entered this step (grpo demos)
         self.prev_in_play = np.ones(n, dtype=bool)
         self.pending_life = z(bool); self.pending_life_at_resume = z(bool)
         self.start_stage = [''] * n
@@ -694,6 +695,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.prev_score = self._score()
 
         # ---- self-restart archiving ----
+        self.entered_cell = [None] * n
         if self.sr_prob > 0:
             fstate = self._field(0x1D)
             # grounded on land; swimming counts as controlled in water
@@ -719,6 +721,7 @@ class MarioNativeVecEnv(IVecEnv):
                 if cell in self.ep_cells[i]:
                     continue
                 self.ep_cells[i].add(cell)
+                self.entered_cell[i] = cell
                 if cell not in self.archive and self.cell_max_variants > 0 and \
                         sum(1 for c in self.archive if c[:6] == cell[:6]) >= self.cell_max_variants:
                     continue        # yet another tile variant of a known spot
