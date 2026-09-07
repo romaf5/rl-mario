@@ -114,6 +114,26 @@ class Prompts:
             # top -> DOWN) used to sit dead at tail 4 and never graduate
             self.demos[cell] = (start, list(acts), start_cell); self.tail[cell] = min(self.tail.get(cell, 4), 4, len(acts) - 1)
 
+    def load_dump(self, path):
+        """Restore demos, graduated links, tails, histories and prompt
+        scores from a prompts.pkl of an earlier run (restarts used to
+        throw the whole demo pool away)."""
+        z = pickle.load(open(path, 'rb'))
+        idx = {c: i for i, c in enumerate(self.cells)}; zi = {c: i for i, c in enumerate(z['cells'])}
+        n_sc = 0
+        for c, i in idx.items():
+            if c in zi:
+                self.score[i] = float(z['score'][zi[c]]); self.uses[i] = int(z['uses'][zi[c]]); n_sc += 1
+        for c, v in z.get('demos', {}).items():
+            self.demos[c] = (v[2], list(v[1]), v[3] if len(v) > 3 else None)
+        self.tail = dict(z.get('tail', {})); self.hist = dict(z.get('hist', {}))
+        for c, v in z.get('grad', {}).items():
+            self.grad[c] = (v[2], list(v[1]), v[3] if len(v) > 3 else None)
+        self.graduated = len(self.grad)
+        for c in list(self.demos):
+            self.tail[c] = min(self.tail.get(c, 4), 4, len(self.demos[c][1]) - 1)
+        print(f'[prompts] restored {len(self.demos)} demos, {len(self.grad)} graduated, scores of {n_sc} cells from {path}', flush=True)
+
     def boost(self, cell):
         """A cell whose successor just became reachable is where outcomes
         now vary: give it the best current learnability score so free
@@ -139,7 +159,7 @@ class Prompts:
         if cell in self.grad:               # re-check of a graduated demo
             if frac_reached < 0.5:
                 start, acts, sc = self.grad.pop(cell)
-                self.demos[cell] = (start, acts, sc); self.tail[cell] = max(2, len(acts) - 4)
+                self.demos[cell] = (start, acts, sc); self.tail[cell] = max(1, len(acts) - 4)
                 self.graduated = len(self.grad)
             return
         if cell not in self.demos:          # graduated by another group this iteration
@@ -148,7 +168,7 @@ class Prompts:
         if frac_reached >= 0.5:
             self.tail[cell] = min(n, self.tail[cell] + 4)     # the policy handles more of it
         elif frac_reached == 0.0:
-            self.tail[cell] = max(2, self.tail[cell] - 1)
+            self.tail[cell] = max(1, self.tail[cell] - 1)      # down to 'finish the last action'
         if self.tail[cell] >= n:
             self.grad[cell] = self.demos.pop(cell); self.tail.pop(cell, None)   # graduated
             self.graduated = len(self.grad)
@@ -366,6 +386,7 @@ def main():
     ap.add_argument('--gamma', type=float, default=0.99)
     ap.add_argument('--cell-variants', type=int, default=3, help='max tile-signature variants per spatial archive cell')
     ap.add_argument('--explorers', type=int, default=0, help='extra envs per iteration that random-walk from least-visited cells ONLY to grow the archive (never in the update)')
+    ap.add_argument('--init-prompts', default='', help='prompts.pkl of an earlier run: restore demos, graduated links, tails and prompt scores')
     ap.add_argument('--demo-share', type=float, default=0.0, help='fraction of cell groups started from an explorer demo with a forced prefix (backward chaining); needs --explorers')
     a = ap.parse_args()
 
@@ -391,6 +412,8 @@ def main():
     model = build_model(params, cfg, env.observation_space.shape, a.init).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=a.lr)
     prompts = Prompts(env, a.archive, a.door_share); prompts.demo_share = a.demo_share
+    if a.init_prompts:
+        prompts.load_dump(a.init_prompts)
     rng = np.random.RandomState(a.seed)
 
     run_dir = os.path.join('runs', f'{a.run_name}_{time.strftime("%d-%H-%M-%S")}')
@@ -568,7 +591,7 @@ def main():
             # success history, learnability scores)
             with open(os.path.join(run_dir, 'nn', 'prompts.pkl'), 'wb') as f:
                 pickle.dump({'cells': prompts.cells, 'score': prompts.score, 'uses': prompts.uses,
-                             'demos': {c: (len(v[1]), v[1], v[0]) for c, v in prompts.demos.items()},   # (len, actions, start state)
+                             'demos': {c: (len(v[1]), v[1], v[0], v[2]) for c, v in prompts.demos.items()},   # (len, actions, start state, start cell)
                              'tail': prompts.tail, 'hist': prompts.hist, 'graduated': prompts.graduated,
                              'grad': {c: (len(v[1]), v[1], v[0], v[2]) for c, v in prompts.grad.items()}}, f)
             ck = {'model': model.state_dict(), 'iter': it, 'frames': frames}
