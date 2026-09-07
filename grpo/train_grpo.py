@@ -92,6 +92,12 @@ class Prompts:
         # ones because the shortest demo per cell wins)
         if cell == start_cell or len(acts) < 3:
             return
+        # only demos in the direction of progress: a later x-bin, or higher
+        # up within the same bin. Every block-top demo used to be a DROP
+        # from the pipe top (explorers start there too, and falling is the
+        # shortest way in), so the trainer taught descending, not climbing.
+        if start_cell is not None and not (cell[2] > start_cell[2] or (cell[2] == start_cell[2] and cell[3] < start_cell[3])):
+            return
         if cell not in self.demos or len(acts) < len(self.demos[cell][1]):
             self.demos[cell] = (start, list(acts)); self.tail.setdefault(cell, 4)
 
