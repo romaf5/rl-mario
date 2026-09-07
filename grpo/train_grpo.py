@@ -501,7 +501,7 @@ def main():
                     free = demo_env & torch.from_numpy(fz < 0).to(device)
                     flip = free & (torch.rand(N, device=device) < a.demo_eps)
                     act = torch.where(flip, torch.randint(0, 12, (N,), device=device), act)
-                lp = dist.log_prob(act)
+                lp = dist.log_prob(act).clamp_min(-20.0)   # an eps-mixed action can have p=0 in float32: keep log-probs finite
             obs_buf[t] = obs                          # already uint8
             act_np = act.cpu().numpy()
             act_buf[t] = np.where(fz >= 0, fz, act_np); logp_buf[t] = lp.cpu().numpy()
@@ -593,8 +593,11 @@ def main():
                 loss = pg - a.entropy * ent
                 if a.bc > 0 and len(bci) > 0:
                     bidx = bci[torch.randint(0, len(bci), (min(len(bci), a.minibatch // 4),), device=device)]
-                    nll = -torch.distributions.Categorical(logits=logits_of(model, o[bidx].float().div_(255.0))).log_prob(ac[bidx]).mean()
+                    lps = torch.log_softmax(logits_of(model, o[bidx].float().div_(255.0)), -1).gather(1, ac[bidx][:, None]).squeeze(1)
+                    nll = -lps.clamp_min(-20.0).mean()          # p=0 in float32 gave -inf -> NaN weights
                     loss = loss + a.bc * nll; stats['bc'] += nll.item()
+                if not torch.isfinite(loss):
+                    print(f'  [update] non-finite loss at it {it} (pg {pg.item():.3f}); minibatch skipped', flush=True); continue
                 opt.zero_grad(); loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5); opt.step()
                 with torch.no_grad():
