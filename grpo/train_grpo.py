@@ -423,7 +423,10 @@ def main():
                 # success = the rollout ENTERED the target cell (same key,
                 # incl. y-band and tile signature); an x-only test let
                 # floor rollouts "reach" the block top by standing there
-                prompts.demo_result(cell, float(np.mean([cell in env.ep_cells[i] for i in range(sl.start, sl.stop)])))
+                fr = float(np.mean([cell in env.ep_cells[i] for i in range(sl.start, sl.stop)]))
+                prompts.demo_result(cell, fr)
+                if cell[2] >= 17 and cell[3] <= 3:
+                    print(f'  [demo] it {it} target {cell[2]}/{cell[3]}/{cell[6]} len {len(prompts.demos.get(cell, (None, []))[1]) if cell in prompts.demos else "grad"} prefix {len(chosen[g][3])} reached {fr:.2f} maxx {maxx[sl].mean():.0f}', flush=True)
             else:
                 prompts.update(chosen[g][0], float(s))
             if s > 1e-6:
@@ -513,7 +516,7 @@ def main():
             # success history, learnability scores)
             with open(os.path.join(run_dir, 'nn', 'prompts.pkl'), 'wb') as f:
                 pickle.dump({'cells': prompts.cells, 'score': prompts.score, 'uses': prompts.uses,
-                             'demos': {c: (len(v[1]), v[1]) for c, v in prompts.demos.items()},
+                             'demos': {c: (len(v[1]), v[1], v[0]) for c, v in prompts.demos.items()},   # (len, actions, start state)
                              'tail': prompts.tail, 'hist': prompts.hist, 'graduated': getattr(prompts, 'graduated', 0)}, f)
             ck = {'model': model.state_dict(), 'iter': it, 'frames': frames}
             torch.save(ck, os.path.join(run_dir, 'nn', 'grpo_last.pth'))
