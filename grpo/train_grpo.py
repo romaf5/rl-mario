@@ -83,10 +83,18 @@ class Prompts:
         for j in range(n_door):
             lvl = self.levels[rng.choice(len(self.levels), p=w)]
             out.append(('door:' + lvl, self.doors[lvl]))
-        w = self.score + 0.5
-        w = w / w.sum()
+        # level first (mastered levels fade), then a cell of that level by
+        # learnability: a level with many cells must not dominate the pool
+        by_level = {}
+        for i, c in enumerate(self.cells):
+            by_level.setdefault(c[0], []).append(i)
+        lv = [l for l in self.levels if l in by_level]
+        wl = np.array([0.15 + (1.0 - self.clear[l]) for l in lv]); wl = wl / wl.sum()
         for _ in range(k - n_door):
-            i = rng.choice(len(self.cells), p=w)
+            l = lv[rng.choice(len(lv), p=wl)]
+            ids = by_level[l]
+            w = self.score[ids] + 0.5; w = w / w.sum()
+            i = ids[rng.choice(len(ids), p=w)]
             out.append((i, self.states[i][rng.randint(len(self.states[i]))]))
         return out
 
@@ -220,6 +228,9 @@ def main():
     ap.add_argument('--max-cells', type=int, default=1024)
     ap.add_argument('--clip-every', type=int, default=100, help='iterations between gameplay clips (background thread, CPU); 0 = off')
     ap.add_argument('--fullgame-every', type=int, default=100, help='iterations between sequential full-game evals (3 lives from the first level); 0 = off')
+    ap.add_argument('--explore-temp', type=float, default=1.0, help='softmax temperature for the exploration groups (1 = off)')
+    ap.add_argument('--explore-groups', type=int, default=0, help='number of groups per iteration sampled at --explore-temp')
+    ap.add_argument('--cell-variants', type=int, default=3, help='max tile-signature variants per spatial archive cell')
     a = ap.parse_args()
 
     params = yaml.safe_load(open(a.config))['params']; cfg = params['config']
@@ -233,7 +244,7 @@ def main():
     # (dead rollouts are masked, so its resets are never trained on).
     ec.update(dict(self_restart_prob=1e-6 if a.grow_archive else 0.0, explore_eps=0.0,
                    explore_episode_prob=0.0, archive_path=a.archive if a.grow_archive else None,
-                   self_restart_cells=a.max_cells, cell_tiles=True, cell_y_band=32,
+                   self_restart_cells=a.max_cells, cell_tiles=True, cell_y_band=32, cell_max_variants=a.cell_variants,
                    n_threads=a.n_threads, dense_infos=True, seed=a.seed))
     N = a.group * a.groups
     env = MarioNativeVecEnv('grpo', N, **dict(ec, dense_infos=False)); env.reset(); env.enable_u8_obs()
@@ -262,10 +273,16 @@ def main():
         obs = load_states(env, states)
         alive = np.ones(N, bool); maxx = np.zeros(N); loops = np.zeros(N, bool); vics = np.zeros(N, bool)
         model.eval()
+        # exploration groups sample from a tempered policy; their stored
+        # log-probs are the tempered ones, so the update's ratio stays an
+        # honest importance weight (the clip bounds the off-policyness)
+        temp = torch.ones(N, 1, device=device)
+        if a.explore_groups > 0 and a.explore_temp != 1.0:
+            temp[:a.explore_groups * a.group] = a.explore_temp
         for t in range(H):
             with torch.no_grad():
                 lg = logits_of(model, torch.from_numpy(obs).to(device).float().div_(255.0))
-                dist = torch.distributions.Categorical(logits=lg)
+                dist = torch.distributions.Categorical(logits=lg / temp)
                 act = dist.sample(); lp = dist.log_prob(act)
             obs_buf[t] = obs                          # already uint8
             act_buf[t] = act.cpu().numpy(); logp_buf[t] = lp.cpu().numpy(); mask_buf[t] = alive

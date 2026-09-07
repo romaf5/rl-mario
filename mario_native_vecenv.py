@@ -141,7 +141,7 @@ class MarioNativeVecEnv(IVecEnv):
                  reward=None, play_mode=False,
                  route_levels=None, cell_tiles=False,
                  frontier_predecessors=0, cell_y_band=64, explore_pure=False,
-                 credit_vertical=False, **unknown):
+                 credit_vertical=False, cell_max_variants=0, **unknown):
         assert action_type == 'complex'
         gone = [k for k in unknown if k in self.REMOVED_KWARGS]
         if gone:
@@ -212,6 +212,11 @@ class MarioNativeVecEnv(IVecEnv):
         self.explore_pure = bool(explore_pure)
         # transitive credit also for climbing / revealing within one x-bin
         self.credit_vertical = bool(credit_vertical)
+        # cap on tile-signature variants per spatial cell (0 = unlimited):
+        # 3 covers a hidden block (hidden / bumped / revealed); without a cap
+        # every broken-brick pattern in an underground level is a new cell
+        # (1-2 grew 666 cells and swallowed the prompt pool)
+        self.cell_max_variants = int(cell_max_variants)
         self.exp_persist = np.ones(num_actors, dtype=np.int64)
         self.explorer = np.zeros(num_actors, dtype=np.int32)
         self.exp_action = np.zeros(num_actors, dtype=np.int64)
@@ -714,6 +719,9 @@ class MarioNativeVecEnv(IVecEnv):
                 if cell in self.ep_cells[i]:
                     continue
                 self.ep_cells[i].add(cell)
+                if cell not in self.archive and self.cell_max_variants > 0 and \
+                        sum(1 for c in self.archive if c[:6] == cell[:6]) >= self.cell_max_variants:
+                    continue        # yet another tile variant of a known spot
                 if cell not in self.archive:
                     if len(self.archive) >= self.sr_cells:
                         # evict the OLDEST cell no episode is practising
