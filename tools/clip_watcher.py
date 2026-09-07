@@ -20,7 +20,7 @@ def record(model, cfg, level, episodes, max_steps, seed):
     ec.update(random_stages=[level], sticky_actions=0, explore_eps=0, self_restart_prob=0, reset_noops=0, episode_life=False)
     torch.manual_seed(seed); best = None
     for ep in range(episodes):
-        env = NativeEvalEnv(**ec); v = env.v; obs = env.reset()
+        env = NativeEvalEnv(**ec); v = env.v; v._raw_steps = True; obs = env.reset()     # hack-free: transitions + ending visible
         v.lib.benv_save(v.env, 0, v._sbuf); start = bytes(v._sbuf.raw)
         frames, acts, total, info = [], [], 0.0, {}
         life_r, prev_life, per_frame_r = 0.0, None, []
@@ -33,7 +33,10 @@ def record(model, cfg, level, episodes, max_steps, seed):
                 life_r = 0.0
             prev_life = info.get('life'); life_r += r
             per_frame_r.extend([life_r] * len(env.frames4))
-            if done: break
+            if done:
+                for _ in range(120):           # ending / game-over screen
+                    obs, r, _d, _i = env.step(0); frames.extend(env.frames4); per_frame_r.extend([life_r] * len(env.frames4))
+                break
         env.close()
         mx = info.get('max_x_pos', 0)
         if best is None or mx > best[0]:
@@ -52,7 +55,7 @@ def publish(run_dir, step, frames, acts, start, mx, total, info, level, per_fram
     vdir = os.path.join(run_dir, 'videos'); os.makedirs(vdir, exist_ok=True)
     base = os.path.join(vdir, 'clip_%06d_x%d' % (step, mx))
     imageio.mimsave(base + '.mp4', frames, fps=60, macro_block_size=None)
-    np.savez_compressed(base + '.npz', state=np.frombuffer(start, dtype=np.uint8), actions=np.array(acts, dtype=np.int16), level=level, raw=0, step=step)
+    np.savez_compressed(base + '.npz', state=np.frombuffer(start, dtype=np.uint8), actions=np.array(acts, dtype=np.int16), level=level, raw=1, step=step)
     # all 60 fps frames, like the observer's clips: _gif_bytes picks every 2nd
     # (30 fps at 33 ms = real time) or every 4th for long clips (15 fps at
     # 67 ms = real time). Feeding it pre-thinned frames played 2-4x too fast.

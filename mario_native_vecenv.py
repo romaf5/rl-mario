@@ -526,12 +526,15 @@ class MarioNativeVecEnv(IVecEnv):
             acts = np.where(rep, self.last_action, acts)
         self.last_action[:] = acts
         self.actions_buf[:] = _ACTION_BYTES[acts]
-        if self._raw_steps and n == 1:
-            # pure frames, no hacks: a reference emulator fed the same
-            # actions stays in bitwise lockstep (video replay)
-            self.lib.benv_step_raw(self.env, 0, int(self.actions_buf[0]),
-                                   self.obs_u8.ctypes.data,
-                                   self.ram.ctypes.data)
+        if self._raw_steps:
+            # pure frames, no hacks (pipe travel, dying, inter-life screens
+            # and the ending all play out): a reference emulator fed the
+            # same actions stays in bitwise lockstep. One env per call in
+            # the core; loop for batches (win searches that must replay).
+            for i in range(n):      # the core offsets obs/ram by i itself
+                self.lib.benv_step_raw(self.env, int(i), int(self.actions_buf[i]),
+                                       self.obs_u8.ctypes.data,
+                                       self.ram.ctypes.data)
         elif self._rgb4 is not None and n == 1:
             # eval recording: capture all 4 emulated frames (no aliasing)
             self.lib.benv_step_rgb4(self.env, 0, int(self.actions_buf[0]),

@@ -30,7 +30,7 @@ def main():
     ec.update(random_stages=[a.level], sticky_actions=0, explore_eps=0, self_restart_prob=0, n_threads=8, dense_infos=True)
     torch.manual_seed(a.seed); win = None
     for rnd in range(a.rounds):
-        env = MarioNativeVecEnv('fw', a.batch, **dict(ec, episode_life=True, seed=a.seed + rnd)); obs = env.reset()
+        env = MarioNativeVecEnv('fw', a.batch, **dict(ec, episode_life=True, seed=a.seed + rnd)); env._raw_steps = True; obs = env.reset()   # hack-free search: the win replays frame-exactly
         starts = []
         for i in range(a.batch):
             env.lib.benv_save(env.env, i, env._sbuf); starts.append(bytes(env._sbuf.raw))
@@ -53,7 +53,7 @@ def main():
         sys.exit('no winning episode found')
     # replay the winning sequence in a single env for the frames (same door start, deterministic)
     ec_r = dict(ec, episode_life=False, reset_noops=0); ec_r.pop('dense_infos', None)
-    env = NativeEvalEnv(**ec_r); v = env.v; env.reset()
+    env = NativeEvalEnv(**ec_r); v = env.v; v._raw_steps = True; env.reset()
     start = win[2]
     v.lib.benv_load(v.env, 0, start); v._fetch_obs(0); v._post_reset_init([0], v.ram)
     v._ring[0] = (v.obs_u8[0].astype(np.float32) / 255.0)[..., None]; obs = v._obs()[0]
@@ -62,7 +62,10 @@ def main():
         obs, r, done, info = env.step(act); total += r; frames.extend(env.frames4)
         if prev_life is not None and info.get('life') != prev_life: life_r = 0.0
         prev_life = info.get('life'); life_r += r; pfr.extend([life_r] * len(env.frames4))
-        if done: break
+        if done:
+            for _ in range(150):               # the ending: bridge, Bowser falls, the walk to the princess
+                obs, r, _d, _i = env.step(0); frames.extend(env.frames4); pfr.extend([life_r] * len(env.frames4))
+            break
     env.close()
     run_dir = a.run or os.path.dirname(os.path.dirname(ck))
     path, n = publish(run_dir, step, frames, win[1], start, info.get('max_x_pos', 0), total, info, a.level, pfr)

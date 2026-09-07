@@ -34,7 +34,7 @@ def main():
     ap.add_argument('--level', default='8-4'); ap.add_argument('--out', default=None)
     ap.add_argument('--episodes', type=int, default=1, help='render the best of N sampled episodes')
     ap.add_argument('--greedy', action='store_true'); ap.add_argument('--max-steps', type=int, default=3000)
-    ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--seed', type=int, default=0); ap.add_argument('--outro', type=int, default=120, help='steps to keep recording after the episode ends (ending / game over)')
     a = ap.parse_args()
     ck = glob.glob(a.ckpt)[0] if '*' in a.ckpt else a.ckpt
     model, cfg = build(a.config, ck)
@@ -44,7 +44,7 @@ def main():
     torch.manual_seed(a.seed)
     best = None
     for ep in range(a.episodes):
-        env = NativeEvalEnv(**ec); v = env.v
+        env = NativeEvalEnv(**ec); v = env.v; v._raw_steps = True      # hack-free: transitions and the ending are shown
         obs = env.reset(); v.lib.benv_save(v.env, 0, v._sbuf); start = bytes(v._sbuf.raw)
         frames, acts, total, info = [], [], 0.0, {}
         for step in range(a.max_steps):
@@ -52,7 +52,10 @@ def main():
                 logits = model({'obs': torch.from_numpy(obs[None]).float(), 'is_train': False})['logits']
             act = int(logits.argmax()) if a.greedy else int(torch.distributions.Categorical(logits=logits).sample())
             obs, r, done, info = env.step(act); total += r; acts.append(act); frames.extend(env.frames4)
-            if done: break
+            if done:
+                for _ in range(a.outro):      # let the ending / game-over screen play
+                    obs, r, _d, info2 = env.step(0); frames.extend(env.frames4)
+                break
         cause = ('victory' if info.get('victory') else 'game over' if info.get('life') == 255 else 'loop' if info.get('loop_timeout')
                  else 'step limit' if step >= a.max_steps - 1
                  else 'timeout' if info.get('timeout') else 'running')
@@ -67,7 +70,7 @@ def main():
     import imageio
     imageio.mimsave(out, frames, fps=60, macro_block_size=None)
     np.savez_compressed(out[:-4] + '.npz', state=np.frombuffer(start, dtype=np.uint8), actions=np.array(acts, dtype=np.int16),
-                        level=a.level, raw=0, ckpt=ck)
+                        level=a.level, raw=1, ckpt=ck)
     print('wrote %s (%d frames, %.0fs at 60fps) + %s | max x %d, %s, reward %.0f' % (out, len(frames), len(frames) / 60, out[:-4] + '.npz', max_x, cause, total))
 
 
