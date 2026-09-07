@@ -406,6 +406,7 @@ def main():
     ap.add_argument('--cell-variants', type=int, default=3, help='max tile-signature variants per spatial archive cell')
     ap.add_argument('--explorers', type=int, default=0, help='extra envs per iteration that random-walk from least-visited cells ONLY to grow the archive (never in the update)')
     ap.add_argument('--demo-eps', type=float, default=0.2, help='uniform-random action share in the free steps of demo groups (the collapsed policy puts ~0 on the actions a link needs)')
+    ap.add_argument('--bc', type=float, default=0.1, help='self-imitation weight on the forced prefix steps of demo groups (negative log-likelihood of the demo action)')
     ap.add_argument('--init-prompts', default='', help='prompts.pkl of an earlier run: restore demos, graduated links, tails and prompt scores')
     ap.add_argument('--demo-share', type=float, default=0.0, help='fraction of cell groups started from an explorer demo with a forced prefix (backward chaining); needs --explorers')
     a = ap.parse_args()
@@ -445,6 +446,7 @@ def main():
     clip_thread = None
     obs_buf = np.zeros((H, N, *env.observation_space.shape), np.uint8)
     act_buf = np.zeros((H, N), np.int64); logp_buf = np.zeros((H, N), np.float32)
+    bc_buf = np.zeros((H, N), bool)       # forced demo steps: self-imitation targets
     mask_buf = np.zeros((H, N), np.float32); rew_buf = np.zeros((H, N), np.float32)
     while time.time() - t0 < a.hours * 3600:
         it += 1
@@ -494,7 +496,8 @@ def main():
             obs_buf[t] = obs                          # already uint8
             act_np = act.cpu().numpy()
             act_buf[t] = np.where(fz >= 0, fz, act_np); logp_buf[t] = lp.cpu().numpy()
-            mask_buf[t] = alive & (fz < 0)             # forced steps are never trained on
+            mask_buf[t] = alive & (fz < 0)             # forced steps carry no policy gradient ...
+            bc_buf[t] = alive & (fz >= 0)              # ... but are imitated (the run's own explorer demos)
             _, r, d, inf = env.step(np.concatenate([act_buf[t], np.zeros(a.explorers, np.int64)]) if a.explorers else act_buf[t])
             obs = env.obs_u8_stack()[:N]; r = r[:N]; d = d[:N]
             ec = env.entered_cell
@@ -562,7 +565,12 @@ def main():
         mk = torch.from_numpy(mask_buf.reshape(T)).to(device)
         ad = torch.from_numpy((adv_t if a.rtg else np.repeat(adv[None], H, 0)).reshape(T)).to(device)
         valid = torch.nonzero(mk > 0).squeeze(1)
-        stats = dict(loss=0.0, kl=0.0, ent=0.0, clipfrac=0.0, n=0)
+        # self-imitation on the forced prefix steps of demo groups: the
+        # prefix actions are exactly the ones the RL tail will need next
+        # when the tail grows, and a clipped policy gradient cannot lift an
+        # action from ~1e-4 (one lucky hit per group moved it x1.7)
+        bci = torch.nonzero(torch.from_numpy(bc_buf.reshape(T)).to(device)).squeeze(1)
+        stats = dict(loss=0.0, kl=0.0, ent=0.0, clipfrac=0.0, bc=0.0, n=0)
         for ep in range(a.epochs):
             perm = valid[torch.randperm(len(valid), device=device)]
             for s0 in range(0, len(perm), a.minibatch):
@@ -574,6 +582,10 @@ def main():
                 pg = -torch.min(ratio * A, torch.clamp(ratio, 1 - a.clip, 1 + a.clip) * A).mean()
                 ent = dist.entropy().mean()
                 loss = pg - a.entropy * ent
+                if a.bc > 0 and len(bci) > 0:
+                    bidx = bci[torch.randint(0, len(bci), (min(len(bci), a.minibatch // 4),), device=device)]
+                    nll = -torch.distributions.Categorical(logits=logits_of(model, o[bidx].float().div_(255.0))).log_prob(ac[bidx]).mean()
+                    loss = loss + a.bc * nll; stats['bc'] += nll.item()
                 opt.zero_grad(); loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5); opt.step()
                 with torch.no_grad():
@@ -588,6 +600,7 @@ def main():
         writer.add_scalar('grpo/entropy', stats['ent'] / n_upd, it)
         writer.add_scalar('grpo/kl', stats['kl'] / n_upd, it)
         writer.add_scalar('grpo/clipfrac', stats['clipfrac'] / n_upd, it)
+        writer.add_scalar('grpo/bc_nll', stats['bc'] / n_upd, it)
         writer.add_scalar('grpo/frames', frames, it)
         if door.any():
             writer.add_scalar('mario/door_mean_x', float(maxx[door].mean()), it)
@@ -601,7 +614,7 @@ def main():
         writer.add_scalar('grpo/demos_graduated', getattr(prompts, 'graduated', 0), it)
         if it % 5 == 0:
             print(f'it {it} {el/60:5.1f}min fps {frames/el:5.0f} R {R.mean():7.1f} door_x {maxx[door].mean() if door.any() else 0:6.0f} '
-                  f'live_groups {n_live_groups}/{a.groups} loops {loops.mean():.2f} ent {stats["ent"]/n_upd:.3f} kl {stats["kl"]/n_upd:.4f} cells {len(prompts.cells)} demos {len(prompts.demos)} grad {getattr(prompts, "graduated", 0)}', flush=True)
+                  f'live_groups {n_live_groups}/{a.groups} loops {loops.mean():.2f} ent {stats["ent"]/n_upd:.3f} kl {stats["kl"]/n_upd:.4f} bc {stats["bc"]/n_upd:.2f} cells {len(prompts.cells)} demos {len(prompts.demos)} grad {getattr(prompts, "graduated", 0)}', flush=True)
         if a.clip_every and it % a.clip_every == 0 and not (clip_thread and clip_thread.is_alive()):
             m_cpu = copy.deepcopy(model).cpu().eval()
             lvl = prompts.levels[rng.randint(len(prompts.levels))]
