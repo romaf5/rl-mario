@@ -476,6 +476,10 @@ def main():
         target_of = [chosen[i // a.group][1] if chosen[i // a.group][0] == 'demo' else None for i in range(N)]
         reached = np.zeros(N, bool)
         demo_env = torch.from_numpy(np.array([c is not None for c in target_of])).to(device)
+        # imitate only the last 2 forced actions before the tail: those are
+        # what the tail needs next; the earlier prefix is random-walk junk
+        # (imitating it all cut door progress in half within 10 iterations)
+        plen = np.array([len(chosen[i // a.group][3]) if chosen[i // a.group][0] == 'demo' else 0 for i in range(N)])
         model.eval()
         for t in range(H):
             with torch.no_grad():
@@ -497,7 +501,7 @@ def main():
             act_np = act.cpu().numpy()
             act_buf[t] = np.where(fz >= 0, fz, act_np); logp_buf[t] = lp.cpu().numpy()
             mask_buf[t] = alive & (fz < 0)             # forced steps carry no policy gradient ...
-            bc_buf[t] = alive & (fz >= 0)              # ... but are imitated (the run's own explorer demos)
+            bc_buf[t] = alive & (fz >= 0) & (t >= plen - 2)   # ... but the last 2 are imitated (the run's own explorer demos)
             _, r, d, inf = env.step(np.concatenate([act_buf[t], np.zeros(a.explorers, np.int64)]) if a.explorers else act_buf[t])
             obs = env.obs_u8_stack()[:N]; r = r[:N]; d = d[:N]
             ec = env.entered_cell
