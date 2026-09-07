@@ -89,6 +89,22 @@ class Prompts:
         # learned once is worthless if it is gone by the time the next
         # link is trained)
         self.grad = {}; self.graduated = 0
+        self.door_x = {}                  # per level: EMA of the door groups' max x (the from-the-door frontier)
+
+    def note_door(self, level, x):
+        self.door_x[level] = x if level not in self.door_x else 0.8 * self.door_x[level] + 0.2 * x
+
+    def _demo_w(self, c):
+        """Demo priority: x3 when its last group partly succeeded (the link
+        is being learned), x4 when it starts within a few bins of the door
+        policy's own frontier (practise where the door stalls)."""
+        w = 3.0 if (self.hist.get(c) and 0.0 < self.hist[c][-1] < 1.0) else 1.0
+        sc = self.demos[c][2]
+        if sc is not None and c[0] in self.door_x:
+            fb = int(self.door_x[c[0]]) // 128
+            if fb - 2 <= sc[2] <= fb + 1:
+                w *= 4.0
+        return w
 
     def record_demo(self, cell, start, acts, start_cell=None):
         # a demo is a walk from another cell into this one: the explorer's
@@ -129,7 +145,7 @@ class Prompts:
         self.tail = dict(z.get('tail', {})); self.hist = dict(z.get('hist', {}))
         for c, v in z.get('grad', {}).items():
             self.grad[c] = (v[2], list(v[1]), v[3] if len(v) > 3 else None)
-        self.graduated = len(self.grad)
+        self.graduated = len(self.grad); self.door_x = dict(z.get('door_x', {}))
         for c in list(self.demos):
             self.tail[c] = min(self.tail.get(c, 4), 4, len(self.demos[c][1]) - 1)
         print(f'[prompts] restored {len(self.demos)} demos, {len(self.grad)} graduated, scores of {n_sc} cells from {path}', flush=True)
@@ -152,7 +168,7 @@ class Prompts:
         # score starved every link whose target had not paid off yet), with
         # triple weight for a demo whose last group partly succeeded: that
         # is the link being learned right now
-        w = np.array([3.0 if (self.hist.get(c) and 0.0 < self.hist[c][-1] < 1.0) else 1.0 for c in live]); w = w / w.sum()
+        w = np.array([self._demo_w(c) for c in live]); w = w / w.sum()
         c = live[rng.choice(len(live), p=w)]; start, acts, _ = self.demos[c]
         return ('demo', c, start, acts[:len(acts) - self.tail[c]])
 
@@ -169,8 +185,8 @@ class Prompts:
         n = len(self.demos[cell][1])
         if frac_reached >= 0.5:
             self.tail[cell] = min(n, self.tail[cell] + 1)     # one more step for the policy (+4 skipped past hit rates a group of 16 can reach)
-        elif frac_reached == 0.0:
-            self.tail[cell] = max(1, self.tail[cell] - 1)      # down to 'finish the last action'
+        elif frac_reached == 0.0 and not (len(self.hist[cell]) >= 2 and self.hist[cell][-2] >= 0.5):
+            self.tail[cell] = max(1, self.tail[cell] - 1)      # down to 'finish the last action' (one zero right after a success is noise: hold)
         if self.tail[cell] >= n:
             self.grad[cell] = self.demos.pop(cell); self.tail.pop(cell, None)   # graduated
             self.graduated = len(self.grad)
@@ -241,7 +257,7 @@ class Prompts:
                     c = grad[rng.randint(len(grad))]
                     out.append(('demo', c, self.grad[c][0], [])); continue   # re-check, no prefix
                 if live:
-                    w = np.array([3.0 if (self.hist.get(c) and 0.0 < self.hist[c][-1] < 1.0) else 1.0 for c in live]); w = w / w.sum()
+                    w = np.array([self._demo_w(c) for c in live]); w = w / w.sum()
                     c = live[rng.choice(len(live), p=w)]; start, acts, _ = self.demos[c]
                     out.append(('demo', c, start, acts[:len(acts) - self.tail[c]])); continue
             w = self.score[ids] + 0.5; w = w / w.sum()
@@ -520,6 +536,8 @@ def main():
                     print(f'  [demo] it {it} target {cell[2]}/{cell[3]}/{cell[6]} len {len(prompts.demos.get(cell, (None, []))[1]) if cell in prompts.demos else "grad"} prefix {len(chosen[g][3])} reached {fr:.2f} maxx {maxx[sl].mean():.0f}', flush=True)
             else:
                 prompts.update(chosen[g][0], float(s))
+                if isinstance(chosen[g][0], str) and chosen[g][0].startswith('door:'):
+                    prompts.note_door(chosen[g][0][5:], float(maxx[sl].mean()))
             if s > 1e-6:
                 n_live_groups += 1
                 adv[sl] = (R[sl] - m) / (1.0 if a.no_std else s + 1e-6)
@@ -609,7 +627,7 @@ def main():
                 pickle.dump({'cells': prompts.cells, 'score': prompts.score, 'uses': prompts.uses,
                              'demos': {c: (len(v[1]), v[1], v[0], v[2]) for c, v in prompts.demos.items()},   # (len, actions, start state, start cell)
                              'tail': prompts.tail, 'hist': prompts.hist, 'graduated': prompts.graduated,
-                             'grad': {c: (len(v[1]), v[1], v[0], v[2]) for c, v in prompts.grad.items()}}, f)
+                             'grad': {c: (len(v[1]), v[1], v[0], v[2]) for c, v in prompts.grad.items()}, 'door_x': prompts.door_x}, f)
             ck = {'model': model.state_dict(), 'iter': it, 'frames': frames}
             torch.save(ck, os.path.join(run_dir, 'nn', 'grpo_last.pth'))
             # numbered copy per eval: clips / ghosts for ANY step can be
