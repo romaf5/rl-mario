@@ -44,7 +44,7 @@ def main():
     torch.manual_seed(a.seed)
     best = None
     for ep in range(a.episodes):
-        env = NativeEvalEnv(**ec); v = env.v; v._raw_steps = True      # hack-free: transitions and the ending are shown
+        env = NativeEvalEnv(**ec); v = env.v; v._raw_steps = True; v.hold_on_done = True      # hack-free, no reset after done
         obs = env.reset(); v.lib.benv_save(v.env, 0, v._sbuf); start = bytes(v._sbuf.raw)
         frames, acts, total, info = [], [], 0.0, {}
         for step in range(a.max_steps):
@@ -53,7 +53,7 @@ def main():
             act = int(logits.argmax()) if a.greedy else int(torch.distributions.Categorical(logits=logits).sample())
             obs, r, done, info = env.step(act); total += r; acts.append(act); frames.extend(env.frames4)
             if done:
-                for _ in range(a.outro):      # let the ending / game-over screen play
+                for _ in range(240 if info.get('victory') else a.outro):    # ending / game-over screen keeps playing
                     obs, r, _d, info2 = env.step(0); frames.extend(env.frames4)
                 break
         cause = ('victory' if info.get('victory') else 'game over' if info.get('life') == 255 else 'loop' if info.get('loop_timeout')

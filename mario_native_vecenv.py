@@ -86,6 +86,9 @@ class _Lib:
             lib.benv_step_rgb4.argtypes = [ctypes.c_void_p, ctypes.c_int,
                                            ctypes.c_int, ctypes.c_void_p,
                                            ctypes.c_void_p, ctypes.c_void_p]
+            lib.benv_step_raw_rgb4.argtypes = [ctypes.c_void_p, ctypes.c_int,
+                                               ctypes.c_int, ctypes.c_void_p,
+                                               ctypes.c_void_p, ctypes.c_void_p]
             lib.benv_step_raw.argtypes = [ctypes.c_void_p, ctypes.c_int,
                                           ctypes.c_int, ctypes.c_void_p,
                                           ctypes.c_void_p]
@@ -243,6 +246,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.unpaid = z(); self.max_gap = z(); self.page_resets = z()
         self.after_reset = z(bool)
         self.forced_timeup = z()      # eval: cutoffs turned into time-ups
+        self.hold_on_done = False     # video: never reset after done
         self.prev_in_play = np.ones(n, dtype=bool)
         self.pending_life = z(bool); self.pending_life_at_resume = z(bool)
         self.start_stage = [''] * n
@@ -526,7 +530,13 @@ class MarioNativeVecEnv(IVecEnv):
             acts = np.where(rep, self.last_action, acts)
         self.last_action[:] = acts
         self.actions_buf[:] = _ACTION_BYTES[acts]
-        if self._raw_steps:
+        if self._raw_steps and self._rgb4 is not None and n == 1:
+            # hack-free + RGB capture of all emulated frames (video clips)
+            self.lib.benv_step_raw_rgb4(self.env, 0, int(self.actions_buf[0]),
+                                        self.obs_u8.ctypes.data,
+                                        self.ram.ctypes.data,
+                                        self._rgb4.ctypes.data)
+        elif self._raw_steps:
             # pure frames, no hacks (pipe travel, dying, inter-life screens
             # and the ending all play out): a reference emulator fed the
             # same actions stays in bitwise lockstep. One env per call in
@@ -856,8 +866,10 @@ class MarioNativeVecEnv(IVecEnv):
         self._ptr = (self._ptr + 1) % FRAME_STACK
         self._ring[..., self._ptr] = f
 
-        # resets for finished episodes
-        realdone_idx = np.nonzero(real_done)[0]
+        # resets for finished episodes (recorders set hold_on_done so the
+        # ending / game-over screen keeps playing instead of a fresh level)
+        realdone_idx = np.nonzero(real_done)[0] if not self.hold_on_done \
+            else np.zeros(0, dtype=np.int64)
         if len(realdone_idx):
             for i in realdone_idx:
                 self._reset_env(int(i))

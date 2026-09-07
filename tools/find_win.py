@@ -53,7 +53,7 @@ def main():
         sys.exit('no winning episode found')
     # replay the winning sequence in a single env for the frames (same door start, deterministic)
     ec_r = dict(ec, episode_life=False, reset_noops=0); ec_r.pop('dense_infos', None)
-    env = NativeEvalEnv(**ec_r); v = env.v; v._raw_steps = True; env.reset()
+    env = NativeEvalEnv(**ec_r); v = env.v; v._raw_steps = True; v.hold_on_done = True; env.reset()
     start = win[2]
     v.lib.benv_load(v.env, 0, start); v._fetch_obs(0); v._post_reset_init([0], v.ram)
     v._ring[0] = (v.obs_u8[0].astype(np.float32) / 255.0)[..., None]; obs = v._obs()[0]
@@ -63,7 +63,9 @@ def main():
         if prev_life is not None and info.get('life') != prev_life: life_r = 0.0
         prev_life = info.get('life'); life_r += r; pfr.extend([life_r] * len(env.frames4))
         if done:
-            for _ in range(150):               # the ending: bridge, Bowser falls, the walk to the princess
+            # the game keeps running (hold_on_done): the ending -- bridge,
+            # Bowser falls, the walk to the princess, the text
+            for _ in range(240 if info.get('victory') else 90):
                 obs, r, _d, _i = env.step(0); frames.extend(env.frames4); pfr.extend([life_r] * len(env.frames4))
             break
     env.close()

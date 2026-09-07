@@ -307,6 +307,33 @@ void benv_step_rgb4(BatchEnv* e, int i, int action, uint8_t* obs,
     memcpy(ram_out + (size_t)i * 0x800, c->ram, 0x800);
 }
 
+// hack-free variant for video: pipe travel, dying, inter-life screens and
+// the ending are emulated and captured frame by frame
+void benv_step_raw_rgb4(BatchEnv* e, int i, int action, uint8_t* obs,
+                    uint8_t* ram_out, uint8_t* rgb4 /*4*224*240*3*/) {
+    Core* c = e->cores[i];
+    static thread_local uint8_t fa[W * H], fb2[W * H], mx[W * H],
+        idx[W * H];
+    for (int k = 0; k < e->skip; k++) {
+        smb_frame(c, (uint8_t)action);      // no hacks: every frame shown
+        render_idx(*c, idx);
+        uint8_t* out = rgb4 + (size_t)k * W * H * 3;
+        for (int p = 0; p < W * H; p++) {
+            const uint8_t* cc = NES_PAL[idx[p] & 0x3F];
+            out[p * 3 + 0] = cc[0];
+            out[p * 3 + 1] = cc[1];
+            out[p * 3 + 2] = cc[2];
+        }
+        // gray obs frames derive from the same palette indices
+        if (k == e->skip - 2) for (int p = 0; p < W * H; p++) fa[p] = GRAY_LUT[idx[p] & 0x3F];
+        if (k == e->skip - 1) for (int p = 0; p < W * H; p++) fb2[p] = GRAY_LUT[idx[p] & 0x3F];
+    }
+    for (int p = 0; p < W * H; p++)
+        mx[p] = fa[p] > fb2[p] ? fa[p] : fb2[p];
+    resize_area(mx, obs + (size_t)i * OW * OH);
+    memcpy(ram_out + (size_t)i * 0x800, c->ram, 0x800);
+}
+
 void benv_render_rgb(BatchEnv* e, int i, uint8_t* out /*224*240*3*/) {
     static thread_local uint8_t idx[240 * 224];
     render_idx(*e->cores[i], idx);

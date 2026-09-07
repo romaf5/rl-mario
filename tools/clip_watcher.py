@@ -20,7 +20,7 @@ def record(model, cfg, level, episodes, max_steps, seed):
     ec.update(random_stages=[level], sticky_actions=0, explore_eps=0, self_restart_prob=0, reset_noops=0, episode_life=False)
     torch.manual_seed(seed); best = None
     for ep in range(episodes):
-        env = NativeEvalEnv(**ec); v = env.v; v._raw_steps = True; obs = env.reset()     # hack-free: transitions + ending visible
+        env = NativeEvalEnv(**ec); v = env.v; v._raw_steps = True; v.hold_on_done = True; obs = env.reset()     # hack-free, no reset after done
         v.lib.benv_save(v.env, 0, v._sbuf); start = bytes(v._sbuf.raw)
         frames, acts, total, info = [], [], 0.0, {}
         life_r, prev_life, per_frame_r = 0.0, None, []
@@ -34,7 +34,7 @@ def record(model, cfg, level, episodes, max_steps, seed):
             prev_life = info.get('life'); life_r += r
             per_frame_r.extend([life_r] * len(env.frames4))
             if done:
-                for _ in range(120):           # ending / game-over screen
+                for _ in range(240 if info.get('victory') else 90):    # ending / game-over screen keeps playing
                     obs, r, _d, _i = env.step(0); frames.extend(env.frames4); per_frame_r.extend([life_r] * len(env.frames4))
                 break
         env.close()
