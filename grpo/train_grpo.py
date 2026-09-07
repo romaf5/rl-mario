@@ -166,7 +166,7 @@ class Prompts:
             return
         n = len(self.demos[cell][1])
         if frac_reached >= 0.5:
-            self.tail[cell] = min(n, self.tail[cell] + 4)     # the policy handles more of it
+            self.tail[cell] = min(n, self.tail[cell] + 1)     # one more step for the policy (+4 skipped past hit rates a group of 16 can reach)
         elif frac_reached == 0.0:
             self.tail[cell] = max(1, self.tail[cell] - 1)      # down to 'finish the last action'
         if self.tail[cell] >= n:
@@ -386,6 +386,7 @@ def main():
     ap.add_argument('--gamma', type=float, default=0.99)
     ap.add_argument('--cell-variants', type=int, default=3, help='max tile-signature variants per spatial archive cell')
     ap.add_argument('--explorers', type=int, default=0, help='extra envs per iteration that random-walk from least-visited cells ONLY to grow the archive (never in the update)')
+    ap.add_argument('--demo-eps', type=float, default=0.2, help='uniform-random action share in the free steps of demo groups (the collapsed policy puts ~0 on the actions a link needs)')
     ap.add_argument('--init-prompts', default='', help='prompts.pkl of an earlier run: restore demos, graduated links, tails and prompt scores')
     ap.add_argument('--demo-share', type=float, default=0.0, help='fraction of cell groups started from an explorer demo with a forced prefix (backward chaining); needs --explorers')
     a = ap.parse_args()
@@ -453,14 +454,26 @@ def main():
         # entered the target and then died or timed out as a failure
         target_of = [chosen[i // a.group][1] if chosen[i // a.group][0] == 'demo' else None for i in range(N)]
         reached = np.zeros(N, bool)
+        demo_env = torch.from_numpy(np.array([c is not None for c in target_of])).to(device)
         model.eval()
         for t in range(H):
             with torch.no_grad():
                 lg = logits_of(model, torch.from_numpy(obs).to(device).float().div_(255.0))
                 dist = torch.distributions.Categorical(logits=lg)
-                act = dist.sample(); lp = dist.log_prob(act)
+                act = dist.sample()
+                fz = forced[t]
+                if a.demo_eps > 0:
+                    # exploration only where a link is being taught: a
+                    # demo group's free steps take a uniform action with
+                    # prob demo_eps. Trained as if on-policy (log-prob
+                    # under pi): the clip bounds the step, and a rare
+                    # action that wins must be able to move at all
+                    free = demo_env & torch.from_numpy(fz < 0).to(device)
+                    flip = free & (torch.rand(N, device=device) < a.demo_eps)
+                    act = torch.where(flip, torch.randint(0, 12, (N,), device=device), act)
+                lp = dist.log_prob(act)
             obs_buf[t] = obs                          # already uint8
-            act_np = act.cpu().numpy(); fz = forced[t]
+            act_np = act.cpu().numpy()
             act_buf[t] = np.where(fz >= 0, fz, act_np); logp_buf[t] = lp.cpu().numpy()
             mask_buf[t] = alive & (fz < 0)             # forced steps are never trained on
             _, r, d, inf = env.step(np.concatenate([act_buf[t], np.zeros(a.explorers, np.int64)]) if a.explorers else act_buf[t])
