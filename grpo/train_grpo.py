@@ -71,7 +71,7 @@ class Prompts:
                 continue
             sts = e[0] if isinstance(e[0], list) else [e[0]]
             self.cells.append(k); self.states.append(sts)
-        self.score = np.ones(len(self.cells)) * 5.0     # optimistic: unsampled cells first
+        self.score = np.ones(len(self.cells)) * 5.0     # (rescaled to the running max as scores arrive)
         self.uses = np.zeros(len(self.cells), int)
         print(f'[prompts] door + {len(self.cells)} archive cells')
 
@@ -120,7 +120,12 @@ class Prompts:
             sts = e[0] if isinstance(e[0], list) else [e[0]]
             self.cells.append(k); self.states.append(list(sts)); added += 1
         if added:
-            self.score = np.concatenate([self.score, np.full(added, 5.0)])
+            # optimistic for real: a new (frontier) cell starts at the best
+            # current learnability score, so it is sampled before the
+            # established cells (a fixed 5.0 was ~30x below typical outcome
+            # stds and the frontier was almost never practised)
+            init = float(self.score.max()) if len(self.score) else 5.0
+            self.score = np.concatenate([self.score, np.full(added, max(init, 5.0))])
             self.uses = np.concatenate([self.uses, np.zeros(added, int)])
         # keep state variants fresh for cells the env re-saved
         for i, k in enumerate(self.cells):
@@ -228,8 +233,8 @@ def main():
     ap.add_argument('--max-cells', type=int, default=1024)
     ap.add_argument('--clip-every', type=int, default=100, help='iterations between gameplay clips (background thread, CPU); 0 = off')
     ap.add_argument('--fullgame-every', type=int, default=100, help='iterations between sequential full-game evals (3 lives from the first level); 0 = off')
-    ap.add_argument('--explore-temp', type=float, default=1.0, help='softmax temperature for the exploration groups (1 = off)')
-    ap.add_argument('--explore-groups', type=int, default=0, help='number of groups per iteration sampled at --explore-temp')
+    ap.add_argument('--rtg', action='store_true', help='per-step advantages from discounted reward-to-go, group-normalised at each step (temporal credit) instead of one outcome per rollout')
+    ap.add_argument('--gamma', type=float, default=0.99)
     ap.add_argument('--cell-variants', type=int, default=3, help='max tile-signature variants per spatial archive cell')
     a = ap.parse_args()
 
@@ -245,7 +250,7 @@ def main():
     ec.update(dict(self_restart_prob=1e-6 if a.grow_archive else 0.0, explore_eps=0.0,
                    explore_episode_prob=0.0, archive_path=a.archive if a.grow_archive else None,
                    self_restart_cells=a.max_cells, cell_tiles=True, cell_y_band=32, cell_max_variants=a.cell_variants,
-                   n_threads=a.n_threads, dense_infos=True, seed=a.seed))
+                   sticky_actions=0.0, n_threads=a.n_threads, dense_infos=True, seed=a.seed))
     N = a.group * a.groups
     env = MarioNativeVecEnv('grpo', N, **dict(ec, dense_infos=False)); env.reset(); env.enable_u8_obs()
     eval_env = MarioNativeVecEnv('grpo_eval', a.eval_episodes, **dict(ec, sticky_actions=0.0, n_threads=8, seed=a.seed + 1))
@@ -273,20 +278,10 @@ def main():
         obs = load_states(env, states)
         alive = np.ones(N, bool); maxx = np.zeros(N); loops = np.zeros(N, bool); vics = np.zeros(N, bool)
         model.eval()
-        # exploration groups sample from a tempered policy; their stored
-        # log-probs are the tempered ones, so the update's ratio stays an
-        # honest importance weight (the clip bounds the off-policyness)
-        # exploration groups are drawn at random each iteration (the first
-        # groups are the door prompts: tempering exactly those starved the
-        # base policy of on-policy door samples and froze it at x~150)
-        temp = torch.ones(N, 1, device=device)
-        if a.explore_groups > 0 and a.explore_temp != 1.0:
-            for g in rng.choice(a.groups, size=min(a.explore_groups, a.groups), replace=False):
-                temp[g * a.group:(g + 1) * a.group] = a.explore_temp
         for t in range(H):
             with torch.no_grad():
                 lg = logits_of(model, torch.from_numpy(obs).to(device).float().div_(255.0))
-                dist = torch.distributions.Categorical(logits=lg / temp)
+                dist = torch.distributions.Categorical(logits=lg)
                 act = dist.sample(); lp = dist.log_prob(act)
             obs_buf[t] = obs                          # already uint8
             act_buf[t] = act.cpu().numpy(); logp_buf[t] = lp.cpu().numpy(); mask_buf[t] = alive
@@ -315,12 +310,26 @@ def main():
             if s > 1e-6:
                 n_live_groups += 1
                 adv[sl] = (R[sl] - m) / (1.0 if a.no_std else s + 1e-6)
+        if a.rtg:
+            # temporal credit: discounted reward-to-go per step, normalised
+            # within the group AT THAT STEP (all rollouts of a group share
+            # the start, so the group's per-step spread is a valid baseline
+            # early on and a conservative one later). An action late in a
+            # rollout is no longer blamed for what happened before it.
+            G = np.zeros_like(rew_buf); run = np.zeros(N, np.float32)
+            for t in range(H - 1, -1, -1):
+                run = rew_buf[t] + a.gamma * run * mask_buf[t]
+                G[t] = run
+            Gg = G.reshape(H, a.groups, a.group)
+            mu = Gg.mean(2, keepdims=True); sd = Gg.std(2, keepdims=True)
+            adv_t = np.where(sd > 1e-6, (Gg - mu) / (sd + 1e-6), 0.0).reshape(H, N).astype(np.float32)
         # ---- update ----
         model.train()
         T = H * N
         o = torch.from_numpy(obs_buf.reshape(T, *env.observation_space.shape)).to(device)   # uint8, ~1 GB at 256x128
         ac = torch.from_numpy(act_buf.reshape(T)).to(device); olp = torch.from_numpy(logp_buf.reshape(T)).to(device)
-        mk = torch.from_numpy(mask_buf.reshape(T)).to(device); ad = torch.from_numpy(np.repeat(adv[None], H, 0).reshape(T)).to(device)
+        mk = torch.from_numpy(mask_buf.reshape(T)).to(device)
+        ad = torch.from_numpy((adv_t if a.rtg else np.repeat(adv[None], H, 0)).reshape(T)).to(device)
         valid = torch.nonzero(mk > 0).squeeze(1)
         stats = dict(loss=0.0, kl=0.0, ent=0.0, clipfrac=0.0, n=0)
         for ep in range(a.epochs):
