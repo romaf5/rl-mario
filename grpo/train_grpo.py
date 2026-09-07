@@ -84,7 +84,13 @@ class Prompts:
         self.uses = np.zeros(len(self.cells), int)
         print(f'[prompts] door + {len(self.cells)} archive cells')
 
-    def record_demo(self, cell, start, acts):
+    def record_demo(self, cell, start, acts, start_cell=None):
+        # a demo is a walk from another cell into this one: the explorer's
+        # own start cell (re-entered on its first step) and 1-2 step hops
+        # are not demonstrations of anything (they used to overwrite real
+        # ones because the shortest demo per cell wins)
+        if cell == start_cell or len(acts) < 3:
+            return
         if cell not in self.demos or len(acts) < len(self.demos[cell][1]):
             self.demos[cell] = (start, list(acts)); self.tail.setdefault(cell, 4)
 
@@ -341,7 +347,7 @@ def main():
                 forced[:len(pre), g * a.group:(g + 1) * a.group] = np.array(pre)[:, None]
         if a.explorers:
             env.explorer[N:] = H          # env substitutes persistent random actions for these
-            xacts = [[] for _ in range(a.explorers)]
+            xacts = [[] for _ in range(a.explorers)]; xcell = [None] * a.explorers
         alive = np.ones(N, bool); maxx = np.zeros(N); loops = np.zeros(N, bool); vics = np.zeros(N, bool)
         model.eval()
         for t in range(H):
@@ -359,8 +365,11 @@ def main():
                 for j in range(a.explorers):
                     xacts[j].append(int(env.last_action[N + j]))
                     c = env.entered_cell[N + j]
-                    if c is not None and len(xacts[j]) <= 96:
-                        prompts.record_demo(c, xstates[j], xacts[j])
+                    if c is not None:
+                        if xcell[j] is None and t == 0:
+                            xcell[j] = c              # the explorer's own start cell
+                        elif len(xacts[j]) <= 96:
+                            prompts.record_demo(c, xstates[j], xacts[j], start_cell=xcell[j])
             rew_buf[t] = np.where(alive, r, 0.0)
             # bookkeeping from env arrays; the env resets finished envs
             # inside step(), so their pre-reset values come from the info
