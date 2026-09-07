@@ -110,7 +110,9 @@ class Prompts:
         if cell in self.grad:
             return
         if cell not in self.demos or len(acts) < len(self.demos[cell][1]):
-            self.demos[cell] = (start, list(acts), start_cell); self.tail.setdefault(cell, 4)
+            # tail < len or the demo is never live: a 3-action link (pipe
+            # top -> DOWN) used to sit dead at tail 4 and never graduate
+            self.demos[cell] = (start, list(acts), start_cell); self.tail[cell] = min(self.tail.get(cell, 4), 4, len(acts) - 1)
 
     def boost(self, cell):
         """A cell whose successor just became reachable is where outcomes
@@ -126,9 +128,10 @@ class Prompts:
             return ('demo', c, self.grad[c][0], [])          # re-check: no prefix
         if not live:
             return None
-        idx = {c: i for i, c in enumerate(self.cells)}
-        w = np.array([(self.score[idx[c]] if c in idx else 5.0) + 0.5 for c in live]); w = w / w.sum()
-        c = live[rng.choice(len(live), p=w)]; start, acts, _ = self.demos[c]
+        # uniform over live demos: weighting by the target's prompt score
+        # starved every link whose target had not paid off yet (the ones
+        # backward chaining exists for)
+        c = live[rng.randint(len(live))]; start, acts, _ = self.demos[c]
         return ('demo', c, start, acts[:len(acts) - self.tail[c]])
 
     def demo_result(self, cell, frac_reached):
@@ -474,7 +477,7 @@ def main():
                 # incl. y-band and tile signature) at some step
                 fr = float(reached[sl].mean())
                 prompts.demo_result(cell, fr)
-                if 17 <= cell[2] <= 19 and cell[3] <= 5:
+                if 16 <= cell[2] <= 25 and cell[4] == 0:
                     print(f'  [demo] it {it} target {cell[2]}/{cell[3]}/{cell[6]} len {len(prompts.demos.get(cell, (None, []))[1]) if cell in prompts.demos else "grad"} prefix {len(chosen[g][3])} reached {fr:.2f} maxx {maxx[sl].mean():.0f}', flush=True)
             else:
                 prompts.update(chosen[g][0], float(s))
