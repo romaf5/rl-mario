@@ -84,6 +84,11 @@ class Prompts:
         self.score = np.ones(len(self.cells)) * 5.0     # (rescaled to the running max as scores arrive)
         self.uses = np.zeros(len(self.cells), int)
         print(f'[prompts] door + {len(self.cells)} archive cells')
+        # graduated demos stay: re-checked now and then with no forced
+        # prefix and re-armed when the policy has forgotten them (a link
+        # learned once is worthless if it is gone by the time the next
+        # link is trained)
+        self.grad = {}; self.graduated = 0
 
     def record_demo(self, cell, start, acts, start_cell=None):
         # a demo is a walk from another cell into this one: the explorer's
@@ -96,13 +101,29 @@ class Prompts:
         # up within the same bin. Every block-top demo used to be a DROP
         # from the pipe top (explorers start there too, and falling is the
         # shortest way in), so the trainer taught descending, not climbing.
-        if start_cell is not None and not (cell[2] > start_cell[2] or (cell[2] == start_cell[2] and cell[3] < start_cell[3])):
+        # direction filter only within the same frame (level, area, swim,
+        # area type): a pipe/vine into another area is progress by
+        # definition, whatever its x bin
+        same_frame = start_cell is not None and (cell[0], cell[1], cell[4], cell[5]) == (start_cell[0], start_cell[1], start_cell[4], start_cell[5])
+        if same_frame and not (cell[2] > start_cell[2] or (cell[2] == start_cell[2] and cell[3] < start_cell[3])):
+            return
+        if cell in self.grad:
             return
         if cell not in self.demos or len(acts) < len(self.demos[cell][1]):
-            self.demos[cell] = (start, list(acts)); self.tail.setdefault(cell, 4)
+            self.demos[cell] = (start, list(acts), start_cell); self.tail.setdefault(cell, 4)
+
+    def boost(self, cell):
+        """A cell whose successor just became reachable is where outcomes
+        now vary: give it the best current learnability score so free
+        groups start there and consolidate the new behaviour."""
+        if cell in self.cells:
+            i = self.cells.index(cell); self.score[i] = max(float(self.score.max()), 5.0)
 
     def demo_prompt(self, rng):
         live = [c for c in self.demos if self.tail[c] < len(self.demos[c][1])]
+        if self.grad and (not live or rng.rand() < 0.2):
+            gl = list(self.grad); c = gl[rng.randint(len(gl))]
+            return ('demo', c, self.grad[c][0], [])          # re-check: no prefix
         if not live:
             return None
         idx = {c: i for i, c in enumerate(self.cells)}
@@ -111,17 +132,25 @@ class Prompts:
         return ('demo', c, start, acts[:len(acts) - self.tail[c]])
 
     def demo_result(self, cell, frac_reached):
+        self.hist.setdefault(cell, []).append(round(frac_reached, 2))
+        if cell in self.grad:               # re-check of a graduated demo
+            if frac_reached < 0.5:
+                start, acts, sc = self.grad.pop(cell)
+                self.demos[cell] = (start, acts, sc); self.tail[cell] = max(2, len(acts) - 4)
+                self.graduated = len(self.grad)
+            return
         if cell not in self.demos:          # graduated by another group this iteration
             return
-        self.hist.setdefault(cell, []).append(round(frac_reached, 2))
         n = len(self.demos[cell][1])
         if frac_reached >= 0.5:
             self.tail[cell] = min(n, self.tail[cell] + 4)     # the policy handles more of it
         elif frac_reached == 0.0:
             self.tail[cell] = max(2, self.tail[cell] - 1)
         if self.tail[cell] >= n:
-            self.demos.pop(cell, None); self.tail.pop(cell, None)   # graduated
-            self.graduated = getattr(self, 'graduated', 0) + 1
+            self.grad[cell] = self.demos.pop(cell); self.tail.pop(cell, None)   # graduated
+            self.graduated = len(self.grad)
+            if self.grad[cell][2] is not None:
+                self.boost(self.grad[cell][2])
 
     def frontier(self, k, rng):
         """k least-visited cells (Go-Explore's exploration rule) for the
@@ -441,7 +470,7 @@ def main():
                 # incl. y-band and tile signature) at some step
                 fr = float(reached[sl].mean())
                 prompts.demo_result(cell, fr)
-                if cell[2] >= 17 and cell[3] <= 3:
+                if 17 <= cell[2] <= 19 and cell[3] <= 5:
                     print(f'  [demo] it {it} target {cell[2]}/{cell[3]}/{cell[6]} len {len(prompts.demos.get(cell, (None, []))[1]) if cell in prompts.demos else "grad"} prefix {len(chosen[g][3])} reached {fr:.2f} maxx {maxx[sl].mean():.0f}', flush=True)
             else:
                 prompts.update(chosen[g][0], float(s))
@@ -533,7 +562,8 @@ def main():
             with open(os.path.join(run_dir, 'nn', 'prompts.pkl'), 'wb') as f:
                 pickle.dump({'cells': prompts.cells, 'score': prompts.score, 'uses': prompts.uses,
                              'demos': {c: (len(v[1]), v[1], v[0]) for c, v in prompts.demos.items()},   # (len, actions, start state)
-                             'tail': prompts.tail, 'hist': prompts.hist, 'graduated': getattr(prompts, 'graduated', 0)}, f)
+                             'tail': prompts.tail, 'hist': prompts.hist, 'graduated': prompts.graduated,
+                             'grad': {c: (len(v[1]), v[1], v[0], v[2]) for c, v in prompts.grad.items()}}, f)
             ck = {'model': model.state_dict(), 'iter': it, 'frames': frames}
             torch.save(ck, os.path.join(run_dir, 'nn', 'grpo_last.pth'))
             # numbered copy per eval: clips / ghosts for ANY step can be
