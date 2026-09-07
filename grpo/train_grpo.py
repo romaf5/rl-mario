@@ -63,6 +63,7 @@ class Prompts:
         self.levels = [l for l in env.stages if l != 'FullGame']
         self.doors = {l: env.states[l] for l in self.levels}
         self.door_share = door_share
+        self.clear = {l: 0.0 for l in self.levels}      # EMA of eval clear rate
         self.cells, self.states = [], []
         arch = pickle.load(open(archive_path, 'rb')) if archive_path and os.path.exists(archive_path) else {}
         for k, e in arch.items():
@@ -77,8 +78,10 @@ class Prompts:
     def sample(self, k, rng):
         out = []
         n_door = max(1, int(round(k * self.door_share))) if self.cells else k
+        # mastered doors fade (0.15 floor keeps every level in rotation)
+        w = np.array([0.15 + (1.0 - self.clear[l]) for l in self.levels]); w = w / w.sum()
         for j in range(n_door):
-            lvl = self.levels[rng.randint(len(self.levels))]
+            lvl = self.levels[rng.choice(len(self.levels), p=w)]
             out.append(('door:' + lvl, self.doors[lvl]))
         w = self.score + 0.5
         w = w / w.sum()
@@ -92,6 +95,12 @@ class Prompts:
             return
         self.uses[idx] += 1
         self.score[idx] = 0.7 * self.score[idx] + 0.3 * group_std
+
+    def note_clears(self, ev):
+        for l in self.levels:
+            k = 'clear_' + l if len(self.levels) > 1 else 'clear'
+            if k in ev:
+                self.clear[l] = 0.7 * self.clear[l] + 0.3 * ev[k]
 
     def refresh(self, archive):
         """Adopt cells the env archived during rollouts (new prompts start
@@ -128,6 +137,31 @@ def load_states(env, states):
         env.start_cell[i] = None
     env.ep_steps[:] = 0
     return env.obs_u8_stack() if env.u8_obs else env._obs()
+
+
+@torch.no_grad()
+def full_game_eval(model, cfg, device, episodes, max_steps=6000, n_threads=8, seed=1):
+    """The real objective: sequential game from the first configured level
+    with 3 lives, no noise. Reports the level index reached (0-31), mean and
+    max, and the victory rate."""
+    ec = dict(cfg['env_config']); [ec.pop(k, None) for k in ('name', 'action_type', 'archive_path')]
+    first = [l for l in ec.get('random_stages') or ['1-1']][0]
+    ec.update(random_stages=[first], route_levels=list(ec.get('random_stages') or [first]), episode_life=False,
+              sticky_actions=0.0, explore_eps=0.0, self_restart_prob=0.0, explore_episode_prob=0.0,
+              reset_noops=0, n_threads=n_threads, dense_infos=False, seed=seed)
+    env = MarioNativeVecEnv('fullgame', episodes, **ec); obs = env.reset(); n = episodes
+    done_m = np.zeros(n, bool); gp = np.zeros(n, int); vic = np.zeros(n, bool)
+    for _ in range(max_steps):
+        lg = logits_of(model, torch.from_numpy(obs).to(device))
+        a = torch.distributions.Categorical(logits=lg).sample().cpu().numpy()
+        obs, r, d, inf = env.step(a)
+        gp = np.where(~done_m, np.maximum(gp, env.progress), gp)
+        for i in np.nonzero(d & ~done_m)[0]:
+            done_m[i] = True; vic[i] = bool(inf[i].get('victory', False)); gp[i] = max(gp[i], inf[i].get('game_progress', 0))
+        if done_m.all():
+            break
+    env.close()
+    return dict(level_mean=float(gp.mean()), level_max=int(gp.max()), victory=float(vic.mean()))
 
 
 @torch.no_grad()
@@ -185,6 +219,7 @@ def main():
     ap.add_argument('--grow-archive', action='store_true', help='record rollout cells into the archive and use them as prompts')
     ap.add_argument('--max-cells', type=int, default=1024)
     ap.add_argument('--clip-every', type=int, default=100, help='iterations between gameplay clips (background thread, CPU); 0 = off')
+    ap.add_argument('--fullgame-every', type=int, default=100, help='iterations between sequential full-game evals (3 lives from the first level); 0 = off')
     a = ap.parse_args()
 
     params = yaml.safe_load(open(a.config))['params']; cfg = params['config']
@@ -314,8 +349,15 @@ def main():
             ev = clean_door_eval(model, eval_env, device, a.eval_episodes)
             for k, v in ev.items():
                 writer.add_scalar(f'eval/door_{k}', v, it)
+            prompts.note_clears(ev)
             extra = ' '.join(f'{k[6:]}:{ev[k]:.2f}' for k in ev if k.startswith('clear_'))
             print(f'  [eval] door: mean_x {ev["mean_x"]:.0f} max_x {ev["max_x"]:.0f} victory {ev["victory"]:.3f} clear {ev["clear"]:.2f} loops {ev["loop"]:.2f} {extra}', flush=True)
+            if a.fullgame_every and it % a.fullgame_every == 0:
+                fg = full_game_eval(model, cfg, device, 16, seed=a.seed + 2)
+                for k, v in fg.items():
+                    writer.add_scalar(f'eval/fullgame_{k}', v, it)
+                lv = lambda g: '%d-%d' % (g // 4 + 1, g % 4 + 1)
+                print(f'  [fullgame] 3 lives from the start: level reached mean {fg["level_mean"]:.1f} ({lv(int(round(fg["level_mean"])))}) max {lv(fg["level_max"])} victory {fg["victory"]:.3f}', flush=True)
             ck = {'model': model.state_dict(), 'iter': it, 'frames': frames}
             torch.save(ck, os.path.join(run_dir, 'nn', 'grpo_last.pth'))
             # numbered copy per eval: clips / ghosts for ANY step can be
