@@ -148,10 +148,12 @@ class Prompts:
             return ('demo', c, self.grad[c][0], [])          # re-check: no prefix
         if not live:
             return None
-        # uniform over live demos: weighting by the target's prompt score
-        # starved every link whose target had not paid off yet (the ones
-        # backward chaining exists for)
-        c = live[rng.randint(len(live))]; start, acts, _ = self.demos[c]
+        # near-uniform over live demos (weighting by the target's prompt
+        # score starved every link whose target had not paid off yet), with
+        # triple weight for a demo whose last group partly succeeded: that
+        # is the link being learned right now
+        w = np.array([3.0 if (self.hist.get(c) and 0.0 < self.hist[c][-1] < 1.0) else 1.0 for c in live]); w = w / w.sum()
+        c = live[rng.choice(len(live), p=w)]; start, acts, _ = self.demos[c]
         return ('demo', c, start, acts[:len(acts) - self.tail[c]])
 
     def demo_result(self, cell, frac_reached):
@@ -239,7 +241,8 @@ class Prompts:
                     c = grad[rng.randint(len(grad))]
                     out.append(('demo', c, self.grad[c][0], [])); continue   # re-check, no prefix
                 if live:
-                    c = live[rng.randint(len(live))]; start, acts, _ = self.demos[c]
+                    w = np.array([3.0 if (self.hist.get(c) and 0.0 < self.hist[c][-1] < 1.0) else 1.0 for c in live]); w = w / w.sum()
+                    c = live[rng.choice(len(live), p=w)]; start, acts, _ = self.demos[c]
                     out.append(('demo', c, start, acts[:len(acts) - self.tail[c]])); continue
             w = self.score[ids] + 0.5; w = w / w.sum()
             i = ids[rng.choice(len(ids), p=w)]
