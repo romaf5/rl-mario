@@ -209,10 +209,14 @@ class Prompts:
             ids = by_level.get(l, [])
             if not ids or rng.random_sample() < self.door_share:
                 out.append(('door:' + l, self.doors[l])); continue
-            if self.demos and rng.random_sample() < self.demo_share:
+            if (self.demos or self.grad) and rng.random_sample() < self.demo_share:
                 live = [c for c in self.demos if c[0] == l and self.tail[c] < len(self.demos[c][1])]
+                grad = [c for c in self.grad if c[0] == l]
+                if grad and (not live or rng.random_sample() < 0.2):
+                    c = grad[rng.randint(len(grad))]
+                    out.append(('demo', c, self.grad[c][0], [])); continue   # re-check, no prefix
                 if live:
-                    c = live[rng.randint(len(live))]; start, acts = self.demos[c]
+                    c = live[rng.randint(len(live))]; start, acts, _ = self.demos[c]
                     out.append(('demo', c, start, acts[:len(acts) - self.tail[c]])); continue
             w = self.score[ids] + 0.5; w = w / w.sum()
             i = ids[rng.choice(len(ids), p=w)]
