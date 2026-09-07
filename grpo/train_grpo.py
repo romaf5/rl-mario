@@ -45,12 +45,14 @@ class Prompts:
     (last group std of outcomes) so groups with zero variance are avoided."""
 
     def __init__(self, env, archive_path, door_share):
-        self.door_state = env.states['8-4']
+        # one door state per configured level (8-4 only, or the whole route)
+        self.levels = [l for l in env.stages if l != 'FullGame']
+        self.doors = {l: env.states[l] for l in self.levels}
         self.door_share = door_share
         self.cells, self.states = [], []
         arch = pickle.load(open(archive_path, 'rb')) if archive_path and os.path.exists(archive_path) else {}
         for k, e in arch.items():
-            if k[0] != '8-4':
+            if k[0] not in self.doors:
                 continue
             sts = e[0] if isinstance(e[0], list) else [e[0]]
             self.cells.append(k); self.states.append(sts)
@@ -61,8 +63,9 @@ class Prompts:
     def sample(self, k, rng):
         out = []
         n_door = max(1, int(round(k * self.door_share))) if self.cells else k
-        for _ in range(n_door):
-            out.append(('door', self.door_state))
+        for j in range(n_door):
+            lvl = self.levels[rng.randint(len(self.levels))]
+            out.append(('door:' + lvl, self.doors[lvl]))
         w = self.score + 0.5
         w = w / w.sum()
         for _ in range(k - n_door):
@@ -71,7 +74,7 @@ class Prompts:
         return out
 
     def update(self, idx, group_std):
-        if idx == 'door':
+        if isinstance(idx, str):
             return
         self.uses[idx] += 1
         self.score[idx] = 0.7 * self.score[idx] + 0.3 * group_std
@@ -81,7 +84,7 @@ class Prompts:
         optimistic so they get sampled soon)."""
         known = set(self.cells); added = 0
         for k, e in archive.items():
-            if k[0] != '8-4' or k in known:
+            if k[0] not in self.doors or k in known:
                 continue
             sts = e[0] if isinstance(e[0], list) else [e[0]]
             self.cells.append(k); self.states.append(list(sts)); added += 1
@@ -113,10 +116,13 @@ def load_states(env, states):
 
 @torch.no_grad()
 def clean_door_eval(model, env, device, episodes, max_steps=1500):
-    """Sampled policy, no exploration noise, full episodes from the door."""
+    """Sampled policy, no exploration noise, full episodes from each level's
+    door (the n eval envs are split evenly over the configured levels)."""
     n = env.num_actors
-    obs = load_states(env, [env.states['8-4']] * n)
-    maxx = np.zeros(n); done_m = np.zeros(n, bool); vic = np.zeros(n, bool); loops = np.zeros(n, bool)
+    levels = [l for l in env.stages if l != 'FullGame']
+    lv = [levels[i % len(levels)] for i in range(n)]
+    obs = load_states(env, [env.states[l] for l in lv])
+    maxx = np.zeros(n); done_m = np.zeros(n, bool); vic = np.zeros(n, bool); loops = np.zeros(n, bool); clear = np.zeros(n, bool)
     for _ in range(max_steps):
         lg = logits_of(model, torch.from_numpy(obs).to(device))
         a = torch.distributions.Categorical(logits=lg).sample().cpu().numpy()
@@ -125,11 +131,18 @@ def clean_door_eval(model, env, device, episodes, max_steps=1500):
             if done_m[i]:
                 continue
             maxx[i] = max(maxx[i], inf[i]['max_x_pos'])
+            clear[i] = clear[i] or inf[i].get('stages_cleared', 0) > 0 or bool(inf[i].get('victory', False))
             if d[i]:
                 done_m[i] = True; vic[i] = bool(inf[i].get('victory', False)); loops[i] = bool(inf[i].get('page_reset', inf[i].get('looped', False)))
         if done_m.all():
             break
-    return dict(mean_x=float(maxx.mean()), max_x=float(maxx.max()), victory=float(vic.mean()), loop=float(loops.mean()))
+    out = dict(mean_x=float(maxx.mean()), max_x=float(maxx.max()), victory=float(vic.mean()), loop=float(loops.mean()),
+               clear=float(clear.mean()))
+    if len(levels) > 1:
+        for l in levels:
+            m = np.array([x == l for x in lv])
+            out['mean_x_' + l] = float(maxx[m].mean()); out['clear_' + l] = float(clear[m].mean())
+    return out
 
 
 def main():
@@ -249,7 +262,7 @@ def main():
                     stats['kl'] += (olp[idx] - lp).mean().item()
                     stats['clipfrac'] += ((ratio - 1).abs() > a.clip).float().mean().item(); stats['n'] += 1
         n_upd = max(stats['n'], 1)
-        door = np.array([chosen[i // a.group][0] == 'door' for i in range(N)])
+        door = np.array([isinstance(chosen[i // a.group][0], str) for i in range(N)])
         el = time.time() - t0
         writer.add_scalar('rewards/step', float(R.mean()), it)
         writer.add_scalar('grpo/live_groups', n_live_groups / a.groups, it)
@@ -273,7 +286,8 @@ def main():
             ev = clean_door_eval(model, eval_env, device, a.eval_episodes)
             for k, v in ev.items():
                 writer.add_scalar(f'eval/door_{k}', v, it)
-            print(f'  [eval] door: mean_x {ev["mean_x"]:.0f} max_x {ev["max_x"]:.0f} victory {ev["victory"]:.3f} loops {ev["loop"]:.2f}', flush=True)
+            extra = ' '.join(f'{k[6:]}:{ev[k]:.2f}' for k in ev if k.startswith('clear_'))
+            print(f'  [eval] door: mean_x {ev["mean_x"]:.0f} max_x {ev["max_x"]:.0f} victory {ev["victory"]:.3f} clear {ev["clear"]:.2f} loops {ev["loop"]:.2f} {extra}', flush=True)
             ck = {'model': model.state_dict(), 'iter': it, 'frames': frames}
             torch.save(ck, os.path.join(run_dir, 'nn', 'grpo_last.pth'))
             # numbered copy per eval: clips / ghosts for ANY step can be
