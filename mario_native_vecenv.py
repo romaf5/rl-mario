@@ -232,6 +232,10 @@ class MarioNativeVecEnv(IVecEnv):
         self.action_space = spaces.Discrete(12)
         self._ring = np.zeros((n, 84, 84, FRAME_STACK), dtype=np.float32)
         self._ptr = 0
+        # optional uint8 twin of the ring for trainers that want raw bytes
+        # (grpo/): stacked uint8 obs without any float conversion
+        self.u8_obs = False
+        self._ring_u8 = None
 
         # per-env python-side state
         z = lambda dt=np.int32: np.zeros(n, dtype=dt)
@@ -471,6 +475,16 @@ class MarioNativeVecEnv(IVecEnv):
         return self._prog.hw_for(self.prev_frame, self.x_last)
 
     # ------------------------------------------------------------- IVecEnv
+    def enable_u8_obs(self):
+        self.u8_obs = True
+        self._ring_u8 = np.zeros((self.num_actors, 84, 84, FRAME_STACK), dtype=np.uint8)
+        self._ring_u8[:] = self.obs_u8[..., None]
+
+    def obs_u8_stack(self):
+        """(n, 84, 84, 4) uint8 frame stack, oldest first (same order as _obs)."""
+        order = [(self._ptr + 1 + j) % FRAME_STACK for j in range(FRAME_STACK)]
+        return self._ring_u8[..., order]
+
     def _obs(self):
         order = [(self._ptr + 1 + j) % FRAME_STACK for j in range(FRAME_STACK)]
         return self._ring[..., order]
@@ -865,6 +879,8 @@ class MarioNativeVecEnv(IVecEnv):
         f = self.obs_u8.astype(np.float32) / 255.0
         self._ptr = (self._ptr + 1) % FRAME_STACK
         self._ring[..., self._ptr] = f
+        if self.u8_obs:
+            self._ring_u8[..., self._ptr] = self.obs_u8
 
         # resets for finished episodes (recorders set hold_on_done so the
         # ending / game-over screen keeps playing instead of a fresh level)
@@ -876,6 +892,8 @@ class MarioNativeVecEnv(IVecEnv):
                 self._fetch_obs(i)
                 self._ring[i] = (self.obs_u8[i].astype(np.float32)
                                  / 255.0)[..., None]
+                if self.u8_obs:
+                    self._ring_u8[i] = self.obs_u8[i][..., None]
             self._post_reset_init(realdone_idx, self.ram)
         # life-loss boundaries: re-init episode trackers but keep playing
         soft_idx = list(np.nonzero(life_sync & ~real_done)[0])
@@ -890,6 +908,8 @@ class MarioNativeVecEnv(IVecEnv):
                 # new life = fresh frame stack
                 self._ring[i] = (self.obs_u8[i].astype(np.float32)
                                  / 255.0)[..., None]
+                if self.u8_obs:
+                    self._ring_u8[i] = self.obs_u8[i][..., None]
 
         obs = self._obs()
         return obs, reward.astype(np.float32), done, infos

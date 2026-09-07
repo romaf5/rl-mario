@@ -16,12 +16,26 @@ Usage:
   venv_retro/bin/python grpo/train_grpo.py --config configs/mario_ppo_native_84.yaml \
       --init CHECKPOINT.pth --run-name Mario_GRPO84 [--hours 4]
 """
-import argparse, glob, os, pickle, sys, time, math
+import argparse, copy, glob, os, pickle, sys, threading, time, math
 import numpy as np, torch, yaml
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from rl_games.algos_torch import model_builder
 from mario_native_vecenv import MarioNativeVecEnv, FRAME_STACK
 from tensorboardX import SummaryWriter
+
+
+def _clip_worker(m_cpu, cfg, run_dir, step, level):
+    """Best-of-2 door episodes from `level` with the CPU model copy, hack-free
+    (transitions + ending), published as mp4/npz + TensorBoard GIF."""
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools'))
+        from clip_watcher import record, publish
+        torch.set_num_threads(2)
+        mx, frames, acts, start, total, info, pfr = record(m_cpu, cfg, level, 2, 3000, seed=step)
+        publish(run_dir, step, frames, acts, start, mx, total, info, level, pfr)
+        print(f'  [clip] it {step} {level}: max x {mx}, R {total:.0f}', flush=True)
+    except Exception as e:
+        print(f'  [clip] failed: {e}', flush=True)
 
 
 def build_model(params, cfg, obs_shape, init=None):
@@ -108,10 +122,12 @@ def load_states(env, states):
     env._post_reset_init(range(env.num_actors), env.ram)
     f = env.obs_u8.astype(np.float32) / 255.0
     env._ring[:] = f[..., None]
+    if env.u8_obs:
+        env._ring_u8[:] = env.obs_u8[..., None]
     for i in range(env.num_actors):
         env.start_cell[i] = None
     env.ep_steps[:] = 0
-    return env._obs()
+    return env.obs_u8_stack() if env.u8_obs else env._obs()
 
 
 @torch.no_grad()
@@ -168,6 +184,7 @@ def main():
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--grow-archive', action='store_true', help='record rollout cells into the archive and use them as prompts')
     ap.add_argument('--max-cells', type=int, default=1024)
+    ap.add_argument('--clip-every', type=int, default=100, help='iterations between gameplay clips (background thread, CPU); 0 = off')
     a = ap.parse_args()
 
     params = yaml.safe_load(open(a.config))['params']; cfg = params['config']
@@ -184,7 +201,7 @@ def main():
                    self_restart_cells=a.max_cells, cell_tiles=True, cell_y_band=32,
                    n_threads=a.n_threads, dense_infos=True, seed=a.seed))
     N = a.group * a.groups
-    env = MarioNativeVecEnv('grpo', N, **ec); env.reset()
+    env = MarioNativeVecEnv('grpo', N, **dict(ec, dense_infos=False)); env.reset(); env.enable_u8_obs()
     eval_env = MarioNativeVecEnv('grpo_eval', a.eval_episodes, **dict(ec, sticky_actions=0.0, n_threads=8, seed=a.seed + 1))
     eval_env.reset()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -199,6 +216,7 @@ def main():
     print(f'[grpo] {N} envs = {a.groups} groups x {a.group}; horizon {a.horizon}; run {run_dir}')
 
     H, t0, it, frames = a.horizon, time.time(), 0, 0
+    clip_thread = None
     obs_buf = np.zeros((H, N, *env.observation_space.shape), np.uint8)
     act_buf = np.zeros((H, N), np.int64); logp_buf = np.zeros((H, N), np.float32)
     mask_buf = np.zeros((H, N), np.float32); rew_buf = np.zeros((H, N), np.float32)
@@ -211,17 +229,22 @@ def main():
         model.eval()
         for t in range(H):
             with torch.no_grad():
-                lg = logits_of(model, torch.from_numpy(obs).to(device))
+                lg = logits_of(model, torch.from_numpy(obs).to(device).float().div_(255.0))
                 dist = torch.distributions.Categorical(logits=lg)
                 act = dist.sample(); lp = dist.log_prob(act)
-            obs_buf[t] = np.clip(obs * 255.0, 0, 255).astype(np.uint8)
+            obs_buf[t] = obs                          # already uint8
             act_buf[t] = act.cpu().numpy(); logp_buf[t] = lp.cpu().numpy(); mask_buf[t] = alive
-            obs, r, d, inf = env.step(act_buf[t])
+            _, r, d, inf = env.step(act_buf[t])
+            obs = env.obs_u8_stack()
             rew_buf[t] = np.where(alive, r, 0.0)
-            for i in np.nonzero(alive)[0]:
+            # bookkeeping from env arrays; the env resets finished envs
+            # inside step(), so their pre-reset values come from the info
+            # dicts it still fills for done envs
+            maxx = np.where(alive & ~d, np.maximum(maxx, env.max_x), maxx)
+            for i in np.nonzero(alive & d)[0]:
                 maxx[i] = max(maxx[i], inf[i]['max_x_pos'])
-                if d[i]:
-                    alive[i] = False; loops[i] = bool(inf[i].get('page_reset', inf[i].get('looped', False))); vics[i] = bool(inf[i].get('victory', False))
+                loops[i] = bool(inf[i].get('page_reset', False)); vics[i] = bool(inf[i].get('victory', False))
+            alive &= ~d
             if not alive.any():
                 break
         frames += N * H * 4
@@ -239,7 +262,7 @@ def main():
         # ---- update ----
         model.train()
         T = H * N
-        o = torch.from_numpy(obs_buf.reshape(T, *env.observation_space.shape))
+        o = torch.from_numpy(obs_buf.reshape(T, *env.observation_space.shape)).to(device)   # uint8, ~1 GB at 256x128
         ac = torch.from_numpy(act_buf.reshape(T)).to(device); olp = torch.from_numpy(logp_buf.reshape(T)).to(device)
         mk = torch.from_numpy(mask_buf.reshape(T)).to(device); ad = torch.from_numpy(np.repeat(adv[None], H, 0).reshape(T)).to(device)
         valid = torch.nonzero(mk > 0).squeeze(1)
@@ -248,7 +271,7 @@ def main():
             perm = valid[torch.randperm(len(valid), device=device)]
             for s0 in range(0, len(perm), a.minibatch):
                 idx = perm[s0:s0 + a.minibatch]
-                ob = o[idx.cpu()].to(device).float() / 255.0
+                ob = o[idx].float().div_(255.0)
                 lg = logits_of(model, ob); dist = torch.distributions.Categorical(logits=lg)
                 lp = dist.log_prob(ac[idx]); ratio = torch.exp(lp - olp[idx])
                 A = ad[idx]
@@ -281,6 +304,11 @@ def main():
         if it % 5 == 0:
             print(f'it {it} {el/60:5.1f}min fps {frames/el:5.0f} R {R.mean():7.1f} door_x {maxx[door].mean() if door.any() else 0:6.0f} '
                   f'live_groups {n_live_groups}/{a.groups} loops {loops.mean():.2f} ent {stats["ent"]/n_upd:.3f} kl {stats["kl"]/n_upd:.4f} cells {len(prompts.cells)}', flush=True)
+        if a.clip_every and it % a.clip_every == 0 and not (clip_thread and clip_thread.is_alive()):
+            m_cpu = copy.deepcopy(model).cpu().eval()
+            lvl = prompts.levels[rng.randint(len(prompts.levels))]
+            clip_thread = threading.Thread(target=_clip_worker, args=(m_cpu, cfg, run_dir, it, lvl), daemon=True)
+            clip_thread.start()
         if it % a.eval_every == 0:
             model.eval()
             ev = clean_door_eval(model, eval_env, device, a.eval_episodes)
