@@ -408,6 +408,7 @@ def main():
     ap.add_argument('--cell-variants', type=int, default=3, help='max tile-signature variants per spatial archive cell')
     ap.add_argument('--explorers', type=int, default=0, help='extra envs per iteration that random-walk from least-visited cells ONLY to grow the archive (never in the update)')
     ap.add_argument('--demo-eps', type=float, default=0.2, help='uniform-random action share in the free steps of demo groups (the collapsed policy puts ~0 on the actions a link needs)')
+    ap.add_argument('--clip-demo', type=float, default=1.0, help='PPO clip for demo-group samples (the rest use --clip)')
     ap.add_argument('--hint', type=float, default=1.0, help='soft prefix: prob that a hinted rollout takes the demo action at its first free step (half the group is hinted; 0 = off)')
     ap.add_argument('--bc', type=float, default=0.1, help='self-imitation weight on the forced prefix steps of demo groups (negative log-likelihood of the demo action)')
     ap.add_argument('--init-prompts', default='', help='prompts.pkl of an earlier run: restore demos, graduated links, tails and prompt scores')
@@ -590,6 +591,9 @@ def main():
         mk = torch.from_numpy(mask_buf.reshape(T)).to(device)
         ad = torch.from_numpy((adv_t if a.rtg else np.repeat(adv[None], H, 0)).reshape(T)).to(device)
         valid = torch.nonzero(mk > 0).squeeze(1)
+        # demo-group samples get a looser clip: lifting a ~1e-6 action to
+        # usable mass at 0.2 takes ~25 consistent groups (x1.7 each)
+        clipv = torch.where(demo_env.repeat(H), torch.tensor(a.clip_demo, device=device), torch.tensor(a.clip, device=device))
         # self-imitation on the forced prefix steps of demo groups: the
         # prefix actions are exactly the ones the RL tail will need next
         # when the tail grows, and a clipped policy gradient cannot lift an
@@ -604,7 +608,8 @@ def main():
                 lg = logits_of(model, ob); dist = torch.distributions.Categorical(logits=lg)
                 lp = dist.log_prob(ac[idx]); ratio = torch.exp(lp - olp[idx])
                 A = ad[idx]
-                pg = -torch.min(ratio * A, torch.clamp(ratio, 1 - a.clip, 1 + a.clip) * A).mean()
+                cv = clipv[idx]
+                pg = -torch.min(ratio * A, torch.max(torch.min(ratio, 1 + cv), 1 - cv) * A).mean()
                 ent = dist.entropy().mean()
                 loss = pg - a.entropy * ent
                 if a.bc > 0 and len(bci) > 0:
