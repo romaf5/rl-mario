@@ -52,7 +52,8 @@ def main():
     if not win:
         sys.exit('no winning episode found')
     # replay the winning sequence in a single env for the frames (same door start, deterministic)
-    env = NativeEvalEnv(**dict(ec, episode_life=False, reset_noops=0)); v = env.v; env.reset()
+    ec_r = dict(ec, episode_life=False, reset_noops=0); ec_r.pop('dense_infos', None)
+    env = NativeEvalEnv(**ec_r); v = env.v; env.reset()
     start = win[2]
     v.lib.benv_load(v.env, 0, start); v._fetch_obs(0); v._post_reset_init([0], v.ram)
     v._ring[0] = (v.obs_u8[0].astype(np.float32) / 255.0)[..., None]; obs = v._obs()[0]
