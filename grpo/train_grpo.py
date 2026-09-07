@@ -276,9 +276,13 @@ def main():
         # exploration groups sample from a tempered policy; their stored
         # log-probs are the tempered ones, so the update's ratio stays an
         # honest importance weight (the clip bounds the off-policyness)
+        # exploration groups are drawn at random each iteration (the first
+        # groups are the door prompts: tempering exactly those starved the
+        # base policy of on-policy door samples and froze it at x~150)
         temp = torch.ones(N, 1, device=device)
         if a.explore_groups > 0 and a.explore_temp != 1.0:
-            temp[:a.explore_groups * a.group] = a.explore_temp
+            for g in rng.choice(a.groups, size=min(a.explore_groups, a.groups), replace=False):
+                temp[g * a.group:(g + 1) * a.group] = a.explore_temp
         for t in range(H):
             with torch.no_grad():
                 lg = logits_of(model, torch.from_numpy(obs).to(device).float().div_(255.0))
