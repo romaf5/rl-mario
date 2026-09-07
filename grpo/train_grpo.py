@@ -94,17 +94,19 @@ class Prompts:
     def note_door(self, level, x):
         self.door_x[level] = x if level not in self.door_x else 0.8 * self.door_x[level] + 0.2 * x
 
+    def near_frontier(self, c):
+        sc = self.demos[c][2] if c in self.demos else (self.grad[c][2] if c in self.grad else None)
+        if sc is None or c[0] not in self.door_x:
+            return False
+        fb = int(self.door_x[c[0]]) // 128
+        return fb - 2 <= sc[2] <= fb + 1
+
     def _demo_w(self, c):
         """Demo priority: x3 when its last group partly succeeded (the link
         is being learned), x4 when it starts within a few bins of the door
         policy's own frontier (practise where the door stalls)."""
         w = 3.0 if (self.hist.get(c) and 0.0 < self.hist[c][-1] < 1.0) else 1.0
-        sc = self.demos[c][2]
-        if sc is not None and c[0] in self.door_x:
-            fb = int(self.door_x[c[0]]) // 128
-            if fb - 2 <= sc[2] <= fb + 1:
-                w *= 4.0
-        return w
+        return w * 4.0 if self.near_frontier(c) else w
 
     def record_demo(self, cell, start, acts, start_cell=None):
         # a demo is a walk from another cell into this one: the explorer's
@@ -480,6 +482,9 @@ def main():
         # what the tail needs next; the earlier prefix is random-walk junk
         # (imitating it all cut door progress in half within 10 iterations)
         plen = np.array([len(chosen[i // a.group][3]) if chosen[i // a.group][0] == 'demo' else 0 for i in range(N)])
+        # ... and only for links near the door frontier: imitation on demos
+        # all over the level (weight 0.1) broke pipe-1 entry within 4 iterations
+        bc_ok = np.array([chosen[i // a.group][0] == 'demo' and prompts.near_frontier(chosen[i // a.group][1]) for i in range(N)])
         model.eval()
         for t in range(H):
             with torch.no_grad():
@@ -501,7 +506,7 @@ def main():
             act_np = act.cpu().numpy()
             act_buf[t] = np.where(fz >= 0, fz, act_np); logp_buf[t] = lp.cpu().numpy()
             mask_buf[t] = alive & (fz < 0)             # forced steps carry no policy gradient ...
-            bc_buf[t] = alive & (fz >= 0) & (t >= plen - 2)   # ... but the last 2 are imitated (the run's own explorer demos)
+            bc_buf[t] = alive & (fz >= 0) & (t >= plen - 2) & bc_ok   # ... but the last 2 of frontier links are imitated (the run's own explorer demos)
             _, r, d, inf = env.step(np.concatenate([act_buf[t], np.zeros(a.explorers, np.int64)]) if a.explorers else act_buf[t])
             obs = env.obs_u8_stack()[:N]; r = r[:N]; d = d[:N]
             ec = env.entered_cell
