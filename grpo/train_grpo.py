@@ -92,7 +92,9 @@ class Prompts:
         live = [c for c in self.demos if self.tail[c] < len(self.demos[c][1])]
         if not live:
             return None
-        c = live[rng.randint(len(live))]; start, acts = self.demos[c]
+        idx = {c: i for i, c in enumerate(self.cells)}
+        w = np.array([(self.score[idx[c]] if c in idx else 5.0) + 0.5 for c in live]); w = w / w.sum()
+        c = live[rng.choice(len(live), p=w)]; start, acts = self.demos[c]
         return ('demo', c, start, acts[:len(acts) - self.tail[c]])
 
     def demo_result(self, cell, frac_reached):
@@ -105,6 +107,7 @@ class Prompts:
             self.tail[cell] = max(2, self.tail[cell] - 1)
         if self.tail[cell] >= n:
             self.demos.pop(cell, None); self.tail.pop(cell, None)   # graduated
+            self.graduated = getattr(self, 'graduated', 0) + 1
 
     def frontier(self, k, rng):
         """k least-visited cells (Go-Explore's exploration rule) for the
@@ -195,6 +198,7 @@ def load_states(env, states):
         env._ring_u8[:] = env.obs_u8[..., None]
     for i in range(env.num_actors):
         env.start_cell[i] = None
+        env.ep_cells[i] = set()
     env.ep_steps[:] = 0
     return env.obs_u8_stack() if env.u8_obs else env._obs()
 
@@ -377,7 +381,10 @@ def main():
             m, s = R[sl].mean(), R[sl].std()
             if chosen[g][0] == 'demo':
                 cell = chosen[g][1]
-                prompts.demo_result(cell, float((maxx[sl] >= cell[2] * 128 + 16).mean()))
+                # success = the rollout ENTERED the target cell (same key,
+                # incl. y-band and tile signature); an x-only test let
+                # floor rollouts "reach" the block top by standing there
+                prompts.demo_result(cell, float(np.mean([cell in env.ep_cells[i] for i in range(sl.start, sl.stop)])))
             else:
                 prompts.update(chosen[g][0], float(s))
             if s > 1e-6:
@@ -423,7 +430,7 @@ def main():
                     stats['kl'] += (olp[idx] - lp).mean().item()
                     stats['clipfrac'] += ((ratio - 1).abs() > a.clip).float().mean().item(); stats['n'] += 1
         n_upd = max(stats['n'], 1)
-        door = np.array([isinstance(chosen[i // a.group][0], str) for i in range(N)])
+        door = np.array([isinstance(chosen[i // a.group][0], str) and chosen[i // a.group][0].startswith('door') for i in range(N)])
         el = time.time() - t0
         writer.add_scalar('rewards/step', float(R.mean()), it)
         writer.add_scalar('grpo/live_groups', n_live_groups / a.groups, it)
@@ -440,9 +447,10 @@ def main():
         writer.add_scalar('mario/cell_max_x', float(maxx[~door].mean()) if (~door).any() else 0.0, it)
         writer.add_scalar('grpo/prompt_cells', len(prompts.cells), it)
         writer.add_scalar('grpo/demos', len(prompts.demos), it)
+        writer.add_scalar('grpo/demos_graduated', getattr(prompts, 'graduated', 0), it)
         if it % 5 == 0:
             print(f'it {it} {el/60:5.1f}min fps {frames/el:5.0f} R {R.mean():7.1f} door_x {maxx[door].mean() if door.any() else 0:6.0f} '
-                  f'live_groups {n_live_groups}/{a.groups} loops {loops.mean():.2f} ent {stats["ent"]/n_upd:.3f} kl {stats["kl"]/n_upd:.4f} cells {len(prompts.cells)} demos {len(prompts.demos)}', flush=True)
+                  f'live_groups {n_live_groups}/{a.groups} loops {loops.mean():.2f} ent {stats["ent"]/n_upd:.3f} kl {stats["kl"]/n_upd:.4f} cells {len(prompts.cells)} demos {len(prompts.demos)} grad {getattr(prompts, "graduated", 0)}', flush=True)
         if a.clip_every and it % a.clip_every == 0 and not (clip_thread and clip_thread.is_alive()):
             m_cpu = copy.deepcopy(model).cpu().eval()
             lvl = prompts.levels[rng.randint(len(prompts.levels))]
