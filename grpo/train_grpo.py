@@ -76,6 +76,25 @@ class Prompts:
         self.uses[idx] += 1
         self.score[idx] = 0.7 * self.score[idx] + 0.3 * group_std
 
+    def refresh(self, archive):
+        """Adopt cells the env archived during rollouts (new prompts start
+        optimistic so they get sampled soon)."""
+        known = set(self.cells); added = 0
+        for k, e in archive.items():
+            if k[0] != '8-4' or k in known:
+                continue
+            sts = e[0] if isinstance(e[0], list) else [e[0]]
+            self.cells.append(k); self.states.append(list(sts)); added += 1
+        if added:
+            self.score = np.concatenate([self.score, np.full(added, 5.0)])
+            self.uses = np.concatenate([self.uses, np.zeros(added, int)])
+        # keep state variants fresh for cells the env re-saved
+        for i, k in enumerate(self.cells):
+            e = archive.get(k)
+            if e is not None:
+                self.states[i] = list(e[0] if isinstance(e[0], list) else [e[0]])
+        return added
+
 
 def load_states(env, states):
     """Put every env at its given savestate and rebuild all Python trackers
@@ -134,14 +153,23 @@ def main():
     ap.add_argument('--eval-episodes', type=int, default=32)
     ap.add_argument('--n-threads', type=int, default=12)
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--grow-archive', action='store_true', help='record rollout cells into the archive and use them as prompts')
+    ap.add_argument('--max-cells', type=int, default=1024)
     a = ap.parse_args()
 
     params = yaml.safe_load(open(a.config))['params']; cfg = params['config']
     ec = dict(cfg['env_config']); ec.pop('name', None); ec.pop('action_type', None)
-    # the env provides observations, dynamics and the per-step reward; no
-    # archive machinery, no exploration noise beyond the policy's own sampling
-    ec.update(dict(self_restart_prob=0.0, explore_eps=0.0, explore_episode_prob=0.0, novelty_bonus=0.0,
-                   archive_path=None, n_threads=a.n_threads, dense_infos=True, seed=a.seed))
+    # the env provides observations, dynamics and the per-step reward, and
+    # (grow_archive) records a Go-Explore cell archive from the rollouts:
+    # new cells become prompts, so groups start where the policy's outcomes
+    # still vary (from scratch, door-only prompts collapse to zero variance
+    # at the first obstacle). No exploration noise beyond the policy's own
+    # sampling; the tiny restart prob only switches the env's archiving on
+    # (dead rollouts are masked, so its resets are never trained on).
+    ec.update(dict(self_restart_prob=1e-6 if a.grow_archive else 0.0, explore_eps=0.0,
+                   explore_episode_prob=0.0, archive_path=a.archive if a.grow_archive else None,
+                   self_restart_cells=a.max_cells, cell_tiles=True, cell_y_band=32,
+                   n_threads=a.n_threads, dense_infos=True, seed=a.seed))
     N = a.group * a.groups
     env = MarioNativeVecEnv('grpo', N, **ec); env.reset()
     eval_env = MarioNativeVecEnv('grpo_eval', a.eval_episodes, **dict(ec, sticky_actions=0.0, n_threads=8, seed=a.seed + 1))
@@ -184,6 +212,8 @@ def main():
             if not alive.any():
                 break
         frames += N * H * 4
+        if a.grow_archive:
+            prompts.refresh(env.archive)
         R = rew_buf.sum(0)                                        # outcome per rollout
         adv = np.zeros(N, np.float32); n_live_groups = 0
         for g in range(a.groups):
@@ -234,9 +264,10 @@ def main():
         writer.add_scalar('mario/loop_rate', float(loops.mean()), it)
         writer.add_scalar('mario/victory_rate', float(vics.mean()), it)
         writer.add_scalar('mario/cell_max_x', float(maxx[~door].mean()) if (~door).any() else 0.0, it)
+        writer.add_scalar('grpo/prompt_cells', len(prompts.cells), it)
         if it % 5 == 0:
             print(f'it {it} {el/60:5.1f}min fps {frames/el:5.0f} R {R.mean():7.1f} door_x {maxx[door].mean() if door.any() else 0:6.0f} '
-                  f'live_groups {n_live_groups}/{a.groups} loops {loops.mean():.2f} ent {stats["ent"]/n_upd:.3f} kl {stats["kl"]/n_upd:.4f}', flush=True)
+                  f'live_groups {n_live_groups}/{a.groups} loops {loops.mean():.2f} ent {stats["ent"]/n_upd:.3f} kl {stats["kl"]/n_upd:.4f} cells {len(prompts.cells)}', flush=True)
         if it % a.eval_every == 0:
             model.eval()
             ev = clean_door_eval(model, eval_env, device, a.eval_episodes)
