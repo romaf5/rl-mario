@@ -382,7 +382,11 @@ def main():
                 forced[:len(pre), g * a.group:(g + 1) * a.group] = np.array(pre)[:, None]
         if a.explorers:
             env.explorer[N:] = H          # env substitutes persistent random actions for these
-            xacts = [[] for _ in range(a.explorers)]; xcell = [None] * a.explorers
+            xacts = [[] for _ in range(a.explorers)]
+            # start cell from the loaded state itself (a first-step jump
+            # left it unknown before, and unknown bypassed the direction
+            # filter: that is how "drop from the pipe top" demos got in)
+            xcell = [env.cell_of(N + j) for j in range(a.explorers)]
         alive = np.ones(N, bool); maxx = np.zeros(N); loops = np.zeros(N, bool); vics = np.zeros(N, bool)
         model.eval()
         for t in range(H):
@@ -400,11 +404,8 @@ def main():
                 for j in range(a.explorers):
                     xacts[j].append(int(env.last_action[N + j]))
                     c = env.entered_cell[N + j]
-                    if c is not None:
-                        if xcell[j] is None and t == 0:
-                            xcell[j] = c              # the explorer's own start cell
-                        elif len(xacts[j]) <= 96:
-                            prompts.record_demo(c, xstates[j], xacts[j], start_cell=xcell[j])
+                    if c is not None and len(xacts[j]) <= 96:
+                        prompts.record_demo(c, xstates[j], xacts[j], start_cell=xcell[j])
             rew_buf[t] = np.where(alive, r, 0.0)
             # bookkeeping from env arrays; the env resets finished envs
             # inside step(), so their pre-reset values come from the info

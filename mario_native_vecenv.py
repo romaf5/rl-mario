@@ -441,6 +441,15 @@ class MarioNativeVecEnv(IVecEnv):
         idx = base[:, None] + (np.arange(13) * 16)[None, :]
         return int(zlib.crc32(self.ram[i][idx].tobytes()) & 0xFFFF)
 
+    def cell_of(self, i):
+        """Archive cell key of env i's CURRENT state (same composition as the
+        archive save), regardless of whether it would be saved now."""
+        r = self.ram[i]; x = int(r[0x6D]) * 256 + int(r[0x86])
+        gp = min(max(int(r[0x75F]) * 4 + int(r[0x75C]), 0), 31)
+        return ('%d-%d' % (gp // 4 + 1, gp % 4 + 1), int(r[0x760]), x // 128,
+                int(r[0x3B8]) // self.cell_y_band, int(r[0x704]), int(r[0x74E]),
+                self._tile_sig(i, x) if self.cell_tiles else 0)
+
     def _post_reset_init(self, idx, ram):
         """Re-init per-env python state for envs in idx from fresh RAM
         (new episode or new life)."""
