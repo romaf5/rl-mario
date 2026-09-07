@@ -128,7 +128,7 @@ class Prompts:
             return None
         idx = {c: i for i, c in enumerate(self.cells)}
         w = np.array([(self.score[idx[c]] if c in idx else 5.0) + 0.5 for c in live]); w = w / w.sum()
-        c = live[rng.choice(len(live), p=w)]; start, acts = self.demos[c]
+        c = live[rng.choice(len(live), p=w)]; start, acts, _ = self.demos[c]
         return ('demo', c, start, acts[:len(acts) - self.tail[c]])
 
     def demo_result(self, cell, frac_reached):
