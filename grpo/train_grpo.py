@@ -98,7 +98,7 @@ class Prompts:
             sts = e[0] if isinstance(e[0], list) else [e[0]]
             self.cells.append(k); self.states.append(sts)
         self.score = np.ones(len(self.cells)) * 5.0     # (rescaled to the running max as scores arrive)
-        self.uses = np.zeros(len(self.cells), int)
+        self.uses = np.zeros(len(self.cells), int); self.xuses = np.zeros(len(self.cells), int)
         print(f'[prompts] door + {len(self.cells)} archive cells')
         # graduated demos stay: re-checked now and then with no forced
         # prefix and re-armed when the policy has forgotten them (a link
@@ -143,10 +143,14 @@ class Prompts:
             return
         if cell in self.grad:
             return
-        if cell not in self.demos or len(acts) < len(self.demos[cell][1]):
-            # tail < len or the demo is never live: a 3-action link (pipe
-            # top -> DOWN) used to sit dead at tail 4 and never graduate
-            self.demos[cell] = (start, list(acts), start_cell); self.tail[cell] = min(self.tail.get(cell, 4), 4, len(acts) - 1)
+        # tail < len or the demo is never live: a 3-action link (pipe
+        # top -> DOWN) used to sit dead at tail 4 and never graduate
+        if cell not in self.demos:
+            self.demos[cell] = (start, list(acts), start_cell); self.tail[cell] = min(4, len(acts) - 1)
+        elif len(acts) < len(self.demos[cell][1]) and (not any(h > 0 for h in self.hist.get(cell, [])) or 2 * len(acts) <= len(self.demos[cell][1])):
+            # a shorter walk replaces a link only before it has any success,
+            # or when it is at most half as long; the tail is kept
+            self.demos[cell] = (start, list(acts), start_cell); self.tail[cell] = min(self.tail.get(cell, 4), len(acts) - 1)
 
     def load_dump(self, path):
         """Restore demos, graduated links, tails, histories and prompt
@@ -165,7 +169,13 @@ class Prompts:
             self.grad[c] = (v[2], list(v[1]), v[3] if len(v) > 3 else None)
         self.graduated = len(self.grad); self.door_x = dict(z.get('door_x', {}))
         for c in list(self.demos):
-            self.tail[c] = min(self.tail.get(c, 4), 4, len(self.demos[c][1]) - 1)
+            self.tail[c] = min(self.tail.get(c, 4), len(self.demos[c][1]) - 1)      # restored tails are kept (a cap of 4 threw the schedule away)
+        if n_sc:
+            # cells the dump does not know start at the restored running max, like new cells
+            mx = max(float(z['score'][zi[c]]) for c in idx if c in zi)
+            for c, i in idx.items():
+                if c not in zi:
+                    self.score[i] = max(mx, 5.0)
         print(f'[prompts] restored {len(self.demos)} demos, {len(self.grad)} graduated, scores of {n_sc} cells from {path}', flush=True)
 
     def boost(self, cell):
@@ -186,6 +196,7 @@ class Prompts:
         # score starved every link whose target had not paid off yet), with
         # triple weight for a demo whose last group partly succeeded: that
         # is the link being learned right now
+        live = [c for c in live if self.near_frontier(c)] or live       # links where the door stalls first, when known
         w = np.array([self._demo_w(c) for c in live]); w = w / w.sum()
         c = live[rng.choice(len(live), p=w)]; start, acts, _ = self.demos[c]
         return ('demo', c, start, acts[:len(acts) - self.tail[c]], acts)
@@ -216,10 +227,12 @@ class Prompts:
         archive-growing random walkers; door states when there are no cells."""
         if not self.cells:
             return [self.doors[self.levels[rng.randint(len(self.levels))]] for _ in range(k)]
-        w = 1.0 / (1.0 + self.uses); w = w / w.sum()
+        if len(self.xuses) != len(self.cells):
+            self.xuses = np.concatenate([self.xuses, np.zeros(len(self.cells) - len(self.xuses), int)])
+        w = 1.0 / (1.0 + self.uses + self.xuses); w = w / w.sum()      # explorer starts count too, else never-prompted cells are walked forever
         out = []
         for _ in range(k):
-            i = rng.choice(len(self.cells), p=w)
+            i = rng.choice(len(self.cells), p=w); self.xuses[i] += 1
             out.append(self.states[i][rng.randint(len(self.states[i]))])
         return out
 
@@ -275,6 +288,7 @@ class Prompts:
                     c = grad[rng.randint(len(grad))]
                     out.append(('demo', c, self.grad[c][0], [], self.grad[c][1])); continue   # re-check, no prefix
                 if live:
+                    live = [c for c in live if self.near_frontier(c)] or live
                     w = np.array([self._demo_w(c) for c in live]); w = w / w.sum()
                     c = live[rng.choice(len(live), p=w)]; start, acts, _ = self.demos[c]
                     out.append(('demo', c, start, acts[:len(acts) - self.tail[c]], acts)); continue
@@ -333,7 +347,7 @@ def load_states(env, states):
         env._ring_u8[:] = env.obs_u8[..., None]
     for i in range(env.num_actors):
         env.start_cell[i] = None
-        env.ep_cells[i] = set()
+    env._seed_cells(range(env.num_actors))
     env.ep_steps[:] = 0
     return env.obs_u8_stack() if env.u8_obs else env._obs()
 
@@ -423,7 +437,7 @@ def main():
     ap.add_argument('--gamma', type=float, default=0.99)
     ap.add_argument('--cell-variants', type=int, default=3, help='max tile-signature variants per spatial archive cell')
     ap.add_argument('--explorers', type=int, default=0, help='extra envs per iteration that random-walk from least-visited cells ONLY to grow the archive (never in the update)')
-    ap.add_argument('--demo-eps', type=float, default=0.2, help='uniform-random action share in the free steps of demo groups (the collapsed policy puts ~0 on the actions a link needs)')
+    ap.add_argument('--demo-eps', type=float, default=0.0, help='uniform-random action share in the free steps of demo groups (the collapsed policy puts ~0 on the actions a link needs)')
     ap.add_argument('--cell-bonus', type=float, default=0.0, help='env novelty bonus per first entry of a grounded archive cell per life')
     ap.add_argument('--clip-demo', type=float, default=1.0, help='PPO clip for demo-group samples (the rest use --clip)')
     ap.add_argument('--hint', type=float, default=1.0, help='soft prefix: prob that a hinted rollout takes the demo action at its first free step (half the group is hinted; 0 = off)')
@@ -448,7 +462,11 @@ def main():
     N = a.group * a.groups
     NX = N + a.explorers              # explorers ride along in the same batch, outside the buffers
     env = MarioNativeVecEnv('grpo', NX, **dict(ec, dense_infos=False, explore_pure=True)); env.reset(); env.enable_u8_obs()
-    eval_env = MarioNativeVecEnv('grpo_eval', a.eval_episodes, **dict(ec, sticky_actions=0.0, n_threads=8, seed=a.seed + 1))
+    # the eval env must not archive: it used to write its own stale copy of
+    # the archive to the same file after every eval
+    eval_env = MarioNativeVecEnv('grpo_eval', a.eval_episodes, **dict(ec, sticky_actions=0.0, n_threads=8, seed=a.seed + 1, archive_path=None, self_restart_prob=0.0))
+    if a.demo_share > 0 and not a.grow_archive:
+        print('[grpo] WARNING: --demo-share needs --grow-archive (cell entries are only detected when the env archives); demos will never be recorded', flush=True)
     eval_env.reset()
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model = build_model(params, cfg, env.observation_space.shape, a.init).to(device)
@@ -500,7 +518,7 @@ def main():
         # imitate only the last 2 forced actions before the tail: those are
         # what the tail needs next; the earlier prefix is random-walk junk
         # (imitating it all cut door progress in half within 10 iterations)
-        plen = np.array([len(chosen[i // a.group][3]) if chosen[i // a.group][0] == 'demo' else 0 for i in range(N)])
+        plen = np.array([min(len(chosen[i // a.group][3]), H) if chosen[i // a.group][0] == 'demo' else 0 for i in range(N)])
         # ... and only for links near the door frontier: imitation on demos
         # all over the level (weight 0.1) broke pipe-1 entry within 4 iterations
         bc_ok = np.array([chosen[i // a.group][0] == 'demo' and prompts.near_frontier(chosen[i // a.group][1]) for i in range(N)])

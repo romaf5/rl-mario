@@ -454,6 +454,13 @@ class MarioNativeVecEnv(IVecEnv):
                 int(r[0x3B8]) // self.cell_y_band, int(r[0x704]), int(r[0x74E]),
                 self._tile_sig(i, x) if self.cell_tiles else 0)
 
+    def _seed_cells(self, idx):
+        """A new life's visited-cell set starts with the cell it stands in:
+        the start cell is not a discovery (it used to pay the novelty bonus
+        on the first grounded step, at an action-dependent time)."""
+        for i in idx:
+            self.ep_cells[i] = {self.cell_of(i)} if self.sr_prob > 0 else set()
+
     def _post_reset_init(self, idx, ram):
         """Re-init per-env python state for envs in idx from fresh RAM
         (new episode or new life)."""
@@ -674,7 +681,7 @@ class MarioNativeVecEnv(IVecEnv):
 
         # ---- self-restart archiving ----
         self.entered_cell = [None] * n
-        entered = np.zeros(n, dtype=bool)
+        entered = np.zeros(n, dtype=bool); paid_cell = np.zeros(n, dtype=bool)
         if self.sr_prob > 0:
             fstate = self._field(0x1D)
             # grounded on land; swimming counts as controlled in water
@@ -704,6 +711,7 @@ class MarioNativeVecEnv(IVecEnv):
                 if cell not in self.archive and self.cell_max_variants > 0 and \
                         sum(1 for c in self.archive if c[:6] == cell[:6]) >= self.cell_max_variants:
                     continue        # yet another tile variant of a known spot
+                paid_cell[i] = True     # novelty bonus only for cells the archive keeps (variants beyond the cap are not new places)
                 if cell not in self.archive:
                     if len(self.archive) >= self.sr_cells:
                         # evict the OLDEST cell no episode is practising
@@ -754,7 +762,7 @@ class MarioNativeVecEnv(IVecEnv):
                       single_stage=self.single_stage)
         reward = self.rewards(sig)
         if self.cell_bonus > 0:
-            reward = reward + self.cell_bonus * entered
+            reward = reward + self.cell_bonus * paid_cell
         paid = reward > 0
         # contiguous steps without a positive reward -> cutoff. After a page
         # reset the remaining budget shrinks to the grace window and the
@@ -771,7 +779,7 @@ class MarioNativeVecEnv(IVecEnv):
         sig.timeout = timeout
         self.last_terms = dict(self.rewards.last)
         if self.cell_bonus > 0:
-            self.last_terms['cell_bonus'] = self.cell_bonus * entered
+            self.last_terms['cell_bonus'] = self.cell_bonus * paid_cell
         self.last_signals = sig
 
         # ---- trackers ----
