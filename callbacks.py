@@ -95,7 +95,11 @@ class MarioObserver(AlgoObserver):
             self.episode_progress.append(info['game_progress'])
 
         if 'flag_get' in info:
-            self.episode_flags.append(float(info['flag_get']))
+            # the flag byte is already clear on the step the episode ends
+            # (level change), so the rate read 0.000 forever; count the
+            # level advance instead
+            self.episode_flags.append(float(bool(info['flag_get'])
+                                            or info.get('stages_cleared', 0) > 0))
 
         if 'life' in info:
             # 0xFF is the game-over sentinel, not 255 lives
@@ -760,6 +764,16 @@ class MarioObserver(AlgoObserver):
                 # Eval frontier scalars: deterministic sequential run from 1-1
                 self.writer.add_scalar('eval/game_progress',
                                        info.get('game_progress', 0), epoch_num)
+                # route-aware: the level index only counts while on the
+                # configured route; an off-route exit (1-2 flag -> 1-3,
+                # warp pipe 2 -> 2-1) is flagged instead of counted
+                route = (self.algo.env_config or {}).get('random_stages') or []
+                rgp = {(int(l[0]) - 1) * 4 + int(l[2]) - 1 for l in route}
+                gp_now = int(info.get('game_progress', 0))
+                self.writer.add_scalar('eval/route_progress',
+                                       gp_now if (not rgp or gp_now in rgp) else -1, epoch_num)
+                self.writer.add_scalar('eval/off_route_exit',
+                                       int(bool(rgp) and gp_now not in rgp), epoch_num)
                 self.writer.add_scalar(
                     'eval/max_x', max(s[2] for s in step_stats), epoch_num)
                 print(f'  [Video] Epoch {epoch_num}: reward={total_reward:.0f}, '
