@@ -31,9 +31,25 @@ def _clip_worker(m_cpu, cfg, run_dir, step, level):
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools'))
         from clip_watcher import record, publish
         torch.set_num_threads(2)
-        mx, frames, acts, start, total, info, pfr = record(m_cpu, cfg, level, 2, 3000, seed=step)
-        publish(run_dir, step, frames, acts, start, mx, total, info, level, pfr)
-        print(f'  [clip] it {step} {level}: max x {mx}, R {total:.0f}', flush=True)
+        levels = list(cfg['env_config'].get('random_stages') or [level])
+        if len(levels) <= 1:
+            mx, frames, acts, start, total, info, pfr = record(m_cpu, cfg, level, 2, 3000, seed=step)
+            publish(run_dir, step, frames, acts, start, mx, total, info, level, pfr)
+            print(f'  [clip] it {step} {level}: max x {mx}, R {total:.0f}', flush=True)
+            return
+        # route run: one clip per level (until the level is left or the
+        # lives are gone) + the full game from the first level, as the PPO
+        # observer did; tags gameplay/level_<lvl> and gameplay/fullgame
+        from tensorboardX import SummaryWriter
+        w = SummaryWriter(os.path.join(run_dir, 'summaries'))
+        for lvl in levels:
+            mx, frames, acts, start, total, info, pfr = record(m_cpu, cfg, lvl, 1, 3000, seed=step, route=levels, stop_on_level_change=True)
+            publish(run_dir, step, frames, acts, start, mx, total, info, lvl, pfr, tag=f'gameplay/level_{lvl}', name=f'clip_{step:06d}_{lvl}')
+            w.add_scalar(f'eval/level_max_x/{lvl}', mx, step)
+        mx, frames, acts, start, total, info, pfr = record(m_cpu, cfg, levels[0], 1, 8000, seed=step, route=levels)
+        publish(run_dir, step, frames, acts, start, mx, total, info, levels[0], pfr, tag='gameplay/fullgame', name=f'clip_{step:06d}_fullgame')
+        gp = int(info.get('game_progress', 0)); w.add_scalar('eval/fullgame_clip_level', gp, step); w.flush(); w.close()
+        print(f'  [clip] it {step}: per-level clips + full game reached {gp // 4 + 1}-{gp % 4 + 1} (x {mx})', flush=True)
     except Exception as e:
         print(f'  [clip] failed: {e}', flush=True)
 

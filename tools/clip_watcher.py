@@ -15,9 +15,14 @@ from mario_native_vecenv import NativeEvalEnv
 from callbacks import MarioObserver
 
 
-def record(model, cfg, level, episodes, max_steps, seed):
-    ec = dict(cfg['env_config']); [ec.pop(k, None) for k in ('name', 'action_type', 'archive_path')]
+def record(model, cfg, level, episodes, max_steps, seed, route=None, stop_on_level_change=False):
+    """route: the run's level list (so a warp/exit into another route level is
+    a transition, not a wrong exit). stop_on_level_change: end the clip once
+    the level is left (per-level clips); else play on (full game)."""
+    ec = dict(cfg['env_config']); [ec.pop(k, None) for k in ('name', 'action_type', 'archive_path', 'video_levels')]
     ec.update(random_stages=[level], sticky_actions=0, explore_eps=0, self_restart_prob=0, reset_noops=0, episode_life=False)
+    if route:
+        ec['route_levels'] = list(route)
     torch.manual_seed(seed); best = None
     for ep in range(episodes):
         env = NativeEvalEnv(**ec); v = env.v; v._raw_steps = True; v.hold_on_done = True; obs = env.reset()     # hack-free, no reset after done
@@ -33,6 +38,12 @@ def record(model, cfg, level, episodes, max_steps, seed):
                 life_r = 0.0
             prev_life = info.get('life'); life_r += r
             per_frame_r.extend([life_r] * len(env.frames4))
+            if stop_on_level_change and step == 0:
+                gp0 = info.get('game_progress')
+            if stop_on_level_change and not done and info.get('game_progress') != gp0:
+                for _ in range(30):                                   # a moment of the next level, then cut
+                    obs, r, _d, _i = env.step(0); frames.extend(env.frames4); per_frame_r.extend([life_r] * len(env.frames4))
+                break
             if done:
                 for _ in range(240 if info.get('victory') else 90):    # ending / game-over screen keeps playing
                     obs, r, _d, _i = env.step(0); frames.extend(env.frames4); per_frame_r.extend([life_r] * len(env.frames4))
@@ -44,7 +55,7 @@ def record(model, cfg, level, episodes, max_steps, seed):
     return best
 
 
-def publish(run_dir, step, frames, acts, start, mx, total, info, level, per_frame_r=None):
+def publish(run_dir, step, frames, acts, start, mx, total, info, level, per_frame_r=None, tag='gameplay/clip', name=None):
     from PIL import Image, ImageDraw
     import imageio
     from tensorboardX import SummaryWriter
@@ -53,7 +64,7 @@ def publish(run_dir, step, frames, acts, start, mx, total, info, level, per_fram
     except ImportError:
         from tensorboard.compat.proto.summary_pb2 import Summary
     vdir = os.path.join(run_dir, 'videos'); os.makedirs(vdir, exist_ok=True)
-    base = os.path.join(vdir, 'clip_%06d_x%d' % (step, mx))
+    base = os.path.join(vdir, (name or 'clip_%06d' % step) + '_x%d' % mx)
     imageio.mimsave(base + '.mp4', frames, fps=60, macro_block_size=None)
     np.savez_compressed(base + '.npz', state=np.frombuffer(start, dtype=np.uint8), actions=np.array(acts, dtype=np.int16), level=level, raw=1, step=step)
     # all 60 fps frames, like the observer's clips: _gif_bytes picks every 2nd
@@ -67,8 +78,8 @@ def publish(run_dir, step, frames, acts, start, mx, total, info, level, per_fram
         pil.append(im)
     gif = MarioObserver._gif_bytes(pil, per_step=4)
     w = SummaryWriter(os.path.join(run_dir, 'summaries'))
-    w.file_writer.add_summary(Summary(value=[Summary.Value(tag='gameplay/clip', image=Summary.Image(height=224, width=240, colorspace=3, encoded_image_string=gif))]), step)
-    w.add_scalar('gameplay/clip_max_x', mx, step); w.add_scalar('gameplay/clip_reward', total, step); w.flush(); w.close()
+    w.file_writer.add_summary(Summary(value=[Summary.Value(tag=tag, image=Summary.Image(height=224, width=240, colorspace=3, encoded_image_string=gif))]), step)
+    w.add_scalar(tag + '_max_x', mx, step); w.add_scalar(tag + '_reward', total, step); w.flush(); w.close()
     return base + '.mp4', len(gif)
 
 
