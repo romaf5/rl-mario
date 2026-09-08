@@ -76,6 +76,7 @@ class Prompts:
 
     demo_share = 0.0
     round_robin = True
+    K = 4                     # demos per link from distinct start states
 
     def __init__(self, env, archive_path, door_share):
         # one door state per configured level (8-4 only, or the whole route)
@@ -111,11 +112,11 @@ class Prompts:
         self.door_x[level] = x if level not in self.door_x else 0.8 * self.door_x[level] + 0.2 * x
 
     def near_frontier(self, c):
-        sc = self.demos[c][2] if c in self.demos else (self.grad[c][2] if c in self.grad else None)
-        if sc is None or c[0] not in self.door_x:
+        scs = [e[2] for e in (self.demos.get(c) or self.grad.get(c) or []) if e[2] is not None]
+        if not scs or c[0] not in self.door_x:
             return False
         fb = int(self.door_x[c[0]]) // 128
-        return fb - 2 <= sc[2] <= fb + 1
+        return any(fb - 2 <= sc[2] <= fb + 1 for sc in scs)
 
     def _demo_w(self, c):
         """Demo priority: x3 when its last group partly succeeded (the link
@@ -141,16 +142,35 @@ class Prompts:
         same_frame = start_cell is not None and (cell[0], cell[1], cell[4], cell[5]) == (start_cell[0], start_cell[1], start_cell[4], start_cell[5])
         if same_frame and not (cell[2] > start_cell[2] or (cell[2] == start_cell[2] and cell[3] < start_cell[3])):
             return
+        entry = (start, list(acts), start_cell)
         if cell in self.grad:
+            # a walk at most half as long re-arms a graduated link: a long
+            # walk gets learned verbatim and never transfers
+            if 2 * len(acts) <= min(len(e[1]) for e in self.grad[cell]):
+                self.grad.pop(cell); self.graduated = len(self.grad)
+                self.demos[cell] = [entry]; self.tail[cell] = min(4, len(acts) - 1)
             return
-        # tail < len or the demo is never live: a 3-action link (pipe
-        # top -> DOWN) used to sit dead at tail 4 and never graduate
-        if cell not in self.demos:
-            self.demos[cell] = (start, list(acts), start_cell); self.tail[cell] = min(4, len(acts) - 1)
-        elif len(acts) < len(self.demos[cell][1]) and (not any(h > 0 for h in self.hist.get(cell, [])) or 2 * len(acts) <= len(self.demos[cell][1])):
-            # a shorter walk replaces a link only before it has any success,
-            # or when it is at most half as long; the tail is kept
-            self.demos[cell] = (start, list(acts), start_cell); self.tail[cell] = min(self.tail.get(cell, 4), len(acts) - 1)
+        ents = self.demos.get(cell)
+        if ents is None:
+            # tail < len or the demo is never live: a 3-action link (pipe
+            # top -> DOWN) used to sit dead at tail 4 and never graduate
+            self.demos[cell] = [entry]; self.tail[cell] = min(4, len(acts) - 1)
+            return
+        # up to K demos per link from DISTINCT start states with ONE shared
+        # tail: the policy must manage the final approach from whichever
+        # start, which is what transfers (one start per link was learned
+        # frame-exactly and failed from every other state of the same cell)
+        same = [k for k, e in enumerate(ents) if e[0] == start]
+        if same:
+            if len(acts) < len(ents[same[0]][1]):
+                ents[same[0]] = entry
+        elif len(ents) < self.K:
+            ents.append(entry)
+        else:
+            k = max(range(len(ents)), key=lambda k: len(ents[k][1]))
+            if len(acts) < len(ents[k][1]):
+                ents[k] = entry
+        self.tail[cell] = min(self.tail.get(cell, 4), max(len(e[1]) for e in ents) - 1)
 
     def load_dump(self, path):
         """Restore demos, graduated links, tails, histories and prompt
@@ -162,21 +182,22 @@ class Prompts:
         for c, i in idx.items():
             if c in zi:
                 self.score[i] = float(z['score'][zi[c]]); self.uses[i] = int(z['uses'][zi[c]]); n_sc += 1
+        conv = lambda v: [(e[2], list(e[1]), e[3] if len(e) > 3 else None) for e in (v if isinstance(v, list) else [v])]
         for c, v in z.get('demos', {}).items():
-            self.demos[c] = (v[2], list(v[1]), v[3] if len(v) > 3 else None)
+            self.demos[c] = conv(v)
         self.tail = dict(z.get('tail', {})); self.hist = dict(z.get('hist', {}))
         for c, v in z.get('grad', {}).items():
-            self.grad[c] = (v[2], list(v[1]), v[3] if len(v) > 3 else None)
+            self.grad[c] = conv(v)
         self.graduated = len(self.grad); self.door_x = dict(z.get('door_x', {}))
         for c in list(self.demos):
-            self.tail[c] = min(self.tail.get(c, 4), len(self.demos[c][1]) - 1)      # restored tails are kept (a cap of 4 threw the schedule away)
+            self.tail[c] = min(self.tail.get(c, 4), max(len(e[1]) for e in self.demos[c]) - 1)      # restored tails are kept (a cap of 4 threw the schedule away)
         if n_sc:
             # cells the dump does not know start at the restored running max, like new cells
             mx = max(float(z['score'][zi[c]]) for c in idx if c in zi)
             for c, i in idx.items():
                 if c not in zi:
                     self.score[i] = max(mx, 5.0)
-        print(f'[prompts] restored {len(self.demos)} demos, {len(self.grad)} graduated, scores of {n_sc} cells from {path}', flush=True)
+        print(f'[prompts] restored {sum(len(v) for v in self.demos.values())} demos for {len(self.demos)} links, {len(self.grad)} graduated, scores of {n_sc} cells from {path}', flush=True)
 
     def boost(self, cell):
         """A cell whose successor just became reachable is where outcomes
@@ -186,10 +207,10 @@ class Prompts:
             i = self.cells.index(cell); self.score[i] = max(float(self.score.max()), 5.0)
 
     def demo_prompt(self, rng):
-        live = [c for c in self.demos if self.tail[c] < len(self.demos[c][1])]
+        live = [c for c in self.demos if self.tail[c] < max(len(e[1]) for e in self.demos[c])]
         if self.grad and (not live or rng.rand() < 0.2):
-            gl = list(self.grad); c = gl[rng.randint(len(gl))]
-            return ('demo', c, self.grad[c][0], [], self.grad[c][1])   # re-check: no prefix
+            gl = list(self.grad); c = gl[rng.randint(len(gl))]; e = self.grad[c][rng.randint(len(self.grad[c]))]
+            return ('demo', c, e[0], [], e[1])   # re-check: no prefix, any of its starts
         if not live:
             return None
         # near-uniform over live demos (weighting by the target's prompt
@@ -198,20 +219,20 @@ class Prompts:
         # is the link being learned right now
         live = [c for c in live if self.near_frontier(c)] or live       # links where the door stalls first, when known
         w = np.array([self._demo_w(c) for c in live]); w = w / w.sum()
-        c = live[rng.choice(len(live), p=w)]; start, acts, _ = self.demos[c]
-        return ('demo', c, start, acts[:len(acts) - self.tail[c]], acts)
+        c = live[rng.choice(len(live), p=w)]; start, acts, _ = self.demos[c][rng.randint(len(self.demos[c]))]
+        return ('demo', c, start, acts[:max(0, len(acts) - self.tail[c])], acts)
 
     def demo_result(self, cell, frac_reached):
         self.hist.setdefault(cell, []).append(round(frac_reached, 2))
         if cell in self.grad:               # re-check of a graduated demo
             if frac_reached < 0.5:
-                start, acts, sc = self.grad.pop(cell)
-                self.demos[cell] = (start, acts, sc); self.tail[cell] = max(1, len(acts) - 4)
+                ents = self.grad.pop(cell)
+                self.demos[cell] = ents; self.tail[cell] = max(1, max(len(e[1]) for e in ents) - 4)
                 self.graduated = len(self.grad)
             return
         if cell not in self.demos:          # graduated by another group this iteration
             return
-        n = len(self.demos[cell][1])
+        n = max(len(e[1]) for e in self.demos[cell])
         if frac_reached >= 0.5:
             self.tail[cell] = min(n, self.tail[cell] + 1)     # one more step for the policy (+4 skipped past hit rates a group of 16 can reach)
         elif frac_reached == 0.0 and not (len(self.hist[cell]) >= 2 and self.hist[cell][-2] >= 0.5):
@@ -219,8 +240,9 @@ class Prompts:
         if self.tail[cell] >= n:
             self.grad[cell] = self.demos.pop(cell); self.tail.pop(cell, None)   # graduated
             self.graduated = len(self.grad)
-            if self.grad[cell][2] is not None:
-                self.boost(self.grad[cell][2])
+            for e in self.grad[cell]:
+                if e[2] is not None:
+                    self.boost(e[2])
 
     def frontier(self, k, rng):
         """k least-visited cells (Go-Explore's exploration rule) for the
@@ -282,16 +304,16 @@ class Prompts:
             if not ids or rng.random_sample() < self.door_share:
                 out.append(('door:' + l, self.doors[l])); continue
             if (self.demos or self.grad) and rng.random_sample() < self.demo_share:
-                live = [c for c in self.demos if c[0] == l and self.tail[c] < len(self.demos[c][1])]
+                live = [c for c in self.demos if c[0] == l and self.tail[c] < max(len(e[1]) for e in self.demos[c])]
                 grad = [c for c in self.grad if c[0] == l]
                 if grad and (not live or rng.random_sample() < 0.2):
-                    c = grad[rng.randint(len(grad))]
-                    out.append(('demo', c, self.grad[c][0], [], self.grad[c][1])); continue   # re-check, no prefix
+                    c = grad[rng.randint(len(grad))]; e = self.grad[c][rng.randint(len(self.grad[c]))]
+                    out.append(('demo', c, e[0], [], e[1])); continue   # re-check, no prefix
                 if live:
                     live = [c for c in live if self.near_frontier(c)] or live
                     w = np.array([self._demo_w(c) for c in live]); w = w / w.sum()
-                    c = live[rng.choice(len(live), p=w)]; start, acts, _ = self.demos[c]
-                    out.append(('demo', c, start, acts[:len(acts) - self.tail[c]], acts)); continue
+                    c = live[rng.choice(len(live), p=w)]; start, acts, _ = self.demos[c][rng.randint(len(self.demos[c]))]
+                    out.append(('demo', c, start, acts[:max(0, len(acts) - self.tail[c])], acts)); continue
             w = self.score[ids] + 0.5; w = w / w.sum()
             i = ids[rng.choice(len(ids), p=w)]
             out.append((i, self.states[i][rng.randint(len(self.states[i]))]))
@@ -606,7 +628,8 @@ def main():
                 fr = float(reached[sl][sel].mean())          # judged on the unhinted rollouts only
                 prompts.demo_result(cell, fr)
                 if 16 <= cell[2] <= 25 and cell[4] == 0:
-                    print(f'  [demo] it {it} target {cell[2]}/{cell[3]}/{cell[6]} len {len(prompts.demos.get(cell, (None, []))[1]) if cell in prompts.demos else "grad"} prefix {len(chosen[g][3])} reached {fr:.2f} maxx {maxx[sl].mean():.0f}', flush=True)
+                    ns = len(prompts.demos[cell]) if cell in prompts.demos else len(prompts.grad.get(cell, []))
+                    print(f'  [demo] it {it} target {cell[2]}/{cell[3]}/{cell[6]} len {len(chosen[g][4])}{"" if cell in prompts.demos else " grad"} starts {ns} prefix {len(chosen[g][3])} reached {fr:.2f} maxx {maxx[sl].mean():.0f}', flush=True)
             else:
                 prompts.update(chosen[g][0], float(s))
                 if isinstance(chosen[g][0], str) and chosen[g][0].startswith('door:'):
@@ -688,6 +711,7 @@ def main():
         writer.add_scalar('mario/cell_max_x', float(maxx[~door].mean()) if (~door).any() else 0.0, it)
         writer.add_scalar('grpo/prompt_cells', len(prompts.cells), it)
         writer.add_scalar('grpo/demos', len(prompts.demos), it)
+        writer.add_scalar('grpo/demo_starts', sum(len(v) for v in prompts.demos.values()), it)
         writer.add_scalar('grpo/demos_graduated', getattr(prompts, 'graduated', 0), it)
         if it % 5 == 0:
             print(f'it {it} {el/60:5.1f}min fps {frames/el:5.0f} R {R.mean():7.1f} door_x {maxx[door].mean() if door.any() else 0:6.0f} '
@@ -715,9 +739,9 @@ def main():
             # success history, learnability scores)
             with open(os.path.join(run_dir, 'nn', 'prompts.pkl'), 'wb') as f:
                 pickle.dump({'cells': prompts.cells, 'score': prompts.score, 'uses': prompts.uses,
-                             'demos': {c: (len(v[1]), v[1], v[0], v[2]) for c, v in prompts.demos.items()},   # (len, actions, start state, start cell)
+                             'demos': {c: [(len(e[1]), e[1], e[0], e[2]) for e in v] for c, v in prompts.demos.items()},   # per link: [(len, actions, start state, start cell), ...]
                              'tail': prompts.tail, 'hist': prompts.hist, 'graduated': prompts.graduated,
-                             'grad': {c: (len(v[1]), v[1], v[0], v[2]) for c, v in prompts.grad.items()}, 'door_x': prompts.door_x}, f)
+                             'grad': {c: [(len(e[1]), e[1], e[0], e[2]) for e in v] for c, v in prompts.grad.items()}, 'door_x': prompts.door_x}, f)
             ck = {'model': model.state_dict(), 'iter': it, 'frames': frames}
             torch.save(ck, os.path.join(run_dir, 'nn', 'grpo_last.pth'))
             # numbered copy per eval: clips / ghosts for ANY step can be

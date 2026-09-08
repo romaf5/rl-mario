@@ -18,8 +18,9 @@ def ok(cell, acts, start):
 for key in ('demos', 'grad'):
     keep = {}
     for c, v in z[key].items():
-        if ok(c, v[1], v[2]):
-            keep[c] = v
+        ents = [e for e in (v if isinstance(v, list) else [v]) if ok(c, e[1], e[2])]
+        if ents:
+            keep[c] = ents
     print('%s: kept %d of %d' % (key, len(keep), len(z[key]))); z[key] = keep
 z['graduated'] = len(z['grad']); env.close()
 pickle.dump(z, open(a.out, 'wb')); print('wrote', a.out)

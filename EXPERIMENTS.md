@@ -137,3 +137,8 @@
 - **Mario_GRPO84fresh** (GPU 1): 8-4 from scratch, empty archive. Flags: grow-archive, rtg, explorers 32, demo-share 0.35, demo-eps 0, bc 0, hint 1, clip-demo 1.0, cell-bonus 100, entropy 0.01, 8 groups x 16, horizon 256, door-share 0.25.
 - **Mario_GRPOroutefresh** (GPU 0): warp route from scratch, empty archive. Same flags but hint 0, clip-demo 0.2, cell-bonus 0; per-level + full-game clips every 100 iterations, full-game eval every 100.
 - Prediction: pipe 1 within 40 min (scratch13 pace), corridor by ~1.5 h; the corridor link is the test of today's demo machinery from a clean start. Route: 1-1 clears within 1 h.
+
+### 2026-09-08 00:10 — Mario_GRPO84fresh result and the multi-start change
+- 84fresh (2 h from scratch): corridor loop end at 30 min; every corridor link graduated from its demo start (546 corridor demo groups); door eval stuck at 2572. Probe: the policy learned the 27-action floor->block walk almost verbatim (mean pi 0.73 on the demo actions) but fails from the archived variants of the SAME cell and from the door's own arrival states (0/32): one start state per link is learned frame-exactly and does not transfer. Frame stack ruled out (reloaded arrival states with a static stack also 0/32).
+- Change: up to 4 demos per link from distinct start states with one shared tail (the policy must manage the final approach from whichever start); a walk at most half as long re-arms a graduated link; per-link start count logged (grpo/demo_starts).
+- **Mario_GRPO84fresh2** (GPU 1) and **Mario_GRPOroutefresh2** (GPU 0): from scratch on this code, same flags as fresh/routefresh. fresh/routefresh moved to runs_archive/.
