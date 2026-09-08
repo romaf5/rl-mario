@@ -743,6 +743,12 @@ class MarioObserver(AlgoObserver):
                         self.writer.add_scalar(f'eval/level_max_x/{lvl}',
                                                max(s[2] for s in st),
                                                epoch_num)
+                        # cleared = left the level by its route exit
+                        lvl_gp = (int(lvl[0]) - 1) * 4 + int(lvl[2]) - 1
+                        cleared = int(inf_l.get('game_progress', lvl_gp) > lvl_gp
+                                      and not inf_l.get('wrong_exit', False))
+                        self.writer.add_scalar(f'eval/level_clear/{lvl}',
+                                               cleared, epoch_num)
                         sizes.append(len(gb) // 1024)
                     self.writer.flush()
                     print(f'  [Video] Epoch {epoch_num}: {len(sizes)} level '

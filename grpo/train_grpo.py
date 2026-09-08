@@ -356,7 +356,7 @@ class Prompts:
         return added
 
 
-def load_states(env, states):
+def load_states(env, states, door=None):
     """Put every env at its given savestate and rebuild all Python trackers
     and the frame ring (what reset() does, with our states)."""
     for i, st in enumerate(states):
@@ -369,6 +369,7 @@ def load_states(env, states):
         env._ring_u8[:] = env.obs_u8[..., None]
     for i in range(env.num_actors):
         env.start_cell[i] = None
+    env.is_door[:] = True if door is None else np.asarray(door, bool)      # relative novelty: which rollouts count as the door policy
     env._seed_cells(range(env.num_actors))
     env.ep_steps[:] = 0
     return env.obs_u8_stack() if env.u8_obs else env._obs()
@@ -516,7 +517,7 @@ def main():
         state_of = lambda ch: ch[2] if ch[0] == 'demo' else ch[1]
         xstates = prompts.frontier(a.explorers, rng)
         states = [state_of(chosen[i // a.group]) for i in range(N)] + xstates
-        obs = load_states(env, states)[:N]
+        obs = load_states(env, states, door=[isinstance(chosen[i // a.group][0], str) and chosen[i // a.group][0].startswith('door') for i in range(N)] + [False] * a.explorers)[:N]
         forced = np.full((H, N), -1, np.int64)
         for g in range(a.groups):
             if chosen[g][0] == 'demo':

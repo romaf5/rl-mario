@@ -141,7 +141,7 @@ class MarioNativeVecEnv(IVecEnv):
                  reward=None, play_mode=False,
                  route_levels=None, cell_tiles=False,
                  frontier_predecessors=0, cell_y_band=64, explore_pure=False,
-                 credit_vertical=False, cell_max_variants=0, cell_bonus=0.0, **unknown):
+                 credit_vertical=False, cell_max_variants=0, cell_bonus=0.0, cell_bonus_relative=True, **unknown):
         assert action_type == 'complex'
         gone = [k for k in unknown if k in self.REMOVED_KWARGS]
         if gone:
@@ -221,6 +221,13 @@ class MarioNativeVecEnv(IVecEnv):
         # archive cell (the block top and pipe top of a climb pay nothing
         # in x-progress terms; the same cell key the demos chain on)
         self.cell_bonus = float(cell_bonus)
+        # relative novelty: pay only for cells the DOOR episodes do not reach
+        # (a per-cell count of door-episode entries, decayed every 32 batch
+        # steps); a bonus paid for every first visit rewarded the runners as
+        # much as the climbers
+        self.cell_bonus_relative = bool(cell_bonus_relative)
+        self.door_seen = {}; self._seen_tick = 0
+        self.is_door = np.ones(num_actors, dtype=bool)
         self.exp_persist = np.ones(num_actors, dtype=np.int64)
         self.explorer = np.zeros(num_actors, dtype=np.int32)
         self.exp_action = np.zeros(num_actors, dtype=np.int64)
@@ -325,7 +332,7 @@ class MarioNativeVecEnv(IVecEnv):
 
     def _reset_env(self, i, first=False):
         # self-restart from own archive?
-        self.was_restart[i] = False
+        self.was_restart[i] = False; self.is_door[i] = True
         self.start_cell[i] = None      # door episodes credit no cell
         self.explorer[i] = 0           # no macro-noise leak across episodes
         self.forced_timeup[i] = 0
@@ -394,7 +401,7 @@ class MarioNativeVecEnv(IVecEnv):
             self.lib.benv_load(self.env, i,
                                states[self.rng.randint(len(states))])
             self.start_stage[i] = cell[0]
-            self.was_restart[i] = True
+            self.was_restart[i] = True; self.is_door[i] = False
             self.start_cell[i] = cell
             # Go-Explore phase 1: some restart episodes flail randomly to
             # EXPAND the archive past what the policy can reach
@@ -462,6 +469,9 @@ class MarioNativeVecEnv(IVecEnv):
             self.ep_cells[i] = {self.cell_of(i)} if self.sr_prob > 0 else set()
 
     def _post_reset_init(self, idx, ram):
+        self._post_reset_init_core(idx, ram); self._seed_cells(idx)
+
+    def _post_reset_init_core(self, idx, ram):
         """Re-init per-env python state for envs in idx from fresh RAM
         (new episode or new life)."""
         x0 = np.zeros(self.num_actors, dtype=np.int64)
@@ -682,6 +692,10 @@ class MarioNativeVecEnv(IVecEnv):
         # ---- self-restart archiving ----
         self.entered_cell = [None] * n
         entered = np.zeros(n, dtype=bool); paid_cell = np.zeros(n, dtype=bool)
+        self._seen_tick += 1
+        if self._seen_tick % 32 == 0 and self.door_seen:
+            for k in self.door_seen:
+                self.door_seen[k] *= 0.9
         if self.sr_prob > 0:
             fstate = self._field(0x1D)
             # grounded on land; swimming counts as controlled in water
@@ -711,7 +725,13 @@ class MarioNativeVecEnv(IVecEnv):
                 if cell not in self.archive and self.cell_max_variants > 0 and \
                         sum(1 for c in self.archive if c[:6] == cell[:6]) >= self.cell_max_variants:
                     continue        # yet another tile variant of a known spot
-                paid_cell[i] = True     # novelty bonus only for cells the archive keeps (variants beyond the cap are not new places)
+                # novelty bonus only for cells the archive keeps (variants beyond
+                # the cap are not new places) and, if relative, only for cells
+                # the door episodes do not reach on their own (count taken
+                # before this entry, so the first discoverer is paid)
+                paid_cell[i] = (not self.cell_bonus_relative) or self.door_seen.get(cell, 0.0) < 1.0
+                if self.is_door[i]:
+                    self.door_seen[cell] = self.door_seen.get(cell, 0.0) + 1.0
                 if cell not in self.archive:
                     if len(self.archive) >= self.sr_cells:
                         # evict the OLDEST cell no episode is practising
@@ -939,8 +959,8 @@ class MarioNativeVecEnv(IVecEnv):
             for i in soft_idx:
                 # the restart cell's episode ended here; the next life is
                 # a door-like continuation and credits no cell
-                self.start_cell[i] = None
-                self.ep_cells[i] = set()
+                self.start_cell[i] = None; self.is_door[i] = True
+                self._seed_cells([i])
                 self.explorer[i] = 0      # macro noise must not leak on
                 # new life = fresh frame stack
                 self._ring[i] = (self.obs_u8[i].astype(np.float32)
