@@ -131,3 +131,9 @@
   -0.3 depending on invisible history; position-scaled growth paid the
   same run 4x more late in the level. Fix: end the episode on loops,
   rebase on scripted transitions, one flat cost for every failure.
+
+
+## 2026-09-07 21:20 — clean from-scratch runs on the final code (user instruction: no checkpoint chains)
+- **Mario_GRPO84fresh** (GPU 1): 8-4 from scratch, empty archive. Flags: grow-archive, rtg, explorers 32, demo-share 0.35, demo-eps 0, bc 0, hint 1, clip-demo 1.0, cell-bonus 100, entropy 0.01, 8 groups x 16, horizon 256, door-share 0.25.
+- **Mario_GRPOroutefresh** (GPU 0): warp route from scratch, empty archive. Same flags but hint 0, clip-demo 0.2, cell-bonus 0; per-level + full-game clips every 100 iterations, full-game eval every 100.
+- Prediction: pipe 1 within 40 min (scratch13 pace), corridor by ~1.5 h; the corridor link is the test of today's demo machinery from a clean start. Route: 1-1 clears within 1 h.
