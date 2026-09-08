@@ -514,7 +514,9 @@ def main():
                     hf = np.full(N, -1, np.int64)
                     for i in np.nonzero(hint_env)[0]:
                         tr = t - plen[i]
-                        if 0 <= tr <= 1 and t < len(full_acts[i]) and (tr == 0 or rng.rand() < 0.5) and rng.rand() < a.hint:
+                        # the whole remaining demo (hinting only the first step left
+                        # the landing to chance, so the chain rarely paid off)
+                        if tr >= 0 and t < len(full_acts[i]) and rng.rand() < a.hint:
                             hf[i] = full_acts[i][t]
                     if (hf >= 0).any():
                         hft = torch.from_numpy(hf).to(device); act = torch.where(hft >= 0, hft, act)
