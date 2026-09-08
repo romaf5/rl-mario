@@ -408,6 +408,7 @@ def main():
     ap.add_argument('--cell-variants', type=int, default=3, help='max tile-signature variants per spatial archive cell')
     ap.add_argument('--explorers', type=int, default=0, help='extra envs per iteration that random-walk from least-visited cells ONLY to grow the archive (never in the update)')
     ap.add_argument('--demo-eps', type=float, default=0.2, help='uniform-random action share in the free steps of demo groups (the collapsed policy puts ~0 on the actions a link needs)')
+    ap.add_argument('--cell-bonus', type=float, default=0.0, help='env novelty bonus per first entry of a grounded archive cell per life')
     ap.add_argument('--clip-demo', type=float, default=1.0, help='PPO clip for demo-group samples (the rest use --clip)')
     ap.add_argument('--hint', type=float, default=1.0, help='soft prefix: prob that a hinted rollout takes the demo action at its first free step (half the group is hinted; 0 = off)')
     ap.add_argument('--bc', type=float, default=0.1, help='self-imitation weight on the forced prefix steps of demo groups (negative log-likelihood of the demo action)')
@@ -427,7 +428,7 @@ def main():
     ec.update(dict(self_restart_prob=1e-6 if a.grow_archive else 0.0, explore_eps=0.0,
                    explore_episode_prob=0.0, archive_path=a.archive if a.grow_archive else None,
                    self_restart_cells=a.max_cells, cell_tiles=True, cell_y_band=32, cell_max_variants=a.cell_variants,
-                   sticky_actions=0.0, n_threads=a.n_threads, dense_infos=True, seed=a.seed))
+                   sticky_actions=0.0, n_threads=a.n_threads, dense_infos=True, seed=a.seed, cell_bonus=a.cell_bonus))
     N = a.group * a.groups
     NX = N + a.explorers              # explorers ride along in the same batch, outside the buffers
     env = MarioNativeVecEnv('grpo', NX, **dict(ec, dense_infos=False, explore_pure=True)); env.reset(); env.enable_u8_obs()

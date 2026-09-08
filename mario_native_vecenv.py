@@ -141,7 +141,7 @@ class MarioNativeVecEnv(IVecEnv):
                  reward=None, play_mode=False,
                  route_levels=None, cell_tiles=False,
                  frontier_predecessors=0, cell_y_band=64, explore_pure=False,
-                 credit_vertical=False, cell_max_variants=0, **unknown):
+                 credit_vertical=False, cell_max_variants=0, cell_bonus=0.0, **unknown):
         assert action_type == 'complex'
         gone = [k for k in unknown if k in self.REMOVED_KWARGS]
         if gone:
@@ -217,6 +217,10 @@ class MarioNativeVecEnv(IVecEnv):
         # every broken-brick pattern in an underground level is a new cell
         # (1-2 grew 666 cells and swallowed the prompt pool)
         self.cell_max_variants = int(cell_max_variants)
+        # novelty bonus: +cell_bonus the first time a life enters a grounded
+        # archive cell (the block top and pipe top of a climb pay nothing
+        # in x-progress terms; the same cell key the demos chain on)
+        self.cell_bonus = float(cell_bonus)
         self.exp_persist = np.ones(num_actors, dtype=np.int64)
         self.explorer = np.zeros(num_actors, dtype=np.int32)
         self.exp_action = np.zeros(num_actors, dtype=np.int64)
@@ -668,43 +672,9 @@ class MarioNativeVecEnv(IVecEnv):
                       & (x < hw_now - self.page_reset_px))
         self.page_resets += page_reset.astype(np.int32)
 
-        # ---- rewards (positive-only terms, mario_rewards) ----
-        x_last = self.x_last.copy(); t_last = self.time_last.copy()
-        sig = Signals(n=n, x=x, x_last=x_last, frame=frame,
-                      frame_change=frame_change, hold=hold, t=t, died=died,
-                      game_over=(life == 0xFF), level_delta=level_delta,
-                      wrong_exit=wrong_exit, victory_new=vpay,
-                      page_reset=page_reset,
-                      timeout=np.zeros(n, dtype=bool), gp=gp, area=area,
-                      atype=atype, swim=swim, ypix=ypix,
-                      single_stage=self.single_stage)
-        reward = self.rewards(sig)
-        paid = reward > 0
-        # contiguous steps without a positive reward -> cutoff. After a page
-        # reset the remaining budget shrinks to the grace window and the
-        # cutoff is a TRUE terminal (the post-reset state looks like fresh
-        # ground to the critic; bootstrapping there would reward looping).
-        self.unpaid = np.where(paid, 0, self.unpaid + 1)
-        self.max_gap = np.maximum(self.max_gap, self.unpaid)
-        self.after_reset = (self.after_reset | page_reset) & ~paid
-        self.unpaid = np.where(
-            page_reset & ~paid,
-            np.maximum(self.unpaid, self.unpaid_timeout - self.page_reset_grace),
-            self.unpaid)
-        timeout = self.unpaid >= self.unpaid_timeout
-        sig.timeout = timeout
-        self.last_terms = self.rewards.last
-        self.last_signals = sig
-
-        # ---- trackers ----
-        self.prev_frame = frame
-        self.x_last = x.copy()
-        self.time_last = t
-        self.max_x = np.maximum(self.max_x, x)
-        self.prev_score = self._score()
-
         # ---- self-restart archiving ----
         self.entered_cell = [None] * n
+        entered = np.zeros(n, dtype=bool)
         if self.sr_prob > 0:
             fstate = self._field(0x1D)
             # grounded on land; swimming counts as controlled in water
@@ -730,7 +700,7 @@ class MarioNativeVecEnv(IVecEnv):
                 if cell in self.ep_cells[i]:
                     continue
                 self.ep_cells[i].add(cell)
-                self.entered_cell[i] = cell
+                self.entered_cell[i] = cell; entered[i] = True
                 if cell not in self.archive and self.cell_max_variants > 0 and \
                         sum(1 for c in self.archive if c[:6] == cell[:6]) >= self.cell_max_variants:
                     continue        # yet another tile variant of a known spot
@@ -771,6 +741,45 @@ class MarioNativeVecEnv(IVecEnv):
         if (self.archive_path and self._archive_dirty >= 10):
             self._archive_dirty = 0
             self._save_archive()
+
+        # ---- rewards (positive-only terms, mario_rewards) ----
+        x_last = self.x_last.copy(); t_last = self.time_last.copy()
+        sig = Signals(n=n, x=x, x_last=x_last, frame=frame,
+                      frame_change=frame_change, hold=hold, t=t, died=died,
+                      game_over=(life == 0xFF), level_delta=level_delta,
+                      wrong_exit=wrong_exit, victory_new=vpay,
+                      page_reset=page_reset,
+                      timeout=np.zeros(n, dtype=bool), gp=gp, area=area,
+                      atype=atype, swim=swim, ypix=ypix,
+                      single_stage=self.single_stage)
+        reward = self.rewards(sig)
+        if self.cell_bonus > 0:
+            reward = reward + self.cell_bonus * entered
+        paid = reward > 0
+        # contiguous steps without a positive reward -> cutoff. After a page
+        # reset the remaining budget shrinks to the grace window and the
+        # cutoff is a TRUE terminal (the post-reset state looks like fresh
+        # ground to the critic; bootstrapping there would reward looping).
+        self.unpaid = np.where(paid, 0, self.unpaid + 1)
+        self.max_gap = np.maximum(self.max_gap, self.unpaid)
+        self.after_reset = (self.after_reset | page_reset) & ~paid
+        self.unpaid = np.where(
+            page_reset & ~paid,
+            np.maximum(self.unpaid, self.unpaid_timeout - self.page_reset_grace),
+            self.unpaid)
+        timeout = self.unpaid >= self.unpaid_timeout
+        sig.timeout = timeout
+        self.last_terms = dict(self.rewards.last)
+        if self.cell_bonus > 0:
+            self.last_terms['cell_bonus'] = self.cell_bonus * entered
+        self.last_signals = sig
+
+        # ---- trackers ----
+        self.prev_frame = frame
+        self.x_last = x.copy()
+        self.time_last = t
+        self.max_x = np.maximum(self.max_x, x)
+        self.prev_score = self._score()
 
         # ---- dones (every terminal pays 0) ----
         game_over = life == 0xFF
