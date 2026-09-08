@@ -107,6 +107,7 @@ class Prompts:
         # link is trained)
         self.grad = {}; self.graduated = 0
         self.door_x = {}                  # per level: EMA of the door groups' max x (the from-the-door frontier)
+        self.xbin = int(getattr(env, 'cell_x_bin', 128))
 
     def note_door(self, level, x):
         self.door_x[level] = x if level not in self.door_x else 0.8 * self.door_x[level] + 0.2 * x
@@ -115,7 +116,7 @@ class Prompts:
         scs = [e[2] for e in (self.demos.get(c) or self.grad.get(c) or []) if e[2] is not None]
         if not scs or c[0] not in self.door_x:
             return False
-        fb = int(self.door_x[c[0]]) // 128
+        fb = int(self.door_x[c[0]]) // self.xbin
         return any(fb - 2 <= sc[2] <= fb + 1 for sc in scs)
 
     def _demo_w(self, c):
@@ -461,6 +462,7 @@ def main():
     ap.add_argument('--cell-variants', type=int, default=3, help='max tile-signature variants per spatial archive cell')
     ap.add_argument('--explorers', type=int, default=0, help='extra envs per iteration that random-walk from least-visited cells ONLY to grow the archive (never in the update)')
     ap.add_argument('--demo-eps', type=float, default=0.0, help='uniform-random action share in the free steps of demo groups (the collapsed policy puts ~0 on the actions a link needs)')
+    ap.add_argument('--cell-x-bin', type=int, default=128, help='archive x-bin in px (64 tells the warp pipes apart)')
     ap.add_argument('--cell-bonus', type=float, default=0.0, help='env novelty bonus per first entry of a grounded archive cell per life')
     ap.add_argument('--clip-demo', type=float, default=1.0, help='PPO clip for demo-group samples (the rest use --clip)')
     ap.add_argument('--hint', type=float, default=1.0, help='soft prefix: prob that a hinted rollout takes the demo action at its first free step (half the group is hinted; 0 = off)')
@@ -481,7 +483,7 @@ def main():
     ec.update(dict(self_restart_prob=1e-6 if a.grow_archive else 0.0, explore_eps=0.0,
                    explore_episode_prob=0.0, archive_path=a.archive if a.grow_archive else None,
                    self_restart_cells=a.max_cells, cell_tiles=True, cell_y_band=32, cell_max_variants=a.cell_variants,
-                   sticky_actions=0.0, n_threads=a.n_threads, dense_infos=True, seed=a.seed, cell_bonus=a.cell_bonus))
+                   sticky_actions=0.0, n_threads=a.n_threads, dense_infos=True, seed=a.seed, cell_bonus=a.cell_bonus, cell_x_bin=a.cell_x_bin))
     N = a.group * a.groups
     NX = N + a.explorers              # explorers ride along in the same batch, outside the buffers
     env = MarioNativeVecEnv('grpo', NX, **dict(ec, dense_infos=False, explore_pure=True)); env.reset(); env.enable_u8_obs()

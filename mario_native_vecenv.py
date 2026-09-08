@@ -141,7 +141,7 @@ class MarioNativeVecEnv(IVecEnv):
                  reward=None, play_mode=False,
                  route_levels=None, cell_tiles=False,
                  frontier_predecessors=0, cell_y_band=64, explore_pure=False,
-                 credit_vertical=False, cell_max_variants=0, cell_bonus=0.0, cell_bonus_relative=True, **unknown):
+                 credit_vertical=False, cell_max_variants=0, cell_bonus=0.0, cell_bonus_relative=True, cell_x_bin=128, **unknown):
         assert action_type == 'complex'
         gone = [k for k in unknown if k in self.REMOVED_KWARGS]
         if gone:
@@ -217,6 +217,10 @@ class MarioNativeVecEnv(IVecEnv):
         # every broken-brick pattern in an underground level is a new cell
         # (1-2 grew 666 cells and swallowed the prompt pool)
         self.cell_max_variants = int(cell_max_variants)
+        # archive x-bin in px (multiple of 16). 128 could not tell pipe 4 from
+        # pipe 3 in the 1-2 warp zone (48 px apart): same cell, so neither the
+        # novelty bonus nor the prompts could single the route exit out
+        self.cell_x_bin = int(cell_x_bin); assert self.cell_x_bin % 16 == 0
         # novelty bonus: +cell_bonus the first time a life enters a grounded
         # archive cell (the block top and pipe top of a climb pay nothing
         # in x-progress terms; the same cell key the demos chain on)
@@ -446,8 +450,9 @@ class MarioNativeVecEnv(IVecEnv):
         enemies and animation. Part of the archive cell key so a revealed
         hidden block is its own cell (Go-Explore: the cell representation
         must see the state that matters, or it can never be practised)."""
-        col0 = (int(x) // 128) * 8
-        cx = (col0 + np.arange(8)) * 16
+        ncol = self.cell_x_bin // 16
+        col0 = (int(x) // self.cell_x_bin) * ncol
+        cx = (col0 + np.arange(ncol)) * 16
         base = 0x500 + ((cx // 256) % 2) * 0xD0 + (cx % 256) // 16
         idx = base[:, None] + (np.arange(13) * 16)[None, :]
         return int(zlib.crc32(self.ram[i][idx].tobytes()) & 0xFFFF)
@@ -457,7 +462,7 @@ class MarioNativeVecEnv(IVecEnv):
         archive save), regardless of whether it would be saved now."""
         r = self.ram[i]; x = int(r[0x6D]) * 256 + int(r[0x86])
         gp = min(max(int(r[0x75F]) * 4 + int(r[0x75C]), 0), 31)
-        return ('%d-%d' % (gp // 4 + 1, gp % 4 + 1), int(r[0x760]), x // 128,
+        return ('%d-%d' % (gp // 4 + 1, gp % 4 + 1), int(r[0x760]), x // self.cell_x_bin,
                 int(r[0x3B8]) // self.cell_y_band, int(r[0x704]), int(r[0x74E]),
                 self._tile_sig(i, x) if self.cell_tiles else 0)
 
@@ -714,7 +719,7 @@ class MarioNativeVecEnv(IVecEnv):
                 # episode reached it
                 g = int(gp[i])
                 cell = ('%d-%d' % (g // 4 + 1, g % 4 + 1), int(area[i]),
-                        int(x[i]) // 128, int(ypix[i]) // self.cell_y_band,
+                        int(x[i]) // self.cell_x_bin, int(ypix[i]) // self.cell_y_band,
                         int(swim[i]),
                         int(atype[i]),
                         self._tile_sig(i, x[i]) if self.cell_tiles else 0)
