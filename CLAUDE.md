@@ -74,7 +74,7 @@ The project wraps rl_games' PPO implementation with custom Mario-specific compon
 
 ## Outputs
 
-- `runs/` holds only the runs worth comparing (current + reference); finished experiments are moved, never deleted, to `runs_archive/<same name>` (`tensorboard --logdir runs_archive` to revisit)
+- `runs/` holds only the runs currently training; finished experiments are moved, never deleted, to `runs_archive/<same name>` (`tensorboard --logdir runs_archive` to revisit)
 - Checkpoints: `runs/<name>_<timestamp>/nn/*.pth`
 - TensorBoard: `runs/<name>_<timestamp>/summaries/`
 - Custom metrics in TensorBoard: `mario/mean_x_pos`, `mario/best_stage_progress`, `mario/flag_get_rate` (primary progress metric under random-stage training)
