@@ -225,7 +225,7 @@ class Prompts:
         lv = [l for l in self.levels if l in by_level]
         wl = np.array([0.15 + (1.0 - self.clear[l]) for l in lv]); wl = wl / wl.sum()
         for _ in range(k - n_door):
-            if self.demos and rng.random_sample() < self.demo_share:
+            if (self.demos or self.grad) and rng.random_sample() < self.demo_share:
                 dp = self.demo_prompt(rng)
                 if dp is not None:
                     out.append(dp); continue
@@ -468,7 +468,7 @@ def main():
                 forced[:len(pre), g * a.group:(g + 1) * a.group] = np.array(pre)[:, None]
         if a.explorers:
             env.explorer[N:] = H          # env substitutes persistent random actions for these
-            xacts = [[] for _ in range(a.explorers)]
+            xacts = [[] for _ in range(a.explorers)]; xdead = np.zeros(a.explorers, bool)
             # start cell from the loaded state itself (a first-step jump
             # left it unknown before, and unknown bypassed the direction
             # filter: that is how "drop from the pipe top" demos got in)
@@ -526,18 +526,24 @@ def main():
             act_buf[t] = np.where(fz >= 0, fz, act_np); logp_buf[t] = lp.cpu().numpy()
             mask_buf[t] = alive & (fz < 0)             # forced steps carry no policy gradient ...
             bc_buf[t] = alive & (fz >= 0) & (t >= plen - 2) & bc_ok   # ... but the last 2 of frontier links are imitated (the run's own explorer demos)
-            _, r, d, inf = env.step(np.concatenate([act_buf[t], np.zeros(a.explorers, np.int64)]) if a.explorers else act_buf[t])
-            obs = env.obs_u8_stack()[:N]; r = r[:N]; d = d[:N]
+            _, r, d_all, inf = env.step(np.concatenate([act_buf[t], np.zeros(a.explorers, np.int64)]) if a.explorers else act_buf[t])
+            obs = env.obs_u8_stack()[:N]; r = r[:N]; d = d_all[:N]
             ec = env.entered_cell
             for i in range(N):
-                if target_of[i] is not None and ec[i] is not None and ec[i] == target_of[i]:
+                # only while the rollout is alive: a finished env is reset to
+                # the door and keeps stepping, and its NEXT episode entering
+                # the target used to count as a success
+                if alive[i] and target_of[i] is not None and ec[i] is not None and ec[i] == target_of[i]:
                     reached[i] = True
             if a.explorers:
                 for j in range(a.explorers):
+                    if xdead[j]:
+                        continue            # reset to the door after a death: its walk no longer replays from xstates[j]
                     xacts[j].append(int(env.last_action[N + j]))
                     c = env.entered_cell[N + j]
                     if c is not None and len(xacts[j]) <= 96:
                         prompts.record_demo(c, xstates[j], xacts[j], start_cell=xcell[j])
+                    xdead[j] = bool(d_all[N + j])
             rew_buf[t] = np.where(alive, r, 0.0)
             # bookkeeping from env arrays; the env resets finished envs
             # inside step(), so their pre-reset values come from the info
@@ -548,6 +554,7 @@ def main():
                 loops[i] = bool(inf[i].get('page_reset', False)); vics[i] = bool(inf[i].get('victory', False))
             alive &= ~d
             if not alive.any():
+                mask_buf[t + 1:] = 0; rew_buf[t + 1:] = 0; bc_buf[t + 1:] = False   # else stale samples from the last iteration get trained on
                 break
         frames += NX * H * 4
         if a.grow_archive:
