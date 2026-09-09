@@ -94,7 +94,7 @@ params:
       archive_path: native/archive_routeDet2.pkl
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
     eval_env_config:
-      backend: lockstep
+      backend: native   # eval starts from the same native door states as training (lockstep seeded from the reference emulator: other frame counter/RNG/timer)
       full_game: true
       # per-level clips (GIF per level in TB + mp4) at every video epoch,
       # each played until the level is cleared or the lives are gone

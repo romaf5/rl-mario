@@ -170,3 +170,9 @@
 ### 2026-09-09 04:40 — 64-px finisher result; second deterministic run
 - Mario_GRPOfinishA_cells64 after 5 h: same as the 128-px finishers (1-1, 4-1 reliable; 8-1/8-2 intermittent; 1-2 warp in bursts, full-game best 4-3; no 4-2 warp; no 8-3/8-4). Finer cells alone do not fix the warp. Stopped.
 - **Mario_PPOrouteDet2** (GPU 1, 12 h cap): deterministic game like Det, with more state variety: archive restarts 50%, explorer episodes 10%. Det (GPU 0) at 2.5 h: 4-1 cleared, 8-4 door at the corridor loop end, level-advance rate 7-13%, entropy 1.3-1.4.
+
+### 2026-09-09 06:30 — eval determinism fixes (eval-only, active at next launch)
+- The stuck-life clip at epoch 3500 (1-1, x 2914) is the multi-life eval by design; under argmax + deterministic game the 2nd/3rd lives are identical replays. Fix: a life stuck at the same spot as the previous life ends the run.
+- Eval traces renamed by START level (they were named by the end level: the 8-1 clip was 'video_8-2').
+- Video eval backend switched lockstep -> native: the lockstep env seeded levels from the reference emulator's reset (frame counter 136 vs 155, RNG and timer differ), so clips started from states training never used.
+- Det (GPU 0) at 6.5 h: clears 1-1, 4-1, 8-1, 8-2 (argmax); Det2 (GPU 1) at 2.5 h: 1-1, 4-1. Not restarted for these eval-only changes.
