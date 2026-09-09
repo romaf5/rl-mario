@@ -394,9 +394,12 @@ class MarioObserver(AlgoObserver):
         # + flags, replayable with tools/play.py --replay <file>.npz
         tr_env = getattr(env.unwrapped, 'v', None)
         tr_state, tr_rows, tr_acts = None, [], []
+        tr_start_lvl = None
         if tr_env is not None:
             tr_env.lib.benv_save(tr_env.env, 0, tr_env._sbuf)
             tr_state = bytes(tr_env._sbuf.raw)
+            tr_env._fetch_obs(0); r0 = tr_env.ram[0]
+            tr_start_lvl = '%d-%d' % (int(r0[0x75F]) + 1, int(r0[0x75C]) + 1)   # trace files are named by the START level
         prev_life, event, event_ttl = None, '', 0
         per_step_frames = getattr(env.unwrapped, 'frames_per_step',
                                   4 if hasattr(env.unwrapped, 'frames4')
@@ -492,10 +495,10 @@ class MarioObserver(AlgoObserver):
                       for s, f in zip(step_stats, frames)]
         if tr_env is not None and tr_rows:
             self._dump_video_trace(epoch_num, info, tr_state, tr_acts, tr_rows,
-                                   list(tr_env.last_terms.keys()))
+                                   list(tr_env.last_terms.keys()), start_lvl=tr_start_lvl)
         return frames, pil_frames, step_stats, info, total_reward, per_step_frames
 
-    def _dump_video_trace(self, epoch_num, info, state, acts, rows, term_names):
+    def _dump_video_trace(self, epoch_num, info, state, acts, rows, term_names, start_lvl=None):
         """<run>/eval_traces/epoch_N/video_<start level>.csv (+ .npz with the
         start state and actions for tools/play.py --replay)."""
         try:
@@ -510,7 +513,9 @@ class MarioObserver(AlgoObserver):
                 run_dir = os.path.dirname(os.path.normpath(logdir))
             out = os.path.join(run_dir, 'eval_traces', f'epoch_{epoch_num}')
             os.makedirs(out, exist_ok=True)
-            lvl = '%s-%s' % (rows[0][2] and info.get('world', '?'), info.get('stage', '?'))
+            # named by the level the clip STARTED in (the end level was
+            # misleading: the 8-1 clip that cleared into 8-2 was 'video_8-2')
+            lvl = start_lvl or '%s-%s' % (info.get('world', '?'), info.get('stage', '?'))
             tag = f'video_{lvl}_{len(os.listdir(out)):02d}'
             with open(os.path.join(out, tag + '.csv'), 'w') as f:
                 f.write(','.join(['step', 'action', 'x', 'ypix', 'life', 'reward']
