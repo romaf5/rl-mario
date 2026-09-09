@@ -270,6 +270,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.unpaid = z(); self.max_gap = z(); self.page_resets = z()
         self.after_reset = z(bool)
         self.forced_timeup = z()      # eval: cutoffs turned into time-ups
+        self.last_stuck = [None] * num_actors   # eval: (level, x//16) of the last forced time-up
         self.hold_on_done = False     # video: never reset after done
         self.entered_cell = [None] * n  # cell first entered this step (grpo demos)
         self.prev_in_play = np.ones(n, dtype=bool)
@@ -339,7 +340,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.was_restart[i] = False; self.is_door[i] = True
         self.start_cell[i] = None      # door episodes credit no cell
         self.explorer[i] = 0           # no macro-noise leak across episodes
-        self.forced_timeup[i] = 0
+        self.forced_timeup[i] = 0; self.last_stuck[i] = None
         if (self.sr_prob > 0 and self.archive
                 and self.rng.random_sample() < self.sr_prob):
             # soft least-practiced: p(cell) ~ 1/(1+uses). Uniform-ish
@@ -839,12 +840,20 @@ class MarioNativeVecEnv(IVecEnv):
             # starts. (Ending the run here made a loop fatal while a death
             # was not, which inverted the eval's incentives.)
             stuck = timeout & ~game_over & ~victory & ~zombie & ~wrapped
+            repeat = np.zeros(n, dtype=bool)
             for i in np.nonzero(stuck)[0]:
+                # a deterministic policy that got stuck at the same spot as
+                # its previous life will repeat it forever: end the run
+                # instead of spending the remaining lives on identical replays
+                key = (int(gp[i]), int(x[i]) // 16)
+                if self.last_stuck[i] == key:
+                    repeat[i] = True; continue
+                self.last_stuck[i] = key
                 self.ram[i, 0x7F8:0x7FB] = 0
                 self.lib.benv_set_ram(self.env, int(i), self.ram[i].tobytes())
                 self.unpaid[i] = 0
                 self.forced_timeup[i] += 1
-            real_done = real_done & ~timeout
+            real_done = (real_done & ~timeout) | repeat
         # rl_games value bootstrap: the plain cutoff is not part of the
         # game; the post-reset cutoff IS a dead end (no bootstrap)
         time_outs = timeout & ~self.after_reset & \
