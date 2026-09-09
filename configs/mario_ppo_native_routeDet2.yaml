@@ -1,0 +1,101 @@
+# PPO stage, DETERMINISTIC game, variant 2: more state variety against memorisation (archive restarts 50%, explorer episodes 10%); otherwise as routeDet.
+# Route run v2: full toolbox (eps-floor, global novelty, score reward,
+# persistent archive). Eval: sequential full game from 1-1.
+params:
+  seed: 42
+  algo: {name: a2c_discrete}
+  model: {name: discrete_a2c}
+  network:
+    name: actor_critic
+    separate: false
+    space: {discrete: null}
+    cnn:
+      type: conv2d
+      activation: elu
+      initializer: {name: orthogonal_initializer, gain: 1.41421356237}
+      convs:
+      - {filters: 32, kernel_size: 8, strides: 4, padding: 0}
+      - {filters: 64, kernel_size: 4, strides: 2, padding: 0}
+      - {filters: 64, kernel_size: 3, strides: 1, padding: 0}
+    mlp:
+      units: [512]
+      activation: elu
+      initializer: {name: orthogonal_initializer, gain: 1.41421356237}
+  config:
+    name: Mario_PPOrouteDet2
+    env_name: mario_native
+    score_to_win: 100000
+    normalize_value: true
+    normalize_input: false
+    reward_shaper: {scale_value: 0.01}
+    normalize_advantage: true
+    gamma: 0.995
+    tau: 0.95
+    learning_rate: 0.00025
+    lr_schedule: adaptive
+    kl_threshold: 0.008
+    grad_norm: 0.5
+    entropy_coef: 0.02
+    truncate_grads: true
+    e_clip: 0.1
+    clip_value: true
+    num_actors: 128
+    horizon_length: 128
+    minibatch_size: 4096
+    mini_epochs: 4
+    critic_coef: 0.5
+    max_epochs: 200000
+    use_diagnostics: true
+    save_frequency: 500
+    save_best_after: 500
+    print_stats: true
+    device: cuda:0
+    multi_gpu: false
+    stage_curriculum_freq: 20
+    env_config:
+      name: SuperMarioBros-v0
+      action_type: complex
+      episode_life: true
+      # reward set v2 -- see mario_ppo_native_84.yaml for the rationale
+      # a backward teleport ends the episode at the same time-sized cost as
+      # every other failure (a non-terminal loop let the door policy quit into
+      # the cheap loop instead of attempting the hidden block: clean-eval loops
+      # went 9% -> 97% within 90 minutes)
+      full_game: true
+      reward:
+        - {type: first_visit_progress, cap: 20}
+        - {type: level_clear, base: 500, per_extra: 100}
+      unpaid_timeout: 250
+      page_reset_grace: 60
+      page_reset_px: 600
+      skip: 4
+      sticky_actions: 0.0
+      reset_noops: 0
+      random_stages: [1-1, 1-2, 4-1, 4-2, 8-1, 8-2, 8-3, 8-4]
+      self_restart_prob: 0.5
+      # backward-chaining frontier (the mechanism that consolidated 8-4's
+      # late cells): half of the restarts go to the least-practised cells
+      # that already produced a level advance. Off-route exits no longer
+      # count, so in 1-2 the winners are warp-zone/ceiling cells and the
+      # band chains back toward the ceiling entry.
+      self_restart_frontier_prob: 0.5
+      self_restart_frontier_k: 16
+      n_threads: 24
+      self_restart_cells: 1024
+      # entering a level outside random_stages (e.g. 1-2 flag -> 1-3):
+      # -100 and terminal. Bigger than a death (-15) so the wrong exit is
+      # clearly bad; smaller than the ~+300 x-reward of finishing the level
+      # so idling/dying before the exit never becomes the better option.
+      explore_eps: 0.0
+      explore_episode_prob: 0.1
+      cell_bonus: 100
+      cell_bonus_relative: true
+      cell_x_bin: 64
+      archive_path: native/archive_routeDet2.pkl
+    player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
+    eval_env_config:
+      backend: lockstep
+      full_game: true
+      # per-level clips (GIF per level in TB + mp4) at every video epoch,
+      # each played until the level is cleared or the lives are gone
+      video_levels: [1-1, 1-2, 4-1, 4-2, 8-1, 8-2, 8-3, 8-4]

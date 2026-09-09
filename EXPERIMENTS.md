@@ -166,3 +166,7 @@
 - **Mario_PPOrouteDet** (GPU 0, 12 h cap): PPO from scratch on the route with the env deterministic (sticky 0, explore_eps 0, reset_noops 0), 64-px cells, relative bonus 100, explorer episodes 5%, restarts 30%, entropy 0.02. Replaces the 128-px demo finisher. Risk: frame-sequence memorisation (no env noise); the policy's sampling is the only exploration.
 - Mario_GRPOfinishA_cells64 (GPU 1) continues as the pipe-4 test.
 - 23:20: evaluation made deterministic everywhere too (argmax policy in the PPO observer clips/evals, GRPO door + full-game evals, clip recorder; eval envs already had sticky 0 / eps 0 / noops 0). Det run relaunched on that code. Leftover PPO-A process (survived the 12-h timeout signal) killed.
+
+### 2026-09-09 04:40 — 64-px finisher result; second deterministic run
+- Mario_GRPOfinishA_cells64 after 5 h: same as the 128-px finishers (1-1, 4-1 reliable; 8-1/8-2 intermittent; 1-2 warp in bursts, full-game best 4-3; no 4-2 warp; no 8-3/8-4). Finer cells alone do not fix the warp. Stopped.
+- **Mario_PPOrouteDet2** (GPU 1, 12 h cap): deterministic game like Det, with more state variety: archive restarts 50%, explorer episodes 10%. Det (GPU 0) at 2.5 h: 4-1 cleared, 8-4 door at the corridor loop end, level-advance rate 7-13%, entropy 1.3-1.4.
