@@ -160,3 +160,8 @@
 - Finishers after ~7 h (demos vs plain): both clear 1-1, 4-1, 8-2 reliably and 8-1 intermittently, take the 1-2 warp in bursts (full-game best 4-2/4-3 in some batches of 16, none in others), never the 4-2 warp, never 8-3 or the 8-4 corridor. No difference between demos and plain on the warp.
 - Diagnosis (probes on PPO-A): pipe 4 and pipe 3 of the 1-2 warp zone fall in the SAME 128-px archive cell, so the novelty bonus / prompts cannot single the route exit out; the archive has no state on pipe 4 and no 4-2 vine/warp-zone cell at all after 12 h. Run B's failure = entropy 1.9-2.0 nats (coef 0.03 + eps 0.05 + sticky 0.25), not code.
 - Change: `cell_x_bin` (env kwarg, --cell-x-bin), 64 px. **Mario_GRPOfinishA_cells64** (GPU 1) from the PPO-A checkpoint with a fresh 64-px archive replaces the plain finisher; the demo finisher (128 px) keeps running on GPU 0 as control.
+
+### 2026-09-08 23:00 — deterministic game (user request)
+- Verified: pipe 4 of the 1-2 warp zone pays +1500 (4-1, stages_cleared 1); pipes 3/2 are wrong exits. No archived state ever stood on pipe 4 (128-px cells merge it with pipe 3); the ceiling drops Mario right of pipe 2, so the route exit is two pipes to the LEFT, and DOWN on pipes 2/3 ends the episode with nothing.
+- **Mario_PPOrouteDet** (GPU 0, 12 h cap): PPO from scratch on the route with the env deterministic (sticky 0, explore_eps 0, reset_noops 0), 64-px cells, relative bonus 100, explorer episodes 5%, restarts 30%, entropy 0.02. Replaces the 128-px demo finisher. Risk: frame-sequence memorisation (no env noise); the policy's sampling is the only exploration.
+- Mario_GRPOfinishA_cells64 (GPU 1) continues as the pipe-4 test.
