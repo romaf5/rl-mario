@@ -32,7 +32,7 @@ def record(model, cfg, level, episodes, max_steps, seed, route=None, stop_on_lev
         for step in range(max_steps):
             with torch.no_grad():
                 lg = model({'obs': torch.from_numpy(obs[None]).float(), 'is_train': False})['logits']
-            act = int(torch.distributions.Categorical(logits=lg).sample())
+            act = int(lg.argmax(-1).item())          # deterministic evaluation
             obs, r, done, info = env.step(act); total += r; acts.append(act); frames.extend(env.frames4)
             if prev_life is not None and info.get('life') != prev_life:
                 life_r = 0.0

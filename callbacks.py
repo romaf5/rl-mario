@@ -421,8 +421,9 @@ class MarioObserver(AlgoObserver):
             # optimizes; argmax has fixed points (same frame -> same
             # action, e.g. running into a stair block forever) that the
             # trained policy never exhibits
-            action = torch.distributions.Categorical(
-                logits=res['logits']).sample().item()
+            # deterministic evaluation (user 2026-09-08): argmax policy in a
+            # deterministic env, so a checkpoint's clip is reproducible
+            action = int(res['logits'].argmax(-1).item())
             obs, reward, done, info = env.step(action)
             total_reward += reward
             if prev_life is not None and info.get('life', prev_life) != prev_life:
@@ -581,8 +582,7 @@ class MarioObserver(AlgoObserver):
                 with torch.no_grad():
                     res = model({'obs': torch.from_numpy(obs).float(),
                                  'is_train': False})
-                a = torch.distributions.Categorical(
-                    logits=res['logits']).sample().numpy()
+                a = res['logits'].argmax(-1).cpu().numpy()      # deterministic evaluation
                 obs, r, d, infos = env.step(a)
                 lt = env.last_terms
                 for i in range(n):

@@ -390,7 +390,7 @@ def full_game_eval(model, cfg, device, episodes, max_steps=6000, n_threads=8, se
     done_m = np.zeros(n, bool); gp = np.zeros(n, int); vic = np.zeros(n, bool)
     for _ in range(max_steps):
         lg = logits_of(model, torch.from_numpy(obs).to(device))
-        a = torch.distributions.Categorical(logits=lg).sample().cpu().numpy()
+        a = lg.argmax(-1).cpu().numpy()                    # deterministic evaluation
         obs, r, d, inf = env.step(a)
         gp = np.where(~done_m, np.maximum(gp, env.progress), gp)
         for i in np.nonzero(d & ~done_m)[0]:
@@ -403,8 +403,9 @@ def full_game_eval(model, cfg, device, episodes, max_steps=6000, n_threads=8, se
 
 @torch.no_grad()
 def clean_door_eval(model, env, device, episodes, max_steps=1500):
-    """Sampled policy, no exploration noise, full episodes from each level's
-    door (the n eval envs are split evenly over the configured levels)."""
+    """Argmax policy in a deterministic env (episodes of one level are
+    identical by construction), full episodes from each level's door (the n
+    eval envs are split evenly over the configured levels)."""
     n = env.num_actors
     levels = [l for l in env.stages if l != 'FullGame']
     lv = [levels[i % len(levels)] for i in range(n)]
@@ -412,7 +413,7 @@ def clean_door_eval(model, env, device, episodes, max_steps=1500):
     maxx = np.zeros(n); done_m = np.zeros(n, bool); vic = np.zeros(n, bool); loops = np.zeros(n, bool); clear = np.zeros(n, bool)
     for _ in range(max_steps):
         lg = logits_of(model, torch.from_numpy(obs).to(device))
-        a = torch.distributions.Categorical(logits=lg).sample().cpu().numpy()
+        a = lg.argmax(-1).cpu().numpy()                    # deterministic evaluation
         obs, r, d, inf = env.step(a)
         for i in range(n):
             if done_m[i]:
@@ -489,7 +490,7 @@ def main():
     env = MarioNativeVecEnv('grpo', NX, **dict(ec, dense_infos=False, explore_pure=True)); env.reset(); env.enable_u8_obs()
     # the eval env must not archive: it used to write its own stale copy of
     # the archive to the same file after every eval
-    eval_env = MarioNativeVecEnv('grpo_eval', a.eval_episodes, **dict(ec, sticky_actions=0.0, n_threads=8, seed=a.seed + 1, archive_path=None, self_restart_prob=0.0))
+    eval_env = MarioNativeVecEnv('grpo_eval', a.eval_episodes, **dict(ec, sticky_actions=0.0, explore_eps=0.0, reset_noops=0, n_threads=8, seed=a.seed + 1, archive_path=None, self_restart_prob=0.0))
     if a.demo_share > 0 and not a.grow_archive:
         print('[grpo] WARNING: --demo-share needs --grow-archive (cell entries are only detected when the env archives); demos will never be recorded', flush=True)
     eval_env.reset()
