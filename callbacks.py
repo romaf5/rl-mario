@@ -703,21 +703,34 @@ class MarioObserver(AlgoObserver):
                 return None
             return os.path.dirname(os.path.normpath(logdir))
 
+    @staticmethod
+    def route_progress(gp, route_gps):
+        """Route-aware level index: the last ON-route level at or below gp.
+        The env's progress counter also records the level of a wrong exit
+        (4-2 flag -> 4-3 = 14), which is a failure at 4-2, not progress."""
+        gp = int(gp)
+        if not route_gps or gp in route_gps:
+            return gp
+        below = [g for g in route_gps if g < gp]
+        return max(below) if below else gp
+
     def _sequential_eval(self, model, epoch_num, n=None, max_steps=None, seed=0):
         """The real objective as a rate: n seeded SAMPLED-policy games from
         the first level with 3 lives (training-style stepping, no noise).
-        Writes eval/game_progress_sampled_mean / _max (route level index
-        reached, 0-31) and eval/victory_rate_sampled."""
+        Writes eval/game_progress_sampled_mean / _max (last ON-route level
+        index reached, 0-31), eval/victory_rate_sampled and
+        eval/off_route_exit_rate_sampled (games that ended by a wrong exit)."""
         from mario_native_vecenv import MarioNativeVecEnv
         n = int(n or self.eval_seq_episodes); max_steps = int(max_steps or self.eval_seq_steps)
         ec, route = self._eval_env_config()
         gen = torch.Generator().manual_seed(int(seed) * 7919 + 1)
+        route_gps = {(int(l[0]) - 1) * 4 + int(l[2]) - 1 for l in route}
         env = MarioNativeVecEnv('seval', n, **dict(ec, random_stages=None, episode_life=False,
                                                    seed=int(seed) * 7919 + 1))
         try:
             obs = env.reset()
             done_m = np.zeros(n, dtype=bool); gp = np.zeros(n, dtype=np.int64)
-            vic = np.zeros(n, dtype=bool)
+            vic = np.zeros(n, dtype=bool); off = np.zeros(n, dtype=bool)
             for step in range(max_steps):
                 with torch.no_grad():
                     lg = model({'obs': torch.from_numpy(obs).float(), 'is_train': False})['logits']
@@ -728,19 +741,23 @@ class MarioObserver(AlgoObserver):
                     inf = infos[i] if isinstance(infos, list) else {}
                     done_m[i] = True
                     vic[i] = bool(inf.get('victory', False))
+                    off[i] = bool(inf.get('wrong_exit', False))
                     gp[i] = max(gp[i], int(inf.get('game_progress', 0)))
                 if done_m.all():
                     break
         finally:
             env.close()
+        gp = np.array([self.route_progress(g, route_gps) for g in gp], dtype=np.int64)
         res = {'progress_mean': float(gp.mean()), 'progress_max': int(gp.max()),
-               'victory': float(vic.mean())}
+               'victory': float(vic.mean()), 'off_route': float(off.mean())}
         self.writer.add_scalar('eval/game_progress_sampled_mean', res['progress_mean'], epoch_num)
         self.writer.add_scalar('eval/game_progress_sampled_max', res['progress_max'], epoch_num)
         self.writer.add_scalar('eval/victory_rate_sampled', res['victory'], epoch_num)
+        self.writer.add_scalar('eval/off_route_exit_rate_sampled', res['off_route'], epoch_num)
         lv = lambda g: '%d-%d' % (g // 4 + 1, g % 4 + 1)
         print(f'  [Eval] sequential x{n} sampled, 3 lives: level reached mean '
-              f'{res["progress_mean"]:.1f} max {lv(res["progress_max"])} victory {res["victory"]:.2f}')
+              f'{res["progress_mean"]:.1f} max {lv(res["progress_max"])} victory {res["victory"]:.2f} '
+              f'off-route exits {res["off_route"]:.2f}')
         return res
 
     def _record_video(self, epoch_num, model):

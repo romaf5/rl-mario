@@ -78,6 +78,6 @@ The project wraps rl_games' PPO implementation with custom Mario-specific compon
 - Checkpoints: `runs/<name>_<timestamp>/nn/*.pth`
 - TensorBoard: `runs/<name>_<timestamp>/summaries/`
 - Custom metrics in TensorBoard: `mario/mean_x_pos`, `mario/best_stage_progress`, `mario/flag_get_rate` (primary progress metric under random-stage training)
-- Evaluation metrics to trust (sampled policy, seeded): `eval/level_clear/<lvl>` (32 single-life door episodes per level), `eval/game_progress_sampled_max` / `eval/victory_rate_sampled` (8 three-life games from 1-1). The clips play the argmax policy for reproducible viewing; their scalars carry an `_argmax` suffix and flip 0/1.
+- Evaluation metrics to trust (sampled policy, seeded): `eval/level_clear/<lvl>` (32 single-life door episodes per level), `eval/game_progress_sampled_max` (last on-route level reached) / `eval/victory_rate_sampled` / `eval/off_route_exit_rate_sampled` (8 three-life games from 1-1). The clips play the argmax policy for reproducible viewing; their scalars carry an `_argmax` suffix and flip 0/1.
 - Offline checks (seconds, CPU): `tests/reward_bench.py` (reward semantics), `tests/novelty_bench.py`, `tests/grpo_bench.py`, `tests/eval_bench.py`
 - Eval videos: `runs/<name>_<timestamp>/videos/epoch_*.mp4` (disk) + animated GIF in TensorBoard Images tab

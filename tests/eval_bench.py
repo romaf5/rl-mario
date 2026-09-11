@@ -82,10 +82,17 @@ idx = os.path.join(run_dir, 'eval_traces', 'epoch_9', 'index.csv')
 rows = open(idx).read().splitlines() if os.path.exists(idx) else []
 check('level eval index lists the level of every episode', len(rows) > 1 and rows[0].startswith('level,') and any(r.startswith('8-1,') for r in rows[1:]), rows[:3])
 
+# ---------------------------------------------------------------- route-aware progress
+route_gps = {0, 1, 12, 13, 28, 29, 30, 31}
+check('route progress: an off-route exit (4-2 flag -> 4-3) counts as the last on-route level (4-2)',
+      MarioObserver.route_progress(14, route_gps) == 13 and MarioObserver.route_progress(2, route_gps) == 1
+      and MarioObserver.route_progress(28, route_gps) == 28 and MarioObserver.route_progress(0, route_gps) == 0,
+      [MarioObserver.route_progress(g, route_gps) for g in (14, 2, 28, 0)])
+
 # ---------------------------------------------------------------- sequential sampled eval
 seq = obs._sequential_eval(model, 12, n=2, max_steps=30, seed=1)
-check('sequential eval writes sampled game progress mean/max and victory rate',
-      all(t in sc for t in ('eval/game_progress_sampled_mean', 'eval/game_progress_sampled_max', 'eval/victory_rate_sampled')), sorted(t for t in sc if 'sampled' in t))
+check('sequential eval writes sampled game progress mean/max, victory rate and off-route exit rate',
+      all(t in sc for t in ('eval/game_progress_sampled_mean', 'eval/game_progress_sampled_max', 'eval/victory_rate_sampled', 'eval/off_route_exit_rate_sampled')), sorted(t for t in sc if 'sampled' in t))
 seq2 = obs._sequential_eval(model, 13, n=2, max_steps=30, seed=1)
 check('sequential eval is reproducible for a fixed seed', seq == seq2, (seq, seq2))
 
