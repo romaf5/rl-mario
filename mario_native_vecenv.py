@@ -152,6 +152,8 @@ class MarioNativeVecEnv(IVecEnv):
         self.lib = _Lib()
         rom = open(ROM, 'rb').read()
         self.single_stage = (not full_game) and (random_stages is not None)
+        # the C++ pool with 0 threads returns stale obs without stepping
+        n_threads = max(1, int(n_threads))
         self.env = self.lib.benv_create(rom, len(rom), n, n_threads,
                                         int(self.single_stage))
         # C clamps to >= 2; keep Python in step or the rgb4 buffer is short
@@ -231,6 +233,11 @@ class MarioNativeVecEnv(IVecEnv):
         # much as the climbers
         self.cell_bonus_relative = bool(cell_bonus_relative)
         self.door_seen = {}; self._seen_tick = 0
+        # GRPO rollouts freeze the door counts (no decay, no growth) so the
+        # bonus is the same function of the state for every rollout of a
+        # group whenever it runs in the horizon; entries seen meanwhile
+        # are merged when the trainer unfreezes
+        self.door_seen_frozen = False; self._door_seen_pending = {}
         self.is_door = np.ones(num_actors, dtype=bool)
         self.exp_persist = np.ones(num_actors, dtype=np.int64)
         self.explorer = np.zeros(num_actors, dtype=np.int32)
@@ -309,9 +316,18 @@ class MarioNativeVecEnv(IVecEnv):
         self.ep_cells = [set() for _ in range(n)]
         self._sbuf = ctypes.create_string_buffer(self.state_size)
         self._rgb4 = None      # (4,224,240,3) capture buffer when recording
-        self._raw_steps = False  # hack-free stepping (lockstep video eval)
+        self._raw_steps = False  # hack-free stepping (video clips, win searches)
 
     # ------------------------------------------------------------- helpers
+    def load_state(self, i, state):
+        """Load a savestate into env i. The C side memcpy's sizeof(Core)
+        from the buffer unchecked, so a state of another layout / a
+        truncated pickle would silently corrupt the core."""
+        if len(state) != self.state_size:
+            raise ValueError('savestate of %d bytes, core expects %d'
+                             % (len(state), self.state_size))
+        self.lib.benv_load(self.env, int(i), state)
+
     def _field(self, addr):
         return self.ram[:, addr].astype(np.int32)
 
@@ -403,8 +419,7 @@ class MarioNativeVecEnv(IVecEnv):
             # phases); sampling among them exposes the policy to the full
             # local distribution instead of one replayed setup
             states = ent[0] if isinstance(ent[0], list) else [ent[0]]
-            self.lib.benv_load(self.env, i,
-                               states[self.rng.randint(len(states))])
+            self.load_state(i, states[self.rng.randint(len(states))])
             self.start_stage[i] = cell[0]
             self.was_restart[i] = True; self.is_door[i] = False
             self.start_cell[i] = cell
@@ -418,7 +433,7 @@ class MarioNativeVecEnv(IVecEnv):
                                                 p=self.stage_weights)]
             else:
                 s = self.stages[self.rng.randint(len(self.stages))]
-            self.lib.benv_load(self.env, i, self.states[s])
+            self.load_state(i, self.states[s])
             self.start_stage[i] = s
             if self.reset_noops:
                 self.lib.benv_frames(self.env, i,
@@ -699,9 +714,16 @@ class MarioNativeVecEnv(IVecEnv):
         self.entered_cell = [None] * n
         entered = np.zeros(n, dtype=bool); paid_cell = np.zeros(n, dtype=bool)
         self._seen_tick += 1
-        if self._seen_tick % 32 == 0 and self.door_seen:
+        if self._seen_tick % 32 == 0 and self.door_seen and not self.door_seen_frozen:
             for k in self.door_seen:
                 self.door_seen[k] *= 0.9
+        # the bonus is decided against the counts as they stood BEFORE this
+        # step for every env: the loop below used to bump the count as it
+        # went, so of two envs entering the same new cell in one step only
+        # the lower index was paid (a systematic bias for GRPO's clones)
+        seen0 = self.door_seen
+        seen_inc = self._door_seen_pending if self.door_seen_frozen else self.door_seen
+        seen0 = dict(seen0)
         if self.sr_prob > 0:
             fstate = self._field(0x1D)
             # grounded on land; swimming counts as controlled in water
@@ -735,9 +757,9 @@ class MarioNativeVecEnv(IVecEnv):
                 # the cap are not new places) and, if relative, only for cells
                 # the door episodes do not reach on their own (count taken
                 # before this entry, so the first discoverer is paid)
-                paid_cell[i] = (not self.cell_bonus_relative) or self.door_seen.get(cell, 0.0) < 1.0
+                paid_cell[i] = (not self.cell_bonus_relative) or seen0.get(cell, 0.0) < 1.0
                 if self.is_door[i]:
-                    self.door_seen[cell] = self.door_seen.get(cell, 0.0) + 1.0
+                    seen_inc[cell] = seen_inc.get(cell, 0.0) + 1.0
                 if cell not in self.archive:
                     if len(self.archive) >= self.sr_cells:
                         # evict the OLDEST cell no episode is practising
@@ -993,6 +1015,16 @@ class MarioNativeVecEnv(IVecEnv):
                 'action_space': self.action_space, 'agents': 1,
                 'value_size': 1}
 
+    def freeze_door_seen(self, flag):
+        """Freeze / unfreeze the door-episode cell counts of the relative
+        novelty bonus. Unfreezing merges the entries seen meanwhile."""
+        flag = bool(flag)
+        if self.door_seen_frozen and not flag:
+            for k, v in self._door_seen_pending.items():
+                self.door_seen[k] = self.door_seen.get(k, 0.0) + v
+            self._door_seen_pending = {}
+        self.door_seen_frozen = flag
+
     def set_stage_weights(self, weights):
         w = np.array([max(float(weights.get(s, 0.0)), 0.0)
                       for s in self.stages])
@@ -1030,10 +1062,15 @@ class NativeEvalEnv:
     """Single-env adapter over MarioNativeVecEnv for the video/eval loop
     (old-gym API + .screen for frame capture)."""
 
-    def __init__(self, **kwargs):
+    def __init__(self, raw_steps=True, **kwargs):
         kwargs.setdefault('n_threads', 1)
         kwargs.setdefault('episode_life', False)
         self.v = MarioNativeVecEnv('eval', 1, dense_infos=True, **kwargs)
+        # hack-free by default: deaths, pipe travel, the flag and the ending
+        # are emulated and shown frame by frame, and the eval's timer hack
+        # lands on the same core that renders the video (the lockstep
+        # renderer replayed a different game after the first forced time-up)
+        self.v._raw_steps = bool(raw_steps)
         self._buf = ctypes.create_string_buffer(240 * 224 * 3)
         self.frames_per_step = self.v.skip
         self.v._rgb4 = np.zeros((self.v.skip, 224, 240, 3), dtype=np.uint8)
@@ -1061,83 +1098,6 @@ class NativeEvalEnv:
 
     def close(self):
         self.v.close()
-
-
-class LockstepVideoEnv:
-    """Video-grade eval env with zero train/eval obs mismatch.
-
-    The policy plays on the NATIVE core (hack-free stepping), so it sees
-    exactly the training observation distribution. A stable-retro
-    emulator, seeded from the same RAM, replays the identical actions in
-    bitwise lockstep (property proven by native/deep_difftest.py) purely
-    to render the video frames with the reference NES renderer.
-    """
-
-    def __init__(self, **kwargs):
-        from mario_env import RetroMarioEnv
-        kwargs.setdefault('n_threads', 1)
-        kwargs.setdefault('episode_life', False)
-        stages = kwargs.get('random_stages')
-        self.v = MarioNativeVecEnv('lockstep', 1, dense_infos=True, **kwargs)
-        self.v._raw_steps = True
-        self.frames_per_step = self.v.skip
-        self.r = RetroMarioEnv(random_stages=list(stages) if stages else None,
-                               full_game=kwargs.get('full_game', False),
-                               reset_noops=0)
-        self.frames4 = []
-        self._steps = 0
-        self.desynced = False
-        self._game = np.ones(0x800, dtype=bool)
-        self._game[0x100:0x300] = False
-
-    @property
-    def unwrapped(self):
-        return self
-
-    @property
-    def screen(self):
-        if self.frames4:
-            return self.frames4[-1]
-        return self.r.screen
-
-    def reset(self):
-        self.v.reset()                    # native state: correct PPU/VRAM
-        self.r.reset()                    # reference state: authoritative RAM
-        ram = np.frombuffer(self.r._retro.get_ram(),
-                            dtype=np.uint8)[:0x800].copy()
-        self.v.lib.benv_set_ram(self.v.env, 0, ram.tobytes())
-        self.v._post_reset_init([0], ram[None, :])
-        self.v._fetch_obs(0)
-        self.v._ring[0] = (self.v.obs_u8[0].astype(np.float32)
-                           / 255.0)[..., None]
-        self.frames4 = []
-        self._steps = 0
-        self.desynced = False
-        return self.v._obs()[0]
-
-    def step(self, action):
-        obs, rew, done, infos = self.v.step(np.array([int(action)]))
-        m = self.r._masks[int(action)]
-        fr = []
-        for _ in range(self.v.skip):
-            self.r._em.set_button_mask(m, 0)
-            self.r._em.step()
-            fr.append(self.r._retro.get_screen().copy())
-        self.frames4 = fr
-        self._steps += 1
-        if self._steps % 32 == 0 and not self.desynced:
-            rram = np.frombuffer(self.r._retro.get_ram(),
-                                 dtype=np.uint8)[:0x800]
-            if not np.array_equal(self.v.ram[0][self._game],
-                                  rram[self._game]):
-                self.desynced = True
-                print(f'[lockstep] WARNING: replay desync at step '
-                      f'{self._steps}')
-        return obs[0], float(rew[0]), bool(done[0]), infos[0]
-
-    def close(self):
-        self.v.close()
-        self.r.close()
 
 
 def register_mario_native_vecenv():

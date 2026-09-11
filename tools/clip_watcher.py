@@ -23,7 +23,7 @@ def record(model, cfg, level, episodes, max_steps, seed, route=None, stop_on_lev
     ec.update(random_stages=[level], sticky_actions=0, explore_eps=0, self_restart_prob=0, reset_noops=0, episode_life=False)
     if route:
         ec['route_levels'] = list(route)
-    torch.manual_seed(seed); best = None
+    best = None            # argmax playback: no RNG (seeding here reset the trainer's RNG from the clip thread)
     for ep in range(episodes):
         env = NativeEvalEnv(**ec); v = env.v; v._raw_steps = True; v.hold_on_done = True; obs = env.reset()     # hack-free, no reset after done
         v.lib.benv_save(v.env, 0, v._sbuf); start = bytes(v._sbuf.raw)

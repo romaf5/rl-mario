@@ -50,6 +50,10 @@ def main():
                         help='Override max training epochs')
     parser.add_argument('--video-freq', type=int, default=500,
                         help='Record gameplay video every N epochs (0 to disable)')
+    parser.add_argument('--eval-episodes', type=int, default=32,
+                        help='Sampled-policy door episodes per level at every video epoch')
+    parser.add_argument('--eval-level-steps', type=int, default=1500,
+                        help='Step cap of a sampled door episode')
     args = parser.parse_args()
 
     register_mario_env()
@@ -83,7 +87,9 @@ def main():
 
     observer = MarioObserver(video_freq=args.video_freq,
                              curriculum_freq=curriculum_freq,
-                             eval_env_kwargs=eval_env_config)
+                             eval_env_kwargs=eval_env_config,
+                             eval_episodes=args.eval_episodes,
+                             eval_level_steps=args.eval_level_steps)
     runner = Runner(algo_observer=observer)
     runner.load(config)
     runner.reset()
@@ -93,6 +99,14 @@ def main():
         'checkpoint': args.checkpoint,
         'sigma': None,
     })
+    # a recording still running at the end (daemon thread inside the native
+    # core's threadpool) must finish before the interpreter tears the process
+    # down: exiting through it aborted with "terminate called without an
+    # active exception"
+    vt = getattr(observer, '_video_thread', None)
+    if vt is not None and vt.is_alive():
+        print('  [Video] waiting for the last recording to finish')
+        vt.join()
 
 
 if __name__ == '__main__':

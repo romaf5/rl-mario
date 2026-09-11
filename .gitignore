@@ -22,3 +22,4 @@ native/*.pkl.tmp
 native/*.pkl.*
 traces/
 runs_archive/
+logs/

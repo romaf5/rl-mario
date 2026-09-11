@@ -25,11 +25,18 @@ class MarioObserver(AlgoObserver):
     """
 
     def __init__(self, video_freq=500, video_max_steps=20000, video_fps=8,
-                 curriculum_freq=0, eval_env_kwargs=None):
+                 curriculum_freq=0, eval_env_kwargs=None, eval_episodes=32,
+                 eval_level_steps=1500, eval_seq_episodes=8, eval_seq_steps=6000):
         super().__init__()
         self.video_freq = video_freq
         self.video_max_steps = video_max_steps
         self.video_fps = video_fps
+        # sampled-policy evaluation sizes (per-level door episodes and
+        # sequential full-game episodes) -- see _level_eval / _sequential_eval
+        self.eval_episodes = eval_episodes
+        self.eval_level_steps = eval_level_steps
+        self.eval_seq_episodes = eval_seq_episodes
+        self.eval_seq_steps = eval_seq_steps
         # Overrides for the video/eval env (e.g. start at the trained stage
         # instead of the sequential 1-1 game)
         self.eval_env_kwargs = eval_env_kwargs
@@ -333,16 +340,25 @@ class MarioObserver(AlgoObserver):
         kwargs.update(overrides)
         # default to the training backend: silently falling back to retro
         # would record a different observation distribution
-        default_backend = ('lockstep' if (self.algo.env_config or {}).get(
-            'archive_path') else 'retro')
-        backend = kwargs.pop('backend', default_backend)
-        if backend in ('native', 'lockstep'):
-            from mario_native_vecenv import NativeEvalEnv, LockstepVideoEnv
+        native_cfg = any(k in env_cfg for k in ('archive_path', 'unpaid_timeout',
+                                                 'self_restart_prob', 'cell_x_bin'))
+        backend = kwargs.pop('backend', 'native' if native_cfg else 'retro')
+        raw_steps = kwargs.pop('raw_steps', True)
+        if backend == 'lockstep':
+            # retired: the policy played on the native core while a
+            # stable-retro emulator rendered the frames, and the eval's timer
+            # hack (forced time-up on a stuck life) only reached the native
+            # core -- every clip diverged from the game after the first
+            # stuck event (2026-09-11 review)
+            print('  [Video] backend "lockstep" is retired; recording on the '
+                  'native core (hack-free)')
+            backend = 'native'
+        if backend == 'native':
+            from mario_native_vecenv import NativeEvalEnv
             kwargs.pop('name', None)
             kwargs.pop('action_type', None)
             kwargs.pop('record_frames', None)
-            cls = LockstepVideoEnv if backend == 'lockstep' else NativeEvalEnv
-            return cls(**kwargs)
+            return NativeEvalEnv(raw_steps=raw_steps, **kwargs)
         return create_mario_env(**kwargs)
 
     @staticmethod
@@ -495,22 +511,18 @@ class MarioObserver(AlgoObserver):
                       for s, f in zip(step_stats, frames)]
         if tr_env is not None and tr_rows:
             self._dump_video_trace(epoch_num, info, tr_state, tr_acts, tr_rows,
-                                   list(tr_env.last_terms.keys()), start_lvl=tr_start_lvl)
+                                   list(tr_env.last_terms.keys()), start_lvl=tr_start_lvl,
+                                   raw=int(bool(getattr(tr_env, '_raw_steps', False))))
         return frames, pil_frames, step_stats, info, total_reward, per_step_frames
 
-    def _dump_video_trace(self, epoch_num, info, state, acts, rows, term_names, start_lvl=None):
+    def _dump_video_trace(self, epoch_num, info, state, acts, rows, term_names, start_lvl=None, raw=1):
         """<run>/eval_traces/epoch_N/video_<start level>.csv (+ .npz with the
-        start state and actions for tools/play.py --replay)."""
+        start state and actions for tools/play.py --replay; `raw` records
+        whether the clip was stepped hack-free, which the replay must match)."""
         try:
-            try:
-                run_dir = os.path.dirname(os.path.dirname(
-                    self.writer.file_writer.event_writer._ev_writer._file_name))
-            except AttributeError:
-                logdir = getattr(self.writer, 'logdir', None) or \
-                    getattr(self.writer, 'log_dir', None)
-                if not logdir:
-                    return
-                run_dir = os.path.dirname(os.path.normpath(logdir))
+            run_dir = self._run_dir()
+            if run_dir is None:
+                return
             out = os.path.join(run_dir, 'eval_traces', f'epoch_{epoch_num}')
             os.makedirs(out, exist_ok=True)
             # named by the level the clip STARTED in (the end level was
@@ -527,7 +539,7 @@ class MarioObserver(AlgoObserver):
                                 state=np.frombuffer(state, dtype=np.uint8),
                                 actions=np.array(acts, dtype=np.int16),
                                 term_names=np.array(term_names), epoch=epoch_num,
-                                raw=1)      # recorded with hack-free stepping
+                                raw=int(raw))
         except Exception as e:
             print(f'  [Video] trace dump failed: {e}')
 
@@ -556,115 +568,180 @@ class MarioObserver(AlgoObserver):
         os.remove(path)
         return data
 
-    def _clean_door_eval(self, model, epoch_num, n=32, max_steps=600):
-        """Door episodes WITHOUT exploration noise (no sticky/random actions,
-        no restarts): what the policy can do vs what the noise does to it.
-        Training door metrics run under noise (8-4: 42% of door episodes
-        died in the opening lava with 5% random + 10% sticky actions while
-        the clean policy entered pipe 1 61/64 times)."""
-        from mario_native_vecenv import MarioNativeVecEnv
-        ec = dict(self.algo.env_config or {})
-        for k in ('explore_eps', 'sticky_actions', 'self_restart_prob',
-                  'explore_episode_prob'):
-            ec[k] = 0
-        for k in ('name', 'action_type', 'archive_path'):
-            ec.pop(k, None)
-        ec['n_threads'] = 4
-        env = MarioNativeVecEnv('clean', n, dense_infos=False, **ec)
-        try:
-            obs = env.reset()
-            # replayable traces: start state + actions + per-term rewards per
-            # episode (tools/play.py --replay <file>.npz)
-            starts = []
-            for i in range(n):
-                env.lib.benv_save(env.env, i, env._sbuf)
-                starts.append(bytes(env._sbuf.raw))
-            acts_log = [[] for _ in range(n)]
-            terms_log = [[] for _ in range(n)]
-            xs_log = [[] for _ in range(n)]
-            max_x = np.zeros(n); fin = {}
-            for step in range(max_steps):
-                with torch.no_grad():
-                    res = model({'obs': torch.from_numpy(obs).float(),
-                                 'is_train': False})
-                a = res['logits'].argmax(-1).cpu().numpy()      # deterministic evaluation
-                obs, r, d, infos = env.step(a)
-                lt = env.last_terms
-                for i in range(n):
-                    if i in fin:
-                        continue
-                    acts_log[i].append(int(a[i]))
-                    terms_log[i].append([float(v[i]) for v in lt.values()])
-                    xs_log[i].append(int(env.last_signals.x[i]))
-                    max_x[i] = max(max_x[i], env.max_x[i])
-                    if d[i]:
-                        inf = infos[i] if isinstance(infos, list) else {}
-                        fin[i] = ('victory' if inf.get('victory') else
-                                  'loop' if inf.get('loop_timeout') else
-                                  'timeout' if inf.get('timeout') else
-                                  'wrong_exit' if inf.get('wrong_exit') else
-                                  'death')
-                if len(fin) == n:
-                    break
-            for i in range(n):
-                fin.setdefault(i, 'running')
-            counts = {k: sum(1 for v in fin.values() if v == k) / n
-                      for k in ('death', 'loop', 'victory', 'timeout',
-                                'wrong_exit', 'running')}
-            self.writer.add_scalar('eval/door_max_x_mean', float(max_x.mean()),
-                                   epoch_num)
-            self.writer.add_scalar('eval/door_max_x_max', float(max_x.max()),
-                                   epoch_num)
-            for k, v in counts.items():
-                self.writer.add_scalar(f'eval/door_{k}_rate', v, epoch_num)
-            print(f'  [Eval] clean door x{n}: max_x mean {max_x.mean():.0f} '
-                  f'max {max_x.max():.0f} | ' + ' '.join(
-                      f'{k} {v:.2f}' for k, v in counts.items()))
-            self._dump_eval_traces(epoch_num, ec.get('random_stages'), starts,
-                                   acts_log, terms_log, xs_log,
-                                   list(env.last_terms.keys()), fin, max_x)
-        finally:
-            env.close()
+    @staticmethod
+    def _sample_actions(logits, gen):
+        """Actions drawn from the policy with a local generator: reproducible
+        for a fixed seed, and independent of the process-wide torch RNG."""
+        probs = torch.softmax(logits, -1)
+        return torch.multinomial(probs, 1, generator=gen).squeeze(1).numpy()
 
-    def _dump_eval_traces(self, epoch_num, stages, starts, acts, terms, xs,
-                          term_names, fin, max_x, keep=8):
-        """Write the best / worst / a few random clean-door episodes as
-        replayable .npz (start state, actions, per-step term rewards) under
-        <run>/eval_traces/epoch_<N>/, plus an index.csv summarising all."""
+    def _eval_env_config(self):
+        """Training env config stripped of noise, restarts and recorder keys."""
+        ec = dict(self.algo.env_config or {})
+        route = list(ec.get('route_levels') or ec.get('random_stages') or [])
+        for k in ('name', 'action_type', 'archive_path', 'video_levels',
+                  'video_level_steps', 'backend'):
+            ec.pop(k, None)
+        ec.update(sticky_actions=0.0, explore_eps=0.0, self_restart_prob=0.0,
+                  explore_episode_prob=0.0, reset_noops=0, n_threads=4,
+                  dense_infos=False, route_levels=route, full_game=True)
+        return ec, route
+
+    def _level_eval(self, model, epoch_num, levels=None, n=None, max_steps=None,
+                    seed=0):
+        """Per-level door evaluation of the SAMPLED policy: n single-life
+        episodes from each level's own door state, no noise, training-style
+        stepping, fixed seed (reproducible, and the episodes are not clones
+        of each other). Writes eval/level_clear/<lvl> (the clear rate) and the
+        max-x / timeout / wrong-exit / death rates, an index of every episode
+        and the best + worst replayable trace per level.
+
+        Why not argmax: PPO trains the sampled policy; argmax is a different
+        policy with fixed points (a frame that maps to 'run right' into a
+        pipe repeats forever) and one trajectory per level, so its clear
+        flags flipped 0/1 between epochs while the sampled clear rate of the
+        same checkpoint was 0.44-0.66 (2026-09-11 review)."""
+        from mario_native_vecenv import MarioNativeVecEnv
+        n = int(n or self.eval_episodes); max_steps = int(max_steps or self.eval_level_steps)
+        ec, route = self._eval_env_config()
+        levels = list(levels or route)
+        out, dump = {}, []
+        for li, lvl in enumerate(levels):
+            gen = torch.Generator().manual_seed(int(seed) * 1000 + li)
+            env = MarioNativeVecEnv('leval', n, **dict(ec, random_stages=[lvl], episode_life=True,
+                                                       seed=int(seed) * 1000 + li))
+            try:
+                obs = env.reset()
+                starts = []
+                for i in range(n):
+                    env.lib.benv_save(env.env, i, env._sbuf)
+                    starts.append(bytes(env._sbuf.raw))
+                acts = [[] for _ in range(n)]; terms = [[] for _ in range(n)]
+                xs = [[] for _ in range(n)]
+                fin, maxx, clear = {}, np.zeros(n, dtype=np.int64), np.zeros(n, dtype=bool)
+                term_names = None
+                for step in range(max_steps):
+                    with torch.no_grad():
+                        lg = model({'obs': torch.from_numpy(obs).float(), 'is_train': False})['logits']
+                    a = self._sample_actions(lg, gen)
+                    obs, r, d, infos = env.step(a)
+                    lt = env.last_terms; term_names = list(lt.keys())
+                    for i in range(n):
+                        if i in fin:
+                            continue
+                        acts[i].append(int(a[i])); terms[i].append([float(v[i]) for v in lt.values()])
+                        xs[i].append(int(env.last_signals.x[i]))
+                        if d[i]:
+                            inf = infos[i] if isinstance(infos, list) else {}
+                            maxx[i] = int(inf.get('max_x_pos', 0))
+                            clear[i] = inf.get('stages_cleared', 0) > 0 or bool(inf.get('victory', False))
+                            fin[i] = ('clear' if clear[i] else 'wrong_exit' if inf.get('wrong_exit')
+                                      else 'timeout' if inf.get('timeout') else 'death')
+                        else:
+                            maxx[i] = int(env.max_x[i])
+                    if len(fin) == n:
+                        break
+                for i in range(n):
+                    fin.setdefault(i, 'running')
+            finally:
+                env.close()
+            ends = {k: sum(1 for v in fin.values() if v == k) / n
+                    for k in ('clear', 'death', 'timeout', 'wrong_exit', 'running')}
+            out[lvl] = {'clear': float(clear.mean()), 'max_x': [int(v) for v in maxx], 'ends': ends}
+            self.writer.add_scalar(f'eval/level_clear/{lvl}', float(clear.mean()), epoch_num)
+            self.writer.add_scalar(f'eval/level_max_x_mean/{lvl}', float(maxx.mean()), epoch_num)
+            self.writer.add_scalar(f'eval/level_timeout_rate/{lvl}', ends['timeout'], epoch_num)
+            self.writer.add_scalar(f'eval/level_wrong_exit_rate/{lvl}', ends['wrong_exit'], epoch_num)
+            self.writer.add_scalar(f'eval/level_death_rate/{lvl}', ends['death'], epoch_num)
+            order = np.argsort(-maxx)
+            for i in range(n):
+                dump.append((lvl, i, fin[i], int(maxx[i]), acts[i], terms[i], xs[i], starts[i],
+                             i in (order[0], order[-1]), term_names))
+            print(f'  [Eval] {lvl} x{n} sampled: clear {clear.mean():.2f} max_x mean '
+                  f'{maxx.mean():.0f} | ' + ' '.join(f'{k} {v:.2f}' for k, v in ends.items()))
+        if levels:
+            self.writer.add_scalar('eval/level_clear_mean',
+                                   float(np.mean([out[l]['clear'] for l in levels])), epoch_num)
+        self._dump_level_traces(epoch_num, dump)
+        return out
+
+    def _dump_level_traces(self, epoch_num, dump):
+        """index.csv of every sampled door episode + best / worst replayable
+        .npz per level under <run>/eval_traces/epoch_<N>/ (training-style
+        stepping: raw=0, which tools/play.py --replay honours)."""
         try:
-            try:      # same derivation the video recorder uses
-                run_dir = os.path.dirname(os.path.dirname(
-                    self.writer.file_writer.event_writer._ev_writer._file_name))
-            except AttributeError:
-                logdir = getattr(self.writer, 'logdir', None) or \
-                    getattr(self.writer, 'log_dir', None)
-                if not logdir:
-                    return
-                run_dir = os.path.dirname(os.path.normpath(logdir))
+            run_dir = self._run_dir()
+            if run_dir is None:
+                return
             out = os.path.join(run_dir, 'eval_traces', f'epoch_{epoch_num}')
             os.makedirs(out, exist_ok=True)
-            n = len(starts)
-            order = np.argsort(-max_x)
-            pick = list(order[:keep // 2]) + list(order[-(keep // 2):])
             with open(os.path.join(out, 'index.csv'), 'w') as f:
-                f.write('episode,end,max_x,steps,total_reward,file\n')
-                for i in range(n):
-                    tot = float(np.sum(terms[i])) if terms[i] else 0.0
+                f.write('level,episode,end,max_x,steps,total_reward,file\n')
+                for lvl, i, end, mx, acts, terms, xs, start, keep, names in dump:
+                    tot = float(np.sum(terms)) if terms else 0.0
                     fn = ''
-                    if i in pick:
-                        fn = f'ep_{i:02d}_{fin.get(i, "running")}_x{int(max_x[i])}.npz'
+                    if keep:
+                        fn = f'ep_{lvl}_{i:02d}_{end}_x{mx}.npz'
                         np.savez_compressed(
-                            os.path.join(out, fn), state=np.frombuffer(
-                                starts[i], dtype=np.uint8),
-                            actions=np.array(acts[i], dtype=np.int16),
-                            terms=np.array(terms[i], dtype=np.float32),
-                            term_names=np.array(term_names), x=np.array(xs[i]),
-                            level=str((stages or ['?'])[0]), epoch=epoch_num,
-                            raw=0)      # recorded with the hacked training step
-                    f.write(f'{i},{fin.get(i, "running")},{int(max_x[i])},'
-                            f'{len(acts[i])},{tot:.1f},{fn}\n')
+                            os.path.join(out, fn), state=np.frombuffer(start, dtype=np.uint8),
+                            actions=np.array(acts, dtype=np.int16),
+                            terms=np.array(terms, dtype=np.float32),
+                            term_names=np.array(names or []), x=np.array(xs),
+                            level=str(lvl), epoch=epoch_num, raw=0)
+                    f.write(f'{lvl},{i},{end},{mx},{len(acts)},{tot:.1f},{fn}\n')
         except Exception as e:
             print(f'  [Eval] trace dump failed: {e}')
+
+    def _run_dir(self):
+        try:
+            return os.path.dirname(os.path.dirname(
+                self.writer.file_writer.event_writer._ev_writer._file_name))
+        except AttributeError:
+            logdir = getattr(self.writer, 'logdir', None) or \
+                getattr(self.writer, 'log_dir', None)
+            if not logdir:
+                return None
+            return os.path.dirname(os.path.normpath(logdir))
+
+    def _sequential_eval(self, model, epoch_num, n=None, max_steps=None, seed=0):
+        """The real objective as a rate: n seeded SAMPLED-policy games from
+        the first level with 3 lives (training-style stepping, no noise).
+        Writes eval/game_progress_sampled_mean / _max (route level index
+        reached, 0-31) and eval/victory_rate_sampled."""
+        from mario_native_vecenv import MarioNativeVecEnv
+        n = int(n or self.eval_seq_episodes); max_steps = int(max_steps or self.eval_seq_steps)
+        ec, route = self._eval_env_config()
+        gen = torch.Generator().manual_seed(int(seed) * 7919 + 1)
+        env = MarioNativeVecEnv('seval', n, **dict(ec, random_stages=None, episode_life=False,
+                                                   seed=int(seed) * 7919 + 1))
+        try:
+            obs = env.reset()
+            done_m = np.zeros(n, dtype=bool); gp = np.zeros(n, dtype=np.int64)
+            vic = np.zeros(n, dtype=bool)
+            for step in range(max_steps):
+                with torch.no_grad():
+                    lg = model({'obs': torch.from_numpy(obs).float(), 'is_train': False})['logits']
+                a = self._sample_actions(lg, gen)
+                obs, r, d, infos = env.step(a)
+                gp = np.where(done_m, gp, np.maximum(gp, env.progress))
+                for i in np.nonzero(d & ~done_m)[0]:
+                    inf = infos[i] if isinstance(infos, list) else {}
+                    done_m[i] = True
+                    vic[i] = bool(inf.get('victory', False))
+                    gp[i] = max(gp[i], int(inf.get('game_progress', 0)))
+                if done_m.all():
+                    break
+        finally:
+            env.close()
+        res = {'progress_mean': float(gp.mean()), 'progress_max': int(gp.max()),
+               'victory': float(vic.mean())}
+        self.writer.add_scalar('eval/game_progress_sampled_mean', res['progress_mean'], epoch_num)
+        self.writer.add_scalar('eval/game_progress_sampled_max', res['progress_max'], epoch_num)
+        self.writer.add_scalar('eval/victory_rate_sampled', res['victory'], epoch_num)
+        lv = lambda g: '%d-%d' % (g // 4 + 1, g % 4 + 1)
+        print(f'  [Eval] sequential x{n} sampled, 3 lives: level reached mean '
+              f'{res["progress_mean"]:.1f} max {lv(res["progress_max"])} victory {res["victory"]:.2f}')
+        return res
 
     def _record_video(self, epoch_num, model):
         """Record gameplay: PIL GIF to TensorBoard + MP4 to disk.
@@ -676,10 +753,17 @@ class MarioObserver(AlgoObserver):
             import imageio
             import tempfile
             from PIL import Image, ImageDraw, ImageFont
+            # sampled-policy evaluations (the numbers to trust); the clips
+            # below play the argmax policy so a checkpoint's video is
+            # reproducible, and their scalars carry an _argmax suffix
             try:
-                self._clean_door_eval(model, epoch_num)
+                self._level_eval(model, epoch_num, seed=epoch_num)
             except Exception as e:
-                print(f'  [Eval] clean door eval failed: {e}')
+                print(f'  [Eval] level eval failed: {e}')
+            try:
+                self._sequential_eval(model, epoch_num, seed=epoch_num)
+            except Exception as e:
+                print(f'  [Eval] sequential eval failed: {e}')
             try:
                 from tensorboardX.proto.summary_pb2 import Summary
             except ImportError:
@@ -749,14 +833,14 @@ class MarioObserver(AlgoObserver):
                                               colorspace=3,
                                               encoded_image_string=gb))]),
                             epoch_num)
-                        self.writer.add_scalar(f'eval/level_max_x/{lvl}',
+                        self.writer.add_scalar(f'eval/level_max_x_argmax/{lvl}',
                                                max(s[2] for s in st),
                                                epoch_num)
                         # cleared = left the level by its route exit
                         lvl_gp = (int(lvl[0]) - 1) * 4 + int(lvl[2]) - 1
                         cleared = int(inf_l.get('game_progress', lvl_gp) > lvl_gp
                                       and not inf_l.get('wrong_exit', False))
-                        self.writer.add_scalar(f'eval/level_clear/{lvl}',
+                        self.writer.add_scalar(f'eval/level_clear_argmax/{lvl}',
                                                cleared, epoch_num)
                         sizes.append(len(gb) // 1024)
                     self.writer.flush()
@@ -766,7 +850,8 @@ class MarioObserver(AlgoObserver):
                 x_pos = info.get('x_pos', 0)
                 world = info.get('world', 1)
                 stage = info.get('stage', 1)
-                # Eval frontier scalars: deterministic sequential run from 1-1
+                # Eval frontier scalars of the ARGMAX sequential clip from 1-1
+                # (eval/game_progress_sampled_* hold the sampled-policy rate)
                 self.writer.add_scalar('eval/game_progress',
                                        info.get('game_progress', 0), epoch_num)
                 # route-aware: the level index only counts while on the

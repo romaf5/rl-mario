@@ -158,8 +158,15 @@ class Inspector:
         if path.endswith('.npz'):
             z = np.load(path, allow_pickle=True)
             acts = [int(a) for a in z['actions']]
+            # a trace recorded hack-free (raw=1: eval clips) only replays
+            # frame-exactly with hack-free stepping; a training-style trace
+            # (raw=0) with the hacked step
+            raw = bool(int(z['raw'])) if 'raw' in z else False
+            if raw != bool(self.env._raw_steps):
+                self.env._raw_steps = raw
+                print('replay: switching to %s stepping to match the trace' % ('hack-free' if raw else 'training-style'))
             if 'state' in z:
-                self.env.lib.benv_load(self.env.env, 0, bytes(z['state']))
+                self.env.load_state(0, bytes(z['state']))
                 self.env._fetch_obs(0)
                 self.env._post_reset_init([0], self.env.ram)
                 self.env._ring[0] = (self.env.obs_u8[0].astype(np.float32) / 255.0)[..., None]

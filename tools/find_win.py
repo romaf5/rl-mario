@@ -55,7 +55,7 @@ def main():
     ec_r = dict(ec, episode_life=False, reset_noops=0); ec_r.pop('dense_infos', None)
     env = NativeEvalEnv(**ec_r); v = env.v; v._raw_steps = True; v.hold_on_done = True; env.reset()
     start = win[2]
-    v.lib.benv_load(v.env, 0, start); v._fetch_obs(0); v._post_reset_init([0], v.ram)
+    v.load_state(0, start); v._fetch_obs(0); v._post_reset_init([0], v.ram)
     v._ring[0] = (v.obs_u8[0].astype(np.float32) / 255.0)[..., None]; obs = v._obs()[0]
     frames, total, info, life_r, prev_life, pfr = [], 0.0, {}, 0.0, None, []
     for act in win[1]:

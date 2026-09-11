@@ -30,7 +30,6 @@ def _clip_worker(m_cpu, cfg, run_dir, step, level):
     try:
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'tools'))
         from clip_watcher import record, publish
-        torch.set_num_threads(2)
         levels = list(cfg['env_config'].get('random_stages') or [level])
         if len(levels) <= 1:
             mx, frames, acts, start, total, info, pfr = record(m_cpu, cfg, level, 2, 3000, seed=step)
@@ -67,7 +66,110 @@ def build_model(params, cfg, obs_shape, init=None):
 
 
 def logits_of(model, obs_t):
-    return model({'obs': obs_t, 'is_train': False})['logits']
+    """Policy logits. The value normaliser is kept in eval mode: an rl_games
+    forward in train mode updates its running stats from the value head,
+    which drifted the checkpoint's value scale on every update epoch."""
+    vms = getattr(model, 'value_mean_std', None)
+    was_training = vms.training if vms is not None else False
+    if was_training:
+        vms.eval()
+    try:
+        return model({'obs': obs_t, 'is_train': False})['logits']
+    finally:
+        if was_training:
+            vms.train()
+
+
+# ---- update math (tests/grpo_bench.py) --------------------------------------
+LOG_RATIO_BOUND = 10.0
+
+
+def rollout_logp(dist, act):
+    """Log-prob stored at rollout time: the TRUE log-prob of the action taken
+    (sampled, eps-mixed, hinted or forced). It used to be clamped at -20
+    while the fresh log-prob in the update was not, so a rare action sat at
+    ratio exp(lp + 20) ~ 0 and no gradient could lift it."""
+    return dist.log_prob(act)
+
+
+def log_ratio(lp, olp, bound=LOG_RATIO_BOUND):
+    """PPO log-ratio with the DIFFERENCE bounded (symmetric): lp == olp gives
+    ratio 1 however small both are; float32 -inf stays finite."""
+    return (lp - olp).clamp(-bound, bound)
+
+
+def bc_loss(lps):
+    """Self-imitation NLL of the demo action (log-softmax is finite in
+    float32, so no clamp: a clamp at -20 zeroed the gradient exactly where
+    the demo action had p < e^-20)."""
+    return -lps.mean()
+
+
+def valid_indices(mask, adv):
+    """Samples that carry a policy gradient: unmasked AND non-zero advantage.
+    Dead (zero-variance) groups used to enter the update as entropy-only
+    samples and flattened the policy on mastered levels."""
+    return torch.nonzero((mask > 0) & (adv != 0)).squeeze(1)
+
+
+def outcome_advantages(R, groups, group, no_std):
+    """One advantage per rollout, group-relative; zero-variance groups -> 0.
+    Returns (adv (N,), number of live groups)."""
+    R = np.asarray(R, dtype=np.float32); adv = np.zeros(len(R), np.float32); live = 0
+    for g in range(groups):
+        sl = slice(g * group, (g + 1) * group)
+        m, s = R[sl].mean(), R[sl].std()
+        if s > 1e-6:
+            live += 1
+            adv[sl] = (R[sl] - m) / (1.0 if no_std else s + 1e-6)
+    return adv, live
+
+
+def rtg_advantages(G, groups, group, no_std):
+    """Per-step advantages from discounted reward-to-go G (H, N), normalised
+    within the group at each step; --no-std applies here too (it used to be
+    ignored on this path)."""
+    H, N = G.shape
+    Gg = G.reshape(H, groups, group)
+    mu = Gg.mean(2, keepdims=True); sd = Gg.std(2, keepdims=True)
+    den = np.ones_like(sd) if no_std else sd + 1e-6
+    return np.where(sd > 1e-6, (Gg - mu) / den, 0.0).reshape(H, N).astype(np.float32)
+
+
+def resolve_env_overrides(cell_bonus, cell_x_bin, env_config):
+    """CLI reward knobs: an explicit value wins, else the config's
+    env_config value, else the historical default. (The old CLI defaults
+    0 / 128 silently replaced a config's 100 / 64, so a finisher trained in
+    a different reward regime than the PPO stage it continued.)"""
+    cb = env_config.get('cell_bonus', 0.0) if cell_bonus is None else cell_bonus
+    xb = env_config.get('cell_x_bin', 128) if cell_x_bin is None else cell_x_bin
+    return {'cell_bonus': float(cb), 'cell_x_bin': int(xb)}
+
+
+def write_launch_record(run_dir, argv, env_config, args):
+    """<run>/launch.json: argv, the resolved env config and all CLI args, so
+    a run's reward regime can be read back later."""
+    import json
+    rec = {'argv': list(argv), 'env_config': {k: v for k, v in env_config.items()},
+           'args': dict(args), 'time': time.strftime('%Y-%m-%d %H:%M:%S')}
+    with open(os.path.join(run_dir, 'launch.json'), 'w') as f:
+        json.dump(rec, f, indent=1, default=str)
+
+
+def sample_actions(logits, gen):
+    """Actions drawn from the policy with a local generator (seeded, so an
+    eval is reproducible and independent of the trainer's RNG). Evals used
+    argmax, which is a different policy from the sampled one PPO/GRPO
+    train: one trajectory per level, fixed points, 0/1 flips."""
+    probs = torch.softmax(logits, -1)
+    return torch.multinomial(probs, 1, generator=gen).squeeze(1).cpu().numpy()
+
+
+def looped(info):
+    """Did the episode contain a page reset / loop cutoff? `page_reset` is
+    the flag of the DROP step, which is never the done step, so the old
+    metrics that read it at done were identically zero."""
+    return bool(info.get('loop_timeout', False)) or int(info.get('page_resets', 0)) > 0
 
 
 class Prompts:
@@ -335,6 +437,14 @@ class Prompts:
     def refresh(self, archive):
         """Adopt cells the env archived during rollouts (new prompts start
         optimistic so they get sampled soon)."""
+        # cells the env evicted / pruned leave the pool too (their states are
+        # stale, and a re-discovered cell must start unproven)
+        keep = [i for i, c in enumerate(self.cells) if c in archive]
+        if len(keep) != len(self.cells):
+            if len(self.xuses) != len(self.cells):
+                self.xuses = np.concatenate([self.xuses, np.zeros(len(self.cells) - len(self.xuses), int)])
+            self.cells = [self.cells[i] for i in keep]; self.states = [self.states[i] for i in keep]
+            self.score = self.score[keep]; self.uses = self.uses[keep]; self.xuses = self.xuses[keep]
         known = set(self.cells); added = 0
         for k, e in archive.items():
             if k[0] not in self.doors or k in known:
@@ -361,7 +471,7 @@ def load_states(env, states, door=None):
     """Put every env at its given savestate and rebuild all Python trackers
     and the frame ring (what reset() does, with our states)."""
     for i, st in enumerate(states):
-        env.lib.benv_load(env.env, i, st)
+        env.load_state(i, st)
         env._fetch_obs(i)
     env._post_reset_init(range(env.num_actors), env.ram)
     f = env.obs_u8.astype(np.float32) / 255.0
@@ -387,10 +497,11 @@ def full_game_eval(model, cfg, device, episodes, max_steps=6000, n_threads=8, se
               sticky_actions=0.0, explore_eps=0.0, self_restart_prob=0.0, explore_episode_prob=0.0,
               reset_noops=0, n_threads=n_threads, dense_infos=False, seed=seed)
     env = MarioNativeVecEnv('fullgame', episodes, **ec); obs = env.reset(); n = episodes
+    gen = torch.Generator(device=device).manual_seed(int(seed) * 7919 + 1)
     done_m = np.zeros(n, bool); gp = np.zeros(n, int); vic = np.zeros(n, bool)
     for _ in range(max_steps):
         lg = logits_of(model, torch.from_numpy(obs).to(device))
-        a = lg.argmax(-1).cpu().numpy()                    # deterministic evaluation
+        a = sample_actions(lg, gen)                        # sampled policy, seeded
         obs, r, d, inf = env.step(a)
         gp = np.where(~done_m, np.maximum(gp, env.progress), gp)
         for i in np.nonzero(d & ~done_m)[0]:
@@ -402,18 +513,19 @@ def full_game_eval(model, cfg, device, episodes, max_steps=6000, n_threads=8, se
 
 
 @torch.no_grad()
-def clean_door_eval(model, env, device, episodes, max_steps=1500):
-    """Argmax policy in a deterministic env (episodes of one level are
-    identical by construction), full episodes from each level's door (the n
-    eval envs are split evenly over the configured levels)."""
+def clean_door_eval(model, env, device, episodes, max_steps=1500, seed=0):
+    """SAMPLED policy, seeded, in the noise-free env: single-life episodes
+    from each level's door (the n eval envs are split evenly over the
+    configured levels), so each level gets a clear RATE."""
     n = env.num_actors
     levels = [l for l in env.stages if l != 'FullGame']
     lv = [levels[i % len(levels)] for i in range(n)]
     obs = load_states(env, [env.states[l] for l in lv])
+    gen = torch.Generator(device=device).manual_seed(int(seed) * 1000 + 17)
     maxx = np.zeros(n); done_m = np.zeros(n, bool); vic = np.zeros(n, bool); loops = np.zeros(n, bool); clear = np.zeros(n, bool)
     for _ in range(max_steps):
         lg = logits_of(model, torch.from_numpy(obs).to(device))
-        a = lg.argmax(-1).cpu().numpy()                    # deterministic evaluation
+        a = sample_actions(lg, gen)                        # sampled policy, seeded
         obs, r, d, inf = env.step(a)
         for i in range(n):
             if done_m[i]:
@@ -421,11 +533,11 @@ def clean_door_eval(model, env, device, episodes, max_steps=1500):
             maxx[i] = max(maxx[i], inf[i]['max_x_pos'])
             clear[i] = clear[i] or inf[i].get('stages_cleared', 0) > 0 or bool(inf[i].get('victory', False))
             if d[i]:
-                done_m[i] = True; vic[i] = bool(inf[i].get('victory', False)); loops[i] = bool(inf[i].get('page_reset', inf[i].get('looped', False)))
+                done_m[i] = True; vic[i] = bool(inf[i].get('victory', False)); loops[i] = looped(inf[i])
         if done_m.all():
             break
     out = dict(mean_x=float(maxx.mean()), max_x=float(maxx.max()), victory=float(vic.mean()), loop=float(loops.mean()),
-               clear=float(clear.mean()))
+               clear=float(clear.mean()), max_x_all=[int(v) for v in maxx])
     if len(levels) > 1:
         for l in levels:
             m = np.array([x == l for x in lv])
@@ -463,8 +575,8 @@ def main():
     ap.add_argument('--cell-variants', type=int, default=3, help='max tile-signature variants per spatial archive cell')
     ap.add_argument('--explorers', type=int, default=0, help='extra envs per iteration that random-walk from least-visited cells ONLY to grow the archive (never in the update)')
     ap.add_argument('--demo-eps', type=float, default=0.0, help='uniform-random action share in the free steps of demo groups (the collapsed policy puts ~0 on the actions a link needs)')
-    ap.add_argument('--cell-x-bin', type=int, default=128, help='archive x-bin in px (64 tells the warp pipes apart)')
-    ap.add_argument('--cell-bonus', type=float, default=0.0, help='env novelty bonus per first entry of a grounded archive cell per life')
+    ap.add_argument('--cell-x-bin', type=int, default=None, help='archive x-bin in px (64 tells the warp pipes apart); default: the config\'s env_config value, else 128')
+    ap.add_argument('--cell-bonus', type=float, default=None, help='env novelty bonus per first entry of a grounded archive cell per life; default: the config\'s env_config value, else 0')
     ap.add_argument('--clip-demo', type=float, default=1.0, help='PPO clip for demo-group samples (the rest use --clip)')
     ap.add_argument('--hint', type=float, default=1.0, help='soft prefix: prob that a hinted rollout takes the demo action at its first free step (half the group is hinted; 0 = off)')
     ap.add_argument('--bc', type=float, default=0.1, help='self-imitation weight on the forced prefix steps of demo groups (negative log-likelihood of the demo action)')
@@ -474,6 +586,7 @@ def main():
 
     params = yaml.safe_load(open(a.config))['params']; cfg = params['config']
     ec = dict(cfg['env_config']); ec.pop('name', None); ec.pop('action_type', None)
+    knobs = resolve_env_overrides(a.cell_bonus, a.cell_x_bin, ec)
     # the env provides observations, dynamics and the per-step reward, and
     # (grow_archive) records a Go-Explore cell archive from the rollouts:
     # new cells become prompts, so groups start where the policy's outcomes
@@ -484,7 +597,7 @@ def main():
     ec.update(dict(self_restart_prob=1e-6 if a.grow_archive else 0.0, explore_eps=0.0,
                    explore_episode_prob=0.0, archive_path=a.archive if a.grow_archive else None,
                    self_restart_cells=a.max_cells, cell_tiles=True, cell_y_band=32, cell_max_variants=a.cell_variants,
-                   sticky_actions=0.0, n_threads=a.n_threads, dense_infos=True, seed=a.seed, cell_bonus=a.cell_bonus, cell_x_bin=a.cell_x_bin))
+                   sticky_actions=0.0, n_threads=a.n_threads, dense_infos=True, seed=a.seed, **knobs))
     N = a.group * a.groups
     NX = N + a.explorers              # explorers ride along in the same batch, outside the buffers
     env = MarioNativeVecEnv('grpo', NX, **dict(ec, dense_infos=False, explore_pure=True)); env.reset(); env.enable_u8_obs()
@@ -504,6 +617,7 @@ def main():
 
     run_dir = os.path.join('runs', f'{a.run_name}_{time.strftime("%d-%H-%M-%S")}')
     os.makedirs(os.path.join(run_dir, 'nn'), exist_ok=True)
+    write_launch_record(run_dir, sys.argv, ec, vars(a))
     writer = SummaryWriter(os.path.join(run_dir, 'summaries'))
     print(f'[grpo] {N} envs = {a.groups} groups x {a.group}; horizon {a.horizon}; run {run_dir}')
 
@@ -555,6 +669,7 @@ def main():
         full_acts = [chosen[i // a.group][4] if chosen[i // a.group][0] == 'demo' else None for i in range(N)]
         hint_env = np.array([(i % a.group) < a.group // 2 for i in range(N)]) & (plen > 0) & (a.hint > 0)
         model.eval()
+        env.freeze_door_seen(True)       # one bonus function for the whole horizon
         for t in range(H):
             with torch.no_grad():
                 lg = logits_of(model, torch.from_numpy(obs).to(device).float().div_(255.0))
@@ -580,7 +695,7 @@ def main():
                             hf[i] = full_acts[i][t]
                     if (hf >= 0).any():
                         hft = torch.from_numpy(hf).to(device); act = torch.where(hft >= 0, hft, act)
-                lp = dist.log_prob(act).clamp_min(-20.0)   # an eps-mixed action can have p=0 in float32: keep log-probs finite
+                lp = rollout_logp(dist, act)
             obs_buf[t] = obs                          # already uint8
             act_np = act.cpu().numpy()
             act_buf[t] = np.where(fz >= 0, fz, act_np); logp_buf[t] = lp.cpu().numpy()
@@ -611,16 +726,17 @@ def main():
             maxx = np.where(alive & ~d, np.maximum(maxx, env.max_x[:N]), maxx)
             for i in np.nonzero(alive & d)[0]:
                 maxx[i] = max(maxx[i], inf[i]['max_x_pos'])
-                loops[i] = bool(inf[i].get('page_reset', False)); vics[i] = bool(inf[i].get('victory', False))
+                loops[i] = looped(inf[i]); vics[i] = bool(inf[i].get('victory', False))
             alive &= ~d
             if not alive.any():
                 mask_buf[t + 1:] = 0; rew_buf[t + 1:] = 0; bc_buf[t + 1:] = False   # else stale samples from the last iteration get trained on
                 break
+        env.freeze_door_seen(False)
         frames += NX * H * 4
         if a.grow_archive:
             prompts.refresh(env.archive)
         R = rew_buf.sum(0)                                        # outcome per rollout
-        adv = np.zeros(N, np.float32); n_live_groups = 0
+        adv, n_live_groups = outcome_advantages(R, a.groups, a.group, a.no_std)
         for g in range(a.groups):
             sl = slice(g * a.group, (g + 1) * a.group)
             m, s = R[sl].mean(), R[sl].std()
@@ -638,9 +754,6 @@ def main():
                 prompts.update(chosen[g][0], float(s))
                 if isinstance(chosen[g][0], str) and chosen[g][0].startswith('door:'):
                     prompts.note_door(chosen[g][0][5:], float(maxx[sl].mean()))
-            if s > 1e-6:
-                n_live_groups += 1
-                adv[sl] = (R[sl] - m) / (1.0 if a.no_std else s + 1e-6)
         if a.rtg:
             # temporal credit: discounted reward-to-go per step, normalised
             # within the group AT THAT STEP (all rollouts of a group share
@@ -651,9 +764,7 @@ def main():
             for t in range(H - 1, -1, -1):
                 run = rew_buf[t] + a.gamma * run * mask_buf[t]
                 G[t] = run
-            Gg = G.reshape(H, a.groups, a.group)
-            mu = Gg.mean(2, keepdims=True); sd = Gg.std(2, keepdims=True)
-            adv_t = np.where(sd > 1e-6, (Gg - mu) / (sd + 1e-6), 0.0).reshape(H, N).astype(np.float32)
+            adv_t = rtg_advantages(G, a.groups, a.group, a.no_std)
         # ---- update ----
         model.train()
         T = H * N
@@ -661,7 +772,7 @@ def main():
         ac = torch.from_numpy(act_buf.reshape(T)).to(device); olp = torch.from_numpy(logp_buf.reshape(T)).to(device)
         mk = torch.from_numpy(mask_buf.reshape(T)).to(device)
         ad = torch.from_numpy((adv_t if a.rtg else np.repeat(adv[None], H, 0)).reshape(T)).to(device)
-        valid = torch.nonzero(mk > 0).squeeze(1)
+        valid = valid_indices(mk, ad)          # unmasked AND non-zero advantage (dead groups add nothing but entropy)
         # demo-group samples get a looser clip: lifting a ~1e-6 action to
         # usable mass at 0.2 takes ~25 consistent groups (x1.7 each)
         clipv = torch.where(demo_env.repeat(H), torch.tensor(a.clip_demo, device=device), torch.tensor(a.clip, device=device))
@@ -672,12 +783,14 @@ def main():
         bci = torch.nonzero(torch.from_numpy(bc_buf.reshape(T)).to(device)).squeeze(1)
         stats = dict(loss=0.0, kl=0.0, ent=0.0, clipfrac=0.0, bc=0.0, n=0)
         for ep in range(a.epochs):
+            if len(valid) == 0:
+                break
             perm = valid[torch.randperm(len(valid), device=device)]
             for s0 in range(0, len(perm), a.minibatch):
                 idx = perm[s0:s0 + a.minibatch]
                 ob = o[idx].float().div_(255.0)
                 lg = logits_of(model, ob); dist = torch.distributions.Categorical(logits=lg)
-                lp = dist.log_prob(ac[idx]); ratio = torch.exp(lp - olp[idx])
+                lp = dist.log_prob(ac[idx]); ratio = torch.exp(log_ratio(lp, olp[idx]))
                 A = ad[idx]
                 cv = clipv[idx]
                 pg = -torch.min(ratio * A, torch.max(torch.min(ratio, 1 + cv), 1 - cv) * A).mean()
@@ -686,7 +799,7 @@ def main():
                 if a.bc > 0 and len(bci) > 0:
                     bidx = bci[torch.randint(0, len(bci), (min(len(bci), a.minibatch // 4),), device=device)]
                     lps = torch.log_softmax(logits_of(model, o[bidx].float().div_(255.0)), -1).gather(1, ac[bidx][:, None]).squeeze(1)
-                    nll = -lps.clamp_min(-20.0).mean()          # p=0 in float32 gave -inf -> NaN weights
+                    nll = bc_loss(lps)
                     loss = loss + a.bc * nll; stats['bc'] += nll.item()
                 if not torch.isfinite(loss):
                     print(f'  [update] non-finite loss at it {it} (pg {pg.item():.3f}); minibatch skipped', flush=True); continue
@@ -694,7 +807,7 @@ def main():
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5); opt.step()
                 with torch.no_grad():
                     stats['loss'] += pg.item(); stats['ent'] += ent.item()
-                    stats['kl'] += (olp[idx] - lp.clamp_min(-20.0)).mean().item()   # same clamp as the stored log-probs, else eps-mixed p~0 actions inflate the stat
+                    stats['kl'] += (olp[idx] - lp).mean().item()
                     stats['clipfrac'] += ((ratio - 1).abs() > a.clip).float().mean().item(); stats['n'] += 1
         n_upd = max(stats['n'], 1)
         door = np.array([isinstance(chosen[i // a.group][0], str) and chosen[i // a.group][0].startswith('door') for i in range(N)])
@@ -727,14 +840,15 @@ def main():
             clip_thread.start()
         if it % a.eval_every == 0:
             model.eval()
-            ev = clean_door_eval(model, eval_env, device, a.eval_episodes)
+            ev = clean_door_eval(model, eval_env, device, a.eval_episodes, seed=a.seed * 100000 + it)
             for k, v in ev.items():
-                writer.add_scalar(f'eval/door_{k}', v, it)
+                if not isinstance(v, list):
+                    writer.add_scalar(f'eval/door_{k}', v, it)
             prompts.note_clears(ev)
             extra = ' '.join(f'{k[6:]}:{ev[k]:.2f}' for k in ev if k.startswith('clear_'))
             print(f'  [eval] door: mean_x {ev["mean_x"]:.0f} max_x {ev["max_x"]:.0f} victory {ev["victory"]:.3f} clear {ev["clear"]:.2f} loops {ev["loop"]:.2f} {extra}', flush=True)
             if a.fullgame_every and it % a.fullgame_every == 0:
-                fg = full_game_eval(model, cfg, device, 16, seed=a.seed + 2)
+                fg = full_game_eval(model, cfg, device, 16, seed=a.seed * 100000 + it + 2)
                 for k, v in fg.items():
                     writer.add_scalar(f'eval/fullgame_{k}', v, it)
                 lv = lambda g: '%d-%d' % (g // 4 + 1, g % 4 + 1)
