@@ -67,6 +67,17 @@ for ep, raw in ((7, True), (8, False)):
     check('clip trace is stamped with its stepping mode (raw=%d)' % int(raw), len(tr) == 1 and int(z['raw']) == int(raw), (tr, int(z['raw']) if tr else None))
     check('clip info is the env info dict (max_x_pos=%s)' % info.get('max_x_pos'), info.get('max_x_pos', 0) >= 40 and 'life' in info, info)
 
+# ---------------------------------------------------------------- clips play the SAMPLED policy, seeded
+def clip_actions(ep, seed):
+    env = obs._make_eval_env(random_stages=['1-1'], full_game=True)
+    obs._play_clip(model, env, 40, ep, stop_on_level_change=True, seed=seed)
+    tr = [f for f in os.listdir(os.path.join(run_dir, 'eval_traces', f'epoch_{ep}')) if f.endswith('.npz')]
+    return list(np.load(os.path.join(run_dir, 'eval_traces', f'epoch_{ep}', tr[0]))['actions'])
+a1, a2, a3 = clip_actions(21, 5), clip_actions(22, 5), clip_actions(23, 6)
+check('clip: same seed -> identical action sequence (reproducible)', a1 == a2, (a1[:10], a2[:10]))
+check('clip: the policy is sampled (another seed -> different actions; argmax of a random net would repeat one action)',
+      a1 != a3 and len(set(a1)) > 1, (a1[:10], a3[:10]))
+
 # ---------------------------------------------------------------- per-level sampled eval
 res = obs._level_eval(model, 9, levels=['1-1', '8-1'], n=4, max_steps=40, seed=3)
 sc = obs.writer.scalars

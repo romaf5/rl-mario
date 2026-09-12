@@ -384,19 +384,22 @@ class MarioObserver(AlgoObserver):
         return canvas
 
     def _play_clip(self, model, env, max_steps, epoch_num,
-                   stop_on_level_change=False):
+                   stop_on_level_change=False, seed=0):
         try:
             return self._play_clip_inner(model, env, max_steps, epoch_num,
-                                         stop_on_level_change)
+                                         stop_on_level_change, seed)
         finally:
             # a leaked stable-retro emulator makes every later video fail
             env.close()
 
     def _play_clip_inner(self, model, env, max_steps, epoch_num,
-                         stop_on_level_change=False):
-        """Play one clip with the sampled policy until the episode is over
-        (max_steps is only a safety cap). With stop_on_level_change the clip
-        also ends once the level is cleared (per-level clips).
+                         stop_on_level_change=False, seed=0):
+        """Play one clip with the SAMPLED policy (local generator seeded
+        with `seed`: reproducible per epoch, and it is the policy PPO
+        trains -- argmax froze on fixed points such as holding right+A into
+        a staircase step for 300 steps) until the episode is over (max_steps
+        is only a safety cap). With stop_on_level_change the clip also ends
+        once the level is cleared (per-level clips).
 
         Returns (raw_frames, pil_frames_with_strip, step_stats, last_info,
         total_reward, frames_per_step). Closes the env."""
@@ -417,6 +420,7 @@ class MarioObserver(AlgoObserver):
             tr_env._fetch_obs(0); r0 = tr_env.ram[0]
             tr_start_lvl = '%d-%d' % (int(r0[0x75F]) + 1, int(r0[0x75C]) + 1)   # trace files are named by the START level
         prev_life, event, event_ttl = None, '', 0
+        gen = torch.Generator().manual_seed(int(seed))
         per_step_frames = getattr(env.unwrapped, 'frames_per_step',
                                   4 if hasattr(env.unwrapped, 'frames4')
                                   else 1)
@@ -436,13 +440,7 @@ class MarioObserver(AlgoObserver):
                 res = model(input_dict)
             if is_rnn:
                 rnn_states = res.get('rnn_states', rnn_states)
-            # sample, don't argmax: the stochastic policy is what PPO
-            # optimizes; argmax has fixed points (same frame -> same
-            # action, e.g. running into a stair block forever) that the
-            # trained policy never exhibits
-            # deterministic evaluation (user 2026-09-08): argmax policy in a
-            # deterministic env, so a checkpoint's clip is reproducible
-            action = int(res['logits'].argmax(-1).item())
+            action = int(self._sample_actions(res['logits'], gen)[0])
             obs, reward, done, info = env.step(action)
             total_reward += reward
             if prev_life is not None and info.get('life', prev_life) != prev_life:
@@ -779,8 +777,8 @@ class MarioObserver(AlgoObserver):
             import tempfile
             from PIL import Image, ImageDraw, ImageFont
             # sampled-policy evaluations (the numbers to trust); the clips
-            # below play the argmax policy so a checkpoint's video is
-            # reproducible, and their scalars carry an _argmax suffix
+            # below play the sampled policy too, seeded per epoch and level
+            # (reproducible); their scalars carry a _clip suffix (one episode)
             try:
                 self._level_eval(model, epoch_num, seed=epoch_num)
             except Exception as e:
@@ -797,7 +795,8 @@ class MarioObserver(AlgoObserver):
             # main clip: sequential game from the eval start (1-1 by default)
             (frames, pil_frames, step_stats, info, total_reward,
              per_step) = self._play_clip(model, self._make_eval_env(),
-                                         self.video_max_steps, epoch_num)
+                                         self.video_max_steps, epoch_num,
+                                         seed=epoch_num * 100)
 
             if len(frames) > 4:
                 run_dir = os.path.dirname(os.path.dirname(
@@ -836,12 +835,13 @@ class MarioObserver(AlgoObserver):
                     lvl_steps = int(ek.get('video_level_steps')
                                     or self.video_max_steps)
                     sizes = []
-                    for lvl in levels:
+                    for li, lvl in enumerate(levels):
                         env_l = self._make_eval_env(random_stages=[lvl],
                                                     full_game=True)
                         fr, pf, st, inf_l, rew_l, ps = self._play_clip(
                             model, env_l, lvl_steps, epoch_num,
-                            stop_on_level_change=True)
+                            stop_on_level_change=True,
+                            seed=epoch_num * 100 + li + 1)
                         if len(fr) < 4:
                             continue
                         imageio.mimsave(
@@ -858,14 +858,14 @@ class MarioObserver(AlgoObserver):
                                               colorspace=3,
                                               encoded_image_string=gb))]),
                             epoch_num)
-                        self.writer.add_scalar(f'eval/level_max_x_argmax/{lvl}',
+                        self.writer.add_scalar(f'eval/level_max_x_clip/{lvl}',
                                                max(s[2] for s in st),
                                                epoch_num)
                         # cleared = left the level by its route exit
                         lvl_gp = (int(lvl[0]) - 1) * 4 + int(lvl[2]) - 1
                         cleared = int(inf_l.get('game_progress', lvl_gp) > lvl_gp
                                       and not inf_l.get('wrong_exit', False))
-                        self.writer.add_scalar(f'eval/level_clear_argmax/{lvl}',
+                        self.writer.add_scalar(f'eval/level_clear_clip/{lvl}',
                                                cleared, epoch_num)
                         sizes.append(len(gb) // 1024)
                     self.writer.flush()
@@ -875,7 +875,7 @@ class MarioObserver(AlgoObserver):
                 x_pos = info.get('x_pos', 0)
                 world = info.get('world', 1)
                 stage = info.get('stage', 1)
-                # Eval frontier scalars of the ARGMAX sequential clip from 1-1
+                # Eval frontier scalars of the sequential CLIP from 1-1 (one seeded game)
                 # (eval/game_progress_sampled_* hold the sampled-policy rate)
                 self.writer.add_scalar('eval/game_progress',
                                        info.get('game_progress', 0), epoch_num)

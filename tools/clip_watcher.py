@@ -23,7 +23,8 @@ def record(model, cfg, level, episodes, max_steps, seed, route=None, stop_on_lev
     ec.update(random_stages=[level], sticky_actions=0, explore_eps=0, self_restart_prob=0, reset_noops=0, episode_life=False)
     if route:
         ec['route_levels'] = list(route)
-    best = None            # argmax playback: no RNG (seeding here reset the trainer's RNG from the clip thread)
+    best = None
+    gen = torch.Generator().manual_seed(int(seed))      # local generator: reproducible, never touches the process RNG
     for ep in range(episodes):
         env = NativeEvalEnv(**ec); v = env.v; v._raw_steps = True; v.hold_on_done = True; obs = env.reset()     # hack-free, no reset after done
         v.lib.benv_save(v.env, 0, v._sbuf); start = bytes(v._sbuf.raw)
@@ -32,7 +33,7 @@ def record(model, cfg, level, episodes, max_steps, seed, route=None, stop_on_lev
         for step in range(max_steps):
             with torch.no_grad():
                 lg = model({'obs': torch.from_numpy(obs[None]).float(), 'is_train': False})['logits']
-            act = int(lg.argmax(-1).item())          # deterministic evaluation
+            act = int(torch.multinomial(torch.softmax(lg, -1), 1, generator=gen).item())   # sampled policy, seeded
             obs, r, done, info = env.step(act); total += r; acts.append(act); frames.extend(env.frames4)
             if prev_life is not None and info.get('life') != prev_life:
                 life_r = 0.0
