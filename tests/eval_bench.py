@@ -82,6 +82,22 @@ idx = os.path.join(run_dir, 'eval_traces', 'epoch_9', 'index.csv')
 rows = open(idx).read().splitlines() if os.path.exists(idx) else []
 check('level eval index lists the level of every episode', len(rows) > 1 and rows[0].startswith('level,') and any(r.startswith('8-1,') for r in rows[1:]), rows[:3])
 
+# ---------------------------------------------------------------- a cleared level counts even if the episode plays on
+import csv
+ACT = ['NOOP', 'R', 'R+A', 'R+B', 'R+A+B', 'A', 'L', 'L+A', 'L+B', 'L+A+B', 'DOWN', 'UP']; AIDX = {a: i for i, a in enumerate(ACT)}
+class TraceModel:
+    """Forces a recorded action sequence through the eval's sampler (one-hot logits)."""
+    def __init__(self, acts): self.acts, self.t = acts, 0
+    def __call__(self, d):
+        lg = torch.full((d['obs'].shape[0], 12), -1e9); lg[:, self.acts[min(self.t, len(self.acts) - 1)]] = 0.0; self.t += 1
+        return {'logits': lg}
+rows = list(csv.DictReader(open(os.path.join(ROOT, 'traces', 'play_0905-232759.csv'))))     # human: 1-1 -> 1-2 -> 4-1
+acts = [AIDX[r['action']] for r in rows]
+first_12 = next(i for i, r in enumerate(rows) if r['level'] == '1-2')
+res = obs._level_eval(TraceModel(acts), 14, levels=['1-1'], n=1, max_steps=first_12 + 60, seed=0)
+check('level eval: a level cleared mid-episode counts as cleared although the episode plays on into the next level (trace clears 1-1 at step %d)' % first_12,
+      res['1-1']['clear'] == 1.0 and res['1-1']['ends']['clear'] == 1.0, res['1-1'])
+
 # ---------------------------------------------------------------- route-aware progress
 route_gps = {0, 1, 12, 13, 28, 29, 30, 31}
 check('route progress: an off-route exit (4-2 flag -> 4-3) counts as the last on-route level (4-2)',

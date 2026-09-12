@@ -608,6 +608,7 @@ class MarioObserver(AlgoObserver):
         out, dump = {}, []
         for li, lvl in enumerate(levels):
             gen = torch.Generator().manual_seed(int(seed) * 1000 + li)
+            gp0 = (int(lvl[0]) - 1) * 4 + int(lvl[2]) - 1
             env = MarioNativeVecEnv('leval', n, **dict(ec, random_stages=[lvl], episode_life=True,
                                                        seed=int(seed) * 1000 + li))
             try:
@@ -637,6 +638,13 @@ class MarioObserver(AlgoObserver):
                             clear[i] = inf.get('stages_cleared', 0) > 0 or bool(inf.get('victory', False))
                             fin[i] = ('clear' if clear[i] else 'wrong_exit' if inf.get('wrong_exit')
                                       else 'timeout' if inf.get('timeout') else 'death')
+                        elif int(env.progress[i]) > gp0:
+                            # the level was left by its route exit: the episode
+                            # keeps playing the next level (a clear is not a
+                            # terminal), but for THIS level's rate it is over.
+                            # Counting only at done marked every such episode
+                            # 'running' when it hit the step cap in the next level.
+                            maxx[i] = int(env.max_x[i]); clear[i] = True; fin[i] = 'clear'
                         else:
                             maxx[i] = int(env.max_x[i])
                     if len(fin) == n:
