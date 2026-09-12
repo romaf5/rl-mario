@@ -76,5 +76,50 @@ env.step(np.array([3])); x1 = int(env.last_signals.x[0]); env.step(np.array([3])
 check('env: n_threads=0 is clamped to 1 (the step still advances the game)', x2 > x1, (x1, x2))
 env.close()
 
+# ---------------------------------------------------------------- frontier restarts (2026-09-12)
+import collections
+def frontier_env(**kw):
+    env = make(1, random_stages=['1-1', '1-2'], self_restart_prob=1.0, self_restart_frontier_prob=1.0,
+               self_restart_frontier_k=16, **kw)
+    st = env.states['1-1']
+    K = lambda lvl, b: (lvl, 2, b, 2, 0, 1, 0)
+    env.archive = {}
+    for b in range(30):                       # level A: 30 heavily tried cells that NEVER won (dead ends)
+        env.archive[K('1-1', b)] = [[st], 500, 300]; env.cell_tries[K('1-1', b)] = 500
+    for b in (44, 45):                        # level B: 2 cells that win 5% of the time
+        env.archive[K('1-2', b)] = [[st], 100, 300]; env.cell_tries[K('1-2', b)] = 100; env.cell_wins[K('1-2', b)] = 5
+    return env
+def draws(env, n=300):
+    c = collections.Counter()
+    for _ in range(n):
+        env._reset_env(0); c[env.start_cell[0][0]] += 1
+    return c
+env = frontier_env(); d = draws(env); env.close()
+check('frontier: draws go to cells that have WON, never to never-winning dead ends (1-2 winners %d/300, 1-1 dead ends %d/300)' % (d['1-2'], d['1-1']),
+      d['1-1'] == 0 and d['1-2'] == 300, dict(d))
+env = frontier_env()
+for b in range(30):                           # now level A's cells also win, at a worse rate (harder): global top-k would take them all
+    env.cell_wins[('1-1', 2, b, 2, 0, 1, 0)] = 10
+d = draws(env); env.close()
+check('frontier (global): the 16 hardest winners crowd out the other level (1-2 gets %d/300)' % d['1-2'], d['1-2'] == 0, dict(d))
+env = frontier_env(frontier_per_level=True)
+for b in range(30):
+    env.cell_wins[('1-1', 2, b, 2, 0, 1, 0)] = 10
+d = draws(env); env.close()
+check('frontier per level: each level keeps its share of the draws (1-2 gets %d/300, 1-1 %d/300)' % (d['1-2'], d['1-1']),
+      100 <= d['1-2'] <= 200 and 100 <= d['1-1'] <= 200, dict(d))
+env = frontier_env(frontier_per_level=True)
+for c in list(env.cell_wins): env.cell_wins.pop(c)      # no winners anywhere: fall back to least-practised cells of the chosen level
+env.archive[('1-2', 2, 46, 2, 0, 1, 0)] = [[env.states['1-1']], 0, 300]     # a fresh, never-tried 1-2 cell
+d = draws(env); fresh = sum(1 for _ in range(0))
+cnt = collections.Counter()
+for _ in range(300):
+    env._reset_env(0); cnt[env.start_cell[0]] += 1
+env.close()
+lv12 = {c: v for c, v in cnt.items() if c[0] == '1-2'}
+check('frontier per level, no winners: the least-practised cell of the level gets the most draws (fresh %d vs %s; uses are balanced as they accrue)'
+      % (cnt[('1-2', 2, 46, 2, 0, 1, 0)], sorted(v for c, v in lv12.items() if c[2] != 46)),
+      cnt[('1-2', 2, 46, 2, 0, 1, 0)] == max(lv12.values()) and sum(lv12.values()) > 100, dict(lv12))
+
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)

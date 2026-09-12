@@ -96,6 +96,7 @@ check('prompts: a cell evicted from the archive leaves the prompt pool (scores/u
 
 # ---------------------------------------------------------------- value normaliser untouched by logits
 params = yaml.safe_load(open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'configs', 'mario_ppo_native_84.yaml')))['params']
+torch.manual_seed(0)              # a random-init policy that happens to walk left makes the sampling checks meaningless
 model = G.build_model(params, params['config'], (84, 84, 4))
 model.train()
 before = model.value_mean_std.count.clone()
@@ -121,6 +122,10 @@ check('door eval differs for another seed', ev1 != ev3, (ev1, ev3))
 fg1 = G.full_game_eval(model, rc, dev, 2, max_steps=30, n_threads=2, seed=3)
 fg2 = G.full_game_eval(model, rc, dev, 2, max_steps=30, n_threads=2, seed=3)
 check('full-game eval is reproducible for a fixed seed', fg1 == fg2, (fg1, fg2))
+
+# ---------------------------------------------------------------- route-aware full-game progress
+check('route_progress: an off-route exit (4-2 flag -> 4-3) counts as the last on-route level',
+      G.route_progress(14, {0, 1, 12, 13, 28, 29, 30, 31}) == 13 and G.route_progress(28, {0, 1, 12, 13, 28}) == 28 and G.route_progress(5, set()) == 5)
 
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)

@@ -165,6 +165,16 @@ def sample_actions(logits, gen):
     return torch.multinomial(probs, 1, generator=gen).squeeze(1).cpu().numpy()
 
 
+def route_progress(gp, route_gps):
+    """Last ON-route level index at or below gp (the env's counter also
+    records the level of a wrong exit: 4-2 flag -> 4-3 = 14, a failure at 4-2)."""
+    gp = int(gp)
+    if not route_gps or gp in route_gps:
+        return gp
+    below = [g for g in route_gps if g < gp]
+    return max(below) if below else gp
+
+
 def looped(info):
     """Did the episode contain a page reset / loop cutoff? `page_reset` is
     the flag of the DROP step, which is never the done step, so the old
@@ -498,18 +508,21 @@ def full_game_eval(model, cfg, device, episodes, max_steps=6000, n_threads=8, se
               reset_noops=0, n_threads=n_threads, dense_infos=False, seed=seed)
     env = MarioNativeVecEnv('fullgame', episodes, **ec); obs = env.reset(); n = episodes
     gen = torch.Generator(device=device).manual_seed(int(seed) * 7919 + 1)
-    done_m = np.zeros(n, bool); gp = np.zeros(n, int); vic = np.zeros(n, bool)
+    route_gps = {(int(l[0]) - 1) * 4 + int(l[2]) - 1 for l in ec['route_levels']}
+    done_m = np.zeros(n, bool); gp = np.zeros(n, int); vic = np.zeros(n, bool); off = np.zeros(n, bool)
     for _ in range(max_steps):
         lg = logits_of(model, torch.from_numpy(obs).to(device))
         a = sample_actions(lg, gen)                        # sampled policy, seeded
         obs, r, d, inf = env.step(a)
         gp = np.where(~done_m, np.maximum(gp, env.progress), gp)
         for i in np.nonzero(d & ~done_m)[0]:
-            done_m[i] = True; vic[i] = bool(inf[i].get('victory', False)); gp[i] = max(gp[i], inf[i].get('game_progress', 0))
+            done_m[i] = True; vic[i] = bool(inf[i].get('victory', False)); off[i] = bool(inf[i].get('wrong_exit', False))
+            gp[i] = max(gp[i], inf[i].get('game_progress', 0))
         if done_m.all():
             break
     env.close()
-    return dict(level_mean=float(gp.mean()), level_max=int(gp.max()), victory=float(vic.mean()))
+    gp = np.array([route_progress(g, route_gps) for g in gp])
+    return dict(level_mean=float(gp.mean()), level_max=int(gp.max()), victory=float(vic.mean()), off_route=float(off.mean()))
 
 
 @torch.no_grad()

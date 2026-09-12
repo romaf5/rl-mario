@@ -141,7 +141,8 @@ class MarioNativeVecEnv(IVecEnv):
                  reward=None, play_mode=False,
                  route_levels=None, cell_tiles=False,
                  frontier_predecessors=0, cell_y_band=64, explore_pure=False,
-                 credit_vertical=False, cell_max_variants=0, cell_bonus=0.0, cell_bonus_relative=True, cell_x_bin=128, **unknown):
+                 credit_vertical=False, cell_max_variants=0, cell_bonus=0.0, cell_bonus_relative=True, cell_x_bin=128,
+                 frontier_per_level=False, **unknown):
         assert action_type == 'complex'
         gone = [k for k in unknown if k in self.REMOVED_KWARGS]
         if gone:
@@ -206,6 +207,10 @@ class MarioNativeVecEnv(IVecEnv):
         # frontier practice pool also includes never-won cells up to this
         # many x-bins before a winning cell (0 = winners only, legacy)
         self.frontier_pred = int(frontier_predecessors)
+        # frontier restarts pick the LEVEL first (curriculum weights), then a
+        # cell of that level: in one global pool the 16 hardest cells of the
+        # biggest levels took every frontier draw and 1-2 / 4-2 got none
+        self.frontier_per_level = bool(frontier_per_level)
         # vertical resolution of archive cells (px): 32 separates standing on
         # a block (ypix 112) from standing on the pipe top above it (64)
         self.cell_y_band = int(cell_y_band)
@@ -368,46 +373,51 @@ class MarioNativeVecEnv(IVecEnv):
             cells = list(self.archive.keys())
             if (self.sr_frontier_prob > 0
                     and self.rng.random_sample() < self.sr_frontier_prob):
+                if self.frontier_per_level:
+                    by = {}
+                    for c in cells:
+                        by.setdefault(c[0], []).append(c)
+                    levels = [l for l in self.stages if l in by]
+                    if levels:
+                        if self.stage_weights is not None:
+                            w = np.array([self.stage_weights[self.stages.index(l)]
+                                          for l in levels])
+                            w = w / w.sum() if w.sum() > 0 else None
+                        else:
+                            w = None
+                        cells = by[levels[self.rng.choice(len(levels), p=w)]]
+                # backward-chaining frontier: cells PROVEN to convert (1+
+                # wins), plus -- with frontier_predecessors -- the never-won
+                # cells right behind a winner (same frame, up to that many
+                # x-bins before). A never-winning cell with thousands of
+                # tries used to out-weigh every winner (weight ~1.05 vs
+                # ~0.99), so the draw fed the dead ends: 4-2's end section
+                # took 25-60k restarts, the 1-2 warp-zone winners ~50 each.
+                winners = [c for c in cells if self.cell_wins.get(c, 0) > 0]
+                pool = set(winners)
                 if self.frontier_pred > 0:
-                    # the chain grows only when a never-won cell right
-                    # behind a winning one converts, so the practice pool
-                    # is the winners PLUS their predecessors (same frame,
-                    # up to frontier_pred x-bins before); failure weighting
-                    # below then puts those never-won links first
-                    winners = [c for c in cells if self.cell_wins.get(c, 0) > 0]
-                    pool = set(winners)
                     for w in winners:
                         for c in cells:
                             if (c[0] == w[0] and c[1] == w[1] and c[4] == w[4]
                                     and c[5] == w[5]
                                     and w[2] - self.frontier_pred <= c[2] <= w[2]):
                                 pool.add(c)
-                    if pool:
-                        cells = list(pool)
-                # backward-chaining frontier: cells PROVEN to convert
-                # (1+ wins), least-practiced first. Newly-winning
-                # outer-ring cells have the fewest uses so they dominate
-                # draws -- the band marches outward on its own; heavily
-                # consolidated inner cells fade without any graduation
-                # threshold (a cap here starved the pipeline: v24).
-                # practice where you fail: weight by failure rate
-                # (1 - wins/uses) so cells that keep failing -- the hard
-                # links -- draw the restarts (and their explore episodes);
-                # consolidated cells fade. Uniform-over-winners (the
-                # previous rule) gave the corridor floor ~1% of restarts.
-                # rate over restarts since the credit reset (lifetime uses
-                # are in the thousands and made every cell score ~1.0)
-                w = np.array([max(1.0 - (self.cell_wins.get(c, 0) + 1.0)
-                                  / (max(self.cell_tries.get(c, 0),
-                                         self.cell_wins.get(c, 0)) + 2.0), 0.0)
-                              + 0.05 for c in cells])
-                # concentrate on the k hardest points (self_restart_frontier_k
-                # was stored and never used, so the draw was spread over the
-                # whole archive and the failing links got a thin slice)
-                k = self.sr_frontier_k
-                if k and 0 < k < len(cells):
-                    top = np.argpartition(-w, k - 1)[:k]
-                    cells = [cells[j] for j in top]; w = w[top]
+                if pool:
+                    cells = list(pool)
+                    # practice where you fail: weight by failure rate
+                    # (1 - wins/tries) over restarts since the credit reset,
+                    # concentrated on the k hardest cells
+                    w = np.array([max(1.0 - (self.cell_wins.get(c, 0) + 1.0)
+                                      / (max(self.cell_tries.get(c, 0),
+                                             self.cell_wins.get(c, 0)) + 2.0), 0.0)
+                                  + 0.05 for c in cells])
+                    k = self.sr_frontier_k
+                    if k and 0 < k < len(cells):
+                        top = np.argpartition(-w, k - 1)[:k]
+                        cells = [cells[j] for j in top]; w = w[top]
+                else:
+                    # nothing proven here yet: least-practised coverage
+                    w = np.array([1.0 / (1 + self.archive[c][1]) for c in cells])
                 cell = cells[self.rng.choice(len(cells), p=w / w.sum())]
             else:
                 w = np.array([1.0 / (1 + self.archive[c][1]) for c in cells])
