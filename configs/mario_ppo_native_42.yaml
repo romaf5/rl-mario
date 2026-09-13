@@ -22,7 +22,7 @@ params:
       activation: elu
       initializer: {name: orthogonal_initializer, gain: 1.41421356237}
   config:
-    name: Mario_PPO42c
+    name: Mario_PPO42d
     env_name: mario_native
     score_to_win: 100000
     normalize_value: true
@@ -90,13 +90,17 @@ params:
       # so idling/dying before the exit never becomes the better option.
       explore_eps: 0.0
       explore_episode_prob: 0.05
-      explore_fresh_uses: 10
+      # the vine chain is three fresh cells at 10% / 7% / 16% per walk: 40 walks each -> ~95% per link
+      explore_fresh_uses: 40
       # pure random persistent actions in explorer walks (the default 60% policy / 40% macro mix runs right
       # with the policy and leaves the cell within a few steps; a local search needs to stay put)
       explore_pure: true
       cell_bonus: 100
       cell_bonus_relative: true
-      cell_x_bin: 64
+      # 32-px x-bins: at 64 px the ledge under the hidden block (x 1030-1050, y 96) and the platform next to it
+      # (x 1055-1070, y 112) were ONE cell, so the ledge -- the only spot a random walk bumps the block from
+      # (10% per 150-step walk; 0% from the platform) -- never got its own archive state
+      cell_x_bin: 32
       cell_y_band: 32
       cell_tiles: true
       cell_max_variants: 3

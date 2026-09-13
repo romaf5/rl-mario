@@ -200,3 +200,9 @@
 - User trace of the 4-2 vine (`traces/play_0912-204457.csv`): 245 steps from the first jump under the block to the vine transition with +6 paid in between (the 2-D cell term runs dry in one x-bin) — 5 steps under the 250-step unpaid cutoff. The payoff (coin heaven ~740 + 1900) is right; discovery under the cutoff is the problem.
 - **Mario_PPO42** (GPU 0, from scratch, 4 h cap): Disc config on 4-2 only (route_levels = full route so the world-8 pipe is the clear), `unpaid_timeout` 500, explorer episodes 5%. Evals: 4-2 door (sampled) + 3-life games from the 4-2 door. Success = any sampled 4-2 clear; then GRPO finisher.
 - Next: GRPO finisher on Disc's final checkpoint + archive (GPU 1) once Disc ends at 22:26.
+
+### 2026-09-13 03:30 — 4-2 vine chain measured; 42b/42c replaced by 42d
+- PPO42 (4 h): 4-2 0% at every eval. Archive probe: no archived 4-2 state ever held a vine (the block was never bumped-and-archived).
+- 42b (fresh-cell walks 60% policy/40% macro mix) and 42c (pure random walks): 0/1408 random walks from any archived block-bin state reached the coin heaven within 300 steps.
+- Chain measured from the user's trace states (128 pure-random 150-step walks each): bump the hidden block from the LEDGE (x 1030-1050, y 96): 9-12%; from the platform (x 1055-1070, y 112): 0%; on top of the revealed block from the post-bump platform: 7%; coin heaven from on top: 16%. At 64-px cells the ledge and the platform are ONE archive cell (bin 16, band 3), so the ledge never had its own state; at 32 px they are bins 32 vs 33.
+- **Mario_PPO42d** (GPU 0, 4 h, from scratch): `cell_x_bin: 32`, `explore_fresh_uses: 40` (40 walks per fresh cell -> ~95% per link), pure walks, restarts 60%. Expected: ledge cell -> bump cell (new tile sig) -> on-top cell -> coin heaven -> +1900.
