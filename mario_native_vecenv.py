@@ -142,7 +142,7 @@ class MarioNativeVecEnv(IVecEnv):
                  route_levels=None, cell_tiles=False,
                  frontier_predecessors=0, cell_y_band=64, explore_pure=False,
                  credit_vertical=False, cell_max_variants=0, cell_bonus=0.0, cell_bonus_relative=True, cell_x_bin=128,
-                 frontier_per_level=False, **unknown):
+                 frontier_per_level=False, explore_fresh_uses=0, **unknown):
         assert action_type == 'complex'
         gone = [k for k in unknown if k in self.REMOVED_KWARGS]
         if gone:
@@ -211,6 +211,12 @@ class MarioNativeVecEnv(IVecEnv):
         # cell of that level: in one global pool the 16 hardest cells of the
         # biggest levels took every frontier draw and 1-2 / 4-2 got none
         self.frontier_per_level = bool(frontier_per_level)
+        # Go-Explore's "explore from new cells": a restart from a cell used
+        # fewer than this many times becomes a random-walk explorer episode
+        # with probability 1 - uses/k (never below explore_episode_prob).
+        # The 4-2 vine cell (on top of the revealed block) had ~1 restart per
+        # 50 epochs and only 5% of those were walks: UP never met the vine.
+        self.explore_fresh_uses = int(explore_fresh_uses)
         # vertical resolution of archive cells (px): 32 separates standing on
         # a block (ypix 112) from standing on the pipe top above it (64)
         self.cell_y_band = int(cell_y_band)
@@ -434,8 +440,12 @@ class MarioNativeVecEnv(IVecEnv):
             self.was_restart[i] = True; self.is_door[i] = False
             self.start_cell[i] = cell
             # Go-Explore phase 1: some restart episodes flail randomly to
-            # EXPAND the archive past what the policy can reach
-            if self.rng.random_sample() < self.exp_ep_prob:
+            # EXPAND the archive past what the policy can reach; a fresh
+            # cell (few uses) is walked from almost every time it is drawn
+            p_exp = self.exp_ep_prob
+            if self.explore_fresh_uses > 0:
+                p_exp = max(p_exp, 1.0 - (ent[1] - 1) / self.explore_fresh_uses)
+            if self.rng.random_sample() < p_exp:
                 self.explorer[i] = self.exp_ep_steps
         else:
             if self.stage_weights is not None:

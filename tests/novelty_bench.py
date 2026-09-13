@@ -121,5 +121,36 @@ check('frontier per level, no winners: the least-practised cell of the level get
       % (cnt[('1-2', 2, 46, 2, 0, 1, 0)], sorted(v for c, v in lv12.items() if c[2] != 46)),
       cnt[('1-2', 2, 46, 2, 0, 1, 0)] == max(lv12.values()) and sum(lv12.values()) > 100, dict(lv12))
 
+# ---------------------------------------------------------------- explore from fresh cells (Go-Explore)
+def fresh_env(**kw):
+    env = make(1, random_stages=['1-1'], self_restart_prob=1.0, self_restart_frontier_prob=0.0,
+               explore_episode_prob=0.05, explore_episode_steps=150, **kw)
+    st = env.states['1-1']; K = lambda b: ('1-1', 2, b, 2, 0, 1, 0)
+    env.archive = {K(10): [[st], 0, 300], K(11): [[st], 100000, 300]}     # a fresh cell and a worn-out one
+    return env, K
+def explorer_rate(env, cell_bin, n=200, pin_uses=None):
+    """Share of restarts from cell_bin that became explorer walks; pin_uses
+    holds the cell's use count fixed (uses grow by one per draw otherwise)."""
+    hits = 0; tries = 0; K = lambda b: ('1-1', 2, b, 2, 0, 1, 0)
+    for _ in range(n):
+        if pin_uses is not None:
+            env.archive[K(cell_bin)][1] = pin_uses
+        env._reset_env(0)
+        if env.start_cell[0][2] == cell_bin:
+            tries += 1; hits += int(env.explorer[0] > 0)
+    return hits / max(tries, 1), tries
+env, K = fresh_env(explore_fresh_uses=10)
+r_fresh, n1 = explorer_rate(env, 10, 60, pin_uses=0)      # a never-used cell: every draw is a walk
+r_half, n15 = explorer_rate(env, 10, 400, pin_uses=5)     # 5 uses: about half
+r_worn, n2 = explorer_rate(env, 10, 400, pin_uses=100000)
+env.close()
+check('fresh cells: a never-used cell always starts an explorer walk (%d/%d)' % (round(r_fresh * n1), n1), r_fresh == 1.0 and n1 > 0, (r_fresh, n1))
+check('fresh cells: the walk share decays with use (5 uses -> ~50%%: %.2f)' % r_half, 0.3 <= r_half <= 0.7, (r_half, n15))
+check('fresh cells: a worn-out cell falls back to the base explorer rate 5%% (%.2f)' % r_worn, 0.0 <= r_worn <= 0.15, (r_worn, n2))
+env, K = fresh_env()                            # option off: base rate everywhere
+env.archive[K(10)][1] = 0
+r_off, n3 = explorer_rate(env, 10, 400); env.close()
+check('fresh cells: with the option off a fresh cell keeps the base rate (%.2f)' % r_off, r_off <= 0.15, (r_off, n3))
+
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)
