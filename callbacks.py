@@ -583,6 +583,9 @@ class MarioObserver(AlgoObserver):
         ec.update(sticky_actions=0.0, explore_eps=0.0, self_restart_prob=0.0,
                   explore_episode_prob=0.0, reset_noops=0, n_threads=4,
                   dense_infos=False, route_levels=route, full_game=True)
+        # the levels being TRAINED (random_stages); the route only defines
+        # which exits count. A single-level run evaluates that level.
+        self._trained_levels = list(ec.get('random_stages') or route)
         return ec, route
 
     def _level_eval(self, model, epoch_num, levels=None, n=None, max_steps=None,
@@ -602,7 +605,7 @@ class MarioObserver(AlgoObserver):
         from mario_native_vecenv import MarioNativeVecEnv
         n = int(n or self.eval_episodes); max_steps = int(max_steps or self.eval_level_steps)
         ec, route = self._eval_env_config()
-        levels = list(levels or route)
+        levels = list(levels or self._trained_levels)
         out, dump = {}, []
         for li, lvl in enumerate(levels):
             gen = torch.Generator().manual_seed(int(seed) * 1000 + li)
@@ -722,7 +725,8 @@ class MarioObserver(AlgoObserver):
 
     def _sequential_eval(self, model, epoch_num, n=None, max_steps=None, seed=0):
         """The real objective as a rate: n seeded SAMPLED-policy games from
-        the first level with 3 lives (training-style stepping, no noise).
+        the first TRAINED level with 3 lives (training-style stepping, no
+        noise); for a route run that is 1-1, for a single-level run its door.
         Writes eval/game_progress_sampled_mean / _max (last ON-route level
         index reached, 0-31), eval/victory_rate_sampled and
         eval/off_route_exit_rate_sampled (games that ended by a wrong exit)."""
@@ -731,7 +735,8 @@ class MarioObserver(AlgoObserver):
         ec, route = self._eval_env_config()
         gen = torch.Generator().manual_seed(int(seed) * 7919 + 1)
         route_gps = {(int(l[0]) - 1) * 4 + int(l[2]) - 1 for l in route}
-        env = MarioNativeVecEnv('seval', n, **dict(ec, random_stages=None, episode_life=False,
+        first = self._trained_levels[:1] or None
+        env = MarioNativeVecEnv('seval', n, **dict(ec, random_stages=first, episode_life=False,
                                                    seed=int(seed) * 7919 + 1))
         try:
             obs = env.reset()

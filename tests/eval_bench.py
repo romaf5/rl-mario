@@ -123,5 +123,14 @@ check('sequential eval writes sampled game progress mean/max, victory rate and o
 seq2 = obs._sequential_eval(model, 13, n=2, max_steps=30, seed=1)
 check('sequential eval is reproducible for a fixed seed', seq == seq2, (seq, seq2))
 
+# ---------------------------------------------------------------- single-level runs evaluate what they train
+obs42 = MarioObserver(video_freq=0, eval_env_kwargs=dict(cfg['eval_env_config']))
+ec42 = dict(cfg['env_config']); ec42['random_stages'] = ['4-2']; ec42['route_levels'] = list(cfg['env_config']['random_stages'])
+obs42.algo = types.SimpleNamespace(env_config=ec42, is_rnn=False); obs42.writer = FakeWriter(os.path.join(run_dir, 'summaries42'))
+r42 = obs42._level_eval(model, 30, n=2, max_steps=20, seed=1)
+check('level eval defaults to the TRAINED levels (a 4-2 run evaluates 4-2 only, not the whole route)', list(r42) == ['4-2'], list(r42))
+s42 = obs42._sequential_eval(model, 31, n=2, max_steps=20, seed=1)
+check('sequential eval starts from the first trained level (a 4-2 run: progress index 13 at the start)', s42['progress_max'] == 13 and s42['progress_mean'] == 13.0, s42)
+
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)
