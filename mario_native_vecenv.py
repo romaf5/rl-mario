@@ -142,7 +142,7 @@ class MarioNativeVecEnv(IVecEnv):
                  route_levels=None, cell_tiles=False,
                  frontier_predecessors=0, cell_y_band=64, explore_pure=False,
                  credit_vertical=False, cell_max_variants=0, cell_bonus=0.0, cell_bonus_relative=True, cell_x_bin=128,
-                 frontier_per_level=False, explore_fresh_uses=0, **unknown):
+                 frontier_per_level=False, explore_fresh_uses=0, cell_screen_bin=0, **unknown):
         assert action_type == 'complex'
         gone = [k for k in unknown if k in self.REMOVED_KWARGS]
         if gone:
@@ -217,6 +217,13 @@ class MarioNativeVecEnv(IVecEnv):
         # The 4-2 vine cell (on top of the revealed block) had ~1 restart per
         # 50 epochs and only 5% of those were walks: UP never met the vine.
         self.explore_fresh_uses = int(explore_fresh_uses)
+        # the camera never scrolls back in SMB, so the screen's left edge
+        # bounds what a state can still reach: with it in the cell key (px
+        # bin; 0 = off), "next to the hidden block with the block on screen"
+        # and "next to it with the block scrolled off" are different cells
+        # (4-2: every archived state near the vine block had the camera past
+        # it, so no restart could ever bump it)
+        self.cell_screen_bin = int(cell_screen_bin)
         # vertical resolution of archive cells (px): 32 separates standing on
         # a block (ypix 112) from standing on the pipe top above it (64)
         self.cell_y_band = int(cell_y_band)
@@ -498,9 +505,12 @@ class MarioNativeVecEnv(IVecEnv):
         archive save), regardless of whether it would be saved now."""
         r = self.ram[i]; x = int(r[0x6D]) * 256 + int(r[0x86])
         gp = min(max(int(r[0x75F]) * 4 + int(r[0x75C]), 0), 31)
-        return ('%d-%d' % (gp // 4 + 1, gp % 4 + 1), int(r[0x760]), x // self.cell_x_bin,
+        cell = ('%d-%d' % (gp // 4 + 1, gp % 4 + 1), int(r[0x760]), x // self.cell_x_bin,
                 int(r[0x3B8]) // self.cell_y_band, int(r[0x704]), int(r[0x74E]),
                 self._tile_sig(i, x) if self.cell_tiles else 0)
+        if self.cell_screen_bin > 0:
+            cell = cell + ((int(r[0x71A]) * 256 + int(r[0x71C])) // self.cell_screen_bin,)
+        return cell
 
     def _seed_cells(self, idx):
         """A new life's visited-cell set starts with the cell it stands in:
@@ -766,6 +776,8 @@ class MarioNativeVecEnv(IVecEnv):
                         int(swim[i]),
                         int(atype[i]),
                         self._tile_sig(i, x[i]) if self.cell_tiles else 0)
+                if self.cell_screen_bin > 0:
+                    cell = cell + ((int(ram[i, 0x71A]) * 256 + int(ram[i, 0x71C])) // self.cell_screen_bin,)
                 if cell in self.ep_cells[i]:
                     continue
                 self.ep_cells[i].add(cell)

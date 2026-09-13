@@ -152,5 +152,19 @@ env.archive[K(10)][1] = 0
 r_off, n3 = explorer_rate(env, 10, 400); env.close()
 check('fresh cells: with the option off a fresh cell keeps the base rate (%.2f)' % r_off, r_off <= 0.15, (r_off, n3))
 
+# ---------------------------------------------------------------- screen edge in the cell key (camera never scrolls back)
+def edge_cells(**kw):
+    env = make(1, random_stages=['4-2'], **kw); env.reset()
+    for _ in range(40): env.step(np.array([3]))              # run right: the screen scrolls
+    c1 = env.cell_of(0); r = env.ram[0].copy()
+    edge = int(r[0x71A]) * 256 + int(r[0x71C])
+    r[0x71A], r[0x71C] = (edge + 200) // 256, (edge + 200) % 256   # same Mario position, camera 200 px further right
+    env.lib.benv_set_ram(env.env, 0, r.tobytes()); env._fetch_obs(0)
+    c2 = env.cell_of(0); env.close(); return c1, c2
+c1, c2 = edge_cells(cell_screen_bin=64)
+check('cell key: the same spot with the camera 200 px further right is another cell when cell_screen_bin is set (%s vs %s)' % (c1[-1], c2[-1]), c1 != c2 and c1[:7] == c2[:7], (c1, c2))
+c1, c2 = edge_cells()
+check('cell key: without cell_screen_bin the camera position is ignored', c1 == c2 and len(c1) == 7, (c1, c2))
+
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)
