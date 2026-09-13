@@ -22,7 +22,7 @@ params:
       activation: elu
       initializer: {name: orthogonal_initializer, gain: 1.41421356237}
   config:
-    name: Mario_PPO42b
+    name: Mario_PPO42c
     env_name: mario_native
     score_to_win: 100000
     normalize_value: true
@@ -91,6 +91,9 @@ params:
       explore_eps: 0.0
       explore_episode_prob: 0.05
       explore_fresh_uses: 10
+      # pure random persistent actions in explorer walks (the default 60% policy / 40% macro mix runs right
+      # with the policy and leaves the cell within a few steps; a local search needs to stay put)
+      explore_pure: true
       cell_bonus: 100
       cell_bonus_relative: true
       cell_x_bin: 64
