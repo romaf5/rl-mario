@@ -146,6 +146,15 @@ def resolve_env_overrides(cell_bonus, cell_x_bin, env_config):
     return {'cell_bonus': float(cb), 'cell_x_bin': int(xb)}
 
 
+def resolve_cell_keys(env_config):
+    """Archive cell-key layout from the config (the finisher's new cells must
+    use the same key space as the PPO archive it continues; a hard-coded
+    32-px band next to a 16-px-band archive mixed two key spaces)."""
+    return {'cell_y_band': int(env_config.get('cell_y_band', 32)),
+            'cell_screen_bin': int(env_config.get('cell_screen_bin', 0)),
+            'cell_tiles': bool(env_config.get('cell_tiles', True))}
+
+
 def write_launch_record(run_dir, argv, env_config, args):
     """<run>/launch.json: argv, the resolved env config and all CLI args, so
     a run's reward regime can be read back later."""
@@ -599,7 +608,7 @@ def main():
 
     params = yaml.safe_load(open(a.config))['params']; cfg = params['config']
     ec = dict(cfg['env_config']); ec.pop('name', None); ec.pop('action_type', None)
-    knobs = resolve_env_overrides(a.cell_bonus, a.cell_x_bin, ec)
+    knobs = resolve_env_overrides(a.cell_bonus, a.cell_x_bin, ec); knobs.update(resolve_cell_keys(ec))
     # the env provides observations, dynamics and the per-step reward, and
     # (grow_archive) records a Go-Explore cell archive from the rollouts:
     # new cells become prompts, so groups start where the policy's outcomes
@@ -609,7 +618,7 @@ def main():
     # (dead rollouts are masked, so its resets are never trained on).
     ec.update(dict(self_restart_prob=1e-6 if a.grow_archive else 0.0, explore_eps=0.0,
                    explore_episode_prob=0.0, archive_path=a.archive if a.grow_archive else None,
-                   self_restart_cells=a.max_cells, cell_tiles=True, cell_y_band=32, cell_max_variants=a.cell_variants,
+                   self_restart_cells=a.max_cells, cell_max_variants=a.cell_variants,
                    sticky_actions=0.0, n_threads=a.n_threads, dense_infos=True, seed=a.seed, **knobs))
     N = a.group * a.groups
     NX = N + a.explorers              # explorers ride along in the same batch, outside the buffers
