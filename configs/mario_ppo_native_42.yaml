@@ -1,3 +1,7 @@
+# 4-2 run i (2026-09-16 23:05): run h's frontier practice was starved: explorer wins sat in cell_wins against policy-only
+# tries (79 of 340 winners never tried, all 16 frontier slots on old heavily practised cells); explorer wins are now a
+# separate count, untried proven winners get the top practice weight, winning cells are never pruned, the archive is
+# saved at exit. Config unchanged apart from the name and archive file.
 # 4-2 run h (2026-09-16): run g was stopped after ~15 min by a reward review. Discounted returns of a found vine route
 # vs a found flag run (a wrong exit) from the decision point (x >= 1000), novelty bonus excluded: at gamma 0.995 /
 # per_extra 100 the flag was worth MORE (1034 vs 884): the rest of the main level pays ~2250 px of progress at once, the
@@ -33,7 +37,7 @@ params:
       activation: elu
       initializer: {name: orthogonal_initializer, gain: 1.41421356237}
   config:
-    name: Mario_PPO42h
+    name: Mario_PPO42i
     env_name: mario_native
     score_to_win: 100000
     normalize_value: true
@@ -128,7 +132,7 @@ params:
       cell_tiles: true
       cell_max_variants: 8
       frontier_per_level: true
-      archive_path: native/archive_42h.pkl
+      archive_path: native/archive_42i.pkl
       # up to ~16k cells x 4 savestates: persist every 3 min, not every minute
       archive_save_secs: 180
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
