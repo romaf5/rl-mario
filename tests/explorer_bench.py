@@ -126,8 +126,10 @@ check('end_on_stage_exit: the paid warp into 8-1 ends the episode on the clear s
 check('end_on_stage_exit: off by default -- the episode plays on after the clear',
       any(r >= 1900 for r, _, _ in off) and not any(d for _, d, _ in off), off)
 wrong = exit_probe(3, 2, end_on_stage_exit=True)
-check('end_on_stage_exit: a wrong exit (4-3) still ends the episode unpaid',
-      wrong[-1][1] and wrong[-1][2] and wrong[-1][0] < 500, wrong)
+check('end_on_stage_exit: a wrong exit (4-3) still ends the episode, every leaving step pays 0',
+      wrong[-1][1] and wrong[-1][2] and all(r == 0 for r, _, _ in wrong), wrong)
+check('level change: the pending step before a confirmed clear pays 0, the clear pays on its confirm step',
+      len(on) >= 2 and on[0][0] == 0 and on[-1][0] >= 1900, on)
 
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)

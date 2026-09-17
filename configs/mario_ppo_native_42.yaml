@@ -1,3 +1,9 @@
+# 4-2 run h (2026-09-16): run g was stopped after ~15 min by a reward review. Discounted returns of a found vine route
+# vs a found flag run (a wrong exit) from the decision point (x >= 1000), novelty bonus excluded: at gamma 0.995 /
+# per_extra 100 the flag was worth MORE (1034 vs 884): the rest of the main level pays ~2250 px of progress at once, the
+# +1900 comes ~300 steps later. gamma 0.998 + per_extra 300 (warp 4700): vine 3291 vs flag 1685. cell_max_variants
+# 3 -> 8: within 50 epochs explorers filled the floor spot under the vine brick with 3 revealed-hidden-block /
+# broken-brick signatures in every camera bin; mid-bump ($23) states are no longer archived at all.
 # 4-2 run g (2026-09-16, same config on the GPU box and on a Mac): random walks moved OUT of the training envs
 # into invisible explorer cores (explorer_envs: rl_games trained the substituted random actions as the policy's
 # own), the archive only saves 4-2 states (8-x cells after the warp were archived and practised), the paid warp
@@ -27,14 +33,14 @@ params:
       activation: elu
       initializer: {name: orthogonal_initializer, gain: 1.41421356237}
   config:
-    name: Mario_PPO42g
+    name: Mario_PPO42h
     env_name: mario_native
     score_to_win: 100000
     normalize_value: true
     normalize_input: false
     reward_shaper: {scale_value: 0.01}
     normalize_advantage: true
-    gamma: 0.995
+    gamma: 0.998
     tau: 0.95
     learning_rate: 0.00025
     lr_schedule: adaptive
@@ -69,7 +75,7 @@ params:
       full_game: true
       reward:
         - {type: first_visit_progress, cap: 20}
-        - {type: level_clear, base: 500, per_extra: 100}
+        - {type: level_clear, base: 500, per_extra: 300}
         - {type: first_visit_cells, bonus: 2, x_bin: 64, y_bin: 32}
       unpaid_timeout: 500
       page_reset_grace: 60
@@ -120,9 +126,11 @@ params:
       # camera position in the cell key: the block is only bumpable while it is still on screen
       cell_screen_bin: 64
       cell_tiles: true
-      cell_max_variants: 3
+      cell_max_variants: 8
       frontier_per_level: true
-      archive_path: native/archive_42g.pkl
+      archive_path: native/archive_42h.pkl
+      # up to ~16k cells x 4 savestates: persist every 3 min, not every minute
+      archive_save_secs: 180
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
     eval_env_config:
       backend: native   # eval starts from the same native door states as training (lockstep seeded from the reference emulator: other frame counter/RNG/timer)

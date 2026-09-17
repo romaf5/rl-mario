@@ -567,12 +567,17 @@ class MarioNativeVecEnv(IVecEnv):
         enemies and animation. Part of the archive cell key so a revealed
         hidden block is its own cell (Go-Explore: the cell representation
         must see the state that matters, or it can never be practised)."""
+        return int(zlib.crc32(self._tile_grid(i, x).tobytes()) & 0xFFFF)
+
+    def _tile_grid(self, i, x):
+        """Metatiles of Mario's current x-bin: (bin columns x 13 rows) of the
+        game's $0500 buffer."""
         ncol = self.cell_x_bin // 16
         col0 = (int(x) // self.cell_x_bin) * ncol
         cx = (col0 + np.arange(ncol)) * 16
         base = 0x500 + ((cx // 256) % 2) * 0xD0 + (cx % 256) // 16
         idx = base[:, None] + (np.arange(13) * 16)[None, :]
-        return int(zlib.crc32(self.ram[i][idx].tobytes()) & 0xFFFF)
+        return self.ram[i][idx]
 
     def cell_of(self, i):
         """Archive cell key of env i's CURRENT state (same composition as the
@@ -857,11 +862,20 @@ class MarioNativeVecEnv(IVecEnv):
                 # and AreaType: the same physical spot is one cell whatever
                 # episode reached it
                 g = int(gp[i])
+                sig = 0
+                if self.cell_tiles:
+                    grid = self._tile_grid(i, x[i])
+                    if (grid == 0x23).any():
+                        # a block mid-bump ($23 stands in for it for a few
+                        # frames): a transient, not a place. Saved, it was a
+                        # tile variant of its own and filled the variant cap
+                        continue
+                    sig = int(zlib.crc32(grid.tobytes()) & 0xFFFF)
                 cell = ('%d-%d' % (g // 4 + 1, g % 4 + 1), int(area[i]),
                         int(x[i]) // self.cell_x_bin, int(ypix[i]) // self.cell_y_band,
                         int(swim[i]),
                         int(atype[i]),
-                        self._tile_sig(i, x[i]) if self.cell_tiles else 0)
+                        sig)
                 if self.cell_screen_bin > 0:
                     cell = cell + ((int(ram[i, 0x71A]) * 256 + int(ram[i, 0x71C])) // self.cell_screen_bin,)
                 if cell in self.ep_cells[i]:
@@ -937,6 +951,12 @@ class MarioNativeVecEnv(IVecEnv):
         reward = self.rewards(sig)
         if self.cell_bonus > 0:
             reward = reward + self.cell_bonus * paid_cell
+        # every terminal pays 0: a wrong exit's pending step (already inside
+        # the wrong level: a new frame, +2 cells) and its confirm step (x
+        # progress there) used to pay a little. A real clear pays on its
+        # confirm step (kept); its pending step pays nothing.
+        leaving = (inc & ~good) | wrong_exit
+        reward = np.where(leaving, 0.0, reward).astype(np.float32)
         paid = reward > 0
         # contiguous steps without a positive reward -> cutoff. After a page
         # reset the remaining budget shrinks to the grace window and the
