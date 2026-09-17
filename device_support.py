@@ -43,4 +43,21 @@ def apply_mps_patches():
             setattr(self, name, getattr(self, name).float())
 
     rms.RunningMeanStd.__init__ = __init__
+
+    # macOS aborts a GPU command buffer that runs too long while the display
+    # needs the GPU (kIOGPUCommandBufferCallbackErrorImpactingInteractivity,
+    # then "victim of GPU error/recovery" for queued work), and PyTorch goes on
+    # with whatever the aborted ops left behind. rl_games only syncs once per
+    # mini-epoch, so several minibatch updates were one long buffer: sync after
+    # every minibatch update (no change to the maths).
+    from rl_games.algos_torch import a2c_discrete, a2c_continuous
+    for cls in (a2c_discrete.DiscreteA2CAgent, a2c_continuous.A2CAgent):
+        orig_train = cls.train_actor_critic
+
+        def train_actor_critic(self, *args, _orig=orig_train, **kwargs):
+            out = _orig(self, *args, **kwargs)
+            torch.mps.synchronize()
+            return out
+
+        cls.train_actor_critic = train_actor_critic
     _mps_patched = True
