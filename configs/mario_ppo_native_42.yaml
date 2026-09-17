@@ -1,3 +1,8 @@
+# 4-2 run g (2026-09-16, same config on the GPU box and on a Mac): random walks moved OUT of the training envs
+# into invisible explorer cores (explorer_envs: rl_games trained the substituted random actions as the policy's
+# own), the archive only saves 4-2 states (8-x cells after the warp were archived and practised), the paid warp
+# into 8-1 ends the episode (end_on_stage_exit), and the tile-variant cap no longer counts camera bins as variants.
+# device cuda:0 falls back to mps on a Mac (device_support.py); n_threads is clamped to the core count.
 # 4-2 ONLY, from scratch (2026-09-12): the vine warp to 8-1 is the only clear (+1900); the flag and the world-5 pipe are wrong exits. Discovery variant + a longer unpaid cutoff (the vine chain is ~250 unpaid steps for a human) and explorer episodes back on, and EVERY restart from a fresh cell (< 10 uses) is a random walk (Go-Explore's explore-from-new-cells; the on-top-of-the-revealed-block cell is where UP must meet the vine); restarts 60% (the door episodes already run the whole level). Base: tile-aware 32-px archive cells (a revealed block / a pipe top is its own cell and earns the relative novelty bonus), the 2-D first-visit cell reward (+2 per new 64x32 cell per life), explorer episodes OFF (rl_games trains substituted random actions as the policy's own), frontier restarts drawn per level (winners only). Otherwise routeDet: restarts 30%, frontier 50%, bonus 100.
 # Route run v2: full toolbox (eps-floor, global novelty, score reward,
 # persistent archive). Eval: sequential full game from 1-1.
@@ -22,7 +27,7 @@ params:
       activation: elu
       initializer: {name: orthogonal_initializer, gain: 1.41421356237}
   config:
-    name: Mario_PPO42f
+    name: Mario_PPO42g
     env_name: mario_native
     score_to_win: 100000
     normalize_value: true
@@ -97,6 +102,13 @@ params:
       # pure random persistent actions in explorer walks (the default 60% policy / 40% macro mix runs right
       # with the policy and leaves the cell within a few steps; a local search needs to stay put)
       explore_pure: true
+      # invisible explorer cores: the random walks run outside the training envs (their actions and rewards never
+      # reach PPO) from the least-walked archive cells, fresh cells (< explore_fresh_uses walks) first; with
+      # explorers on, training envs never walk (explore_episode_prob / explore_fresh_uses only steer the explorers)
+      # (M2 Max, 128 actors: 64 explorers ~1750 fps total, 128 explorers ~1650 -- twice the walks for ~7%)
+      explorer_envs: 128
+      # the paid route exit ends the episode (the warp into 8-1 used to play on into 8-1)
+      end_on_stage_exit: true
       cell_bonus: 100
       cell_bonus_relative: true
       # 32-px x-bins: at 64 px the ledge under the hidden block (x 1030-1050, y 96) and the platform next to it
@@ -110,7 +122,7 @@ params:
       cell_tiles: true
       cell_max_variants: 3
       frontier_per_level: true
-      archive_path: native/archive_42.pkl
+      archive_path: native/archive_42g.pkl
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
     eval_env_config:
       backend: native   # eval starts from the same native door states as training (lockstep seeded from the reference emulator: other frame counter/RNG/timer)

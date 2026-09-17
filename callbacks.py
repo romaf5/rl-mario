@@ -139,12 +139,15 @@ class MarioObserver(AlgoObserver):
             self.episode_offroute.append(float(info['wrong_exit']))
         if 'frontier_cells' in info:
             self.frontier_cells = info['frontier_cells']
+        if 'archive_cells' in info:
+            self.archive_cells = info['archive_cells']
+            self.explorer_walks = info.get('explorer_walks', 0)
 
         # Also track game scores for the default scorer
         game_res = info.get('scores', None)
         if game_res is not None:
             self.game_scores.update(
-                torch.from_numpy(np.asarray([game_res])).to(self.algo.ppo_device))
+                torch.from_numpy(np.asarray([game_res], dtype=np.float32)).to(self.algo.ppo_device))
 
     def after_clear_stats(self):
         self.game_scores.clear()
@@ -237,6 +240,11 @@ class MarioObserver(AlgoObserver):
         if self.frontier_cells is not None:
             self.writer.add_scalar('mario/frontier_cells',
                                    self.frontier_cells, epoch_num)
+        if getattr(self, 'archive_cells', None) is not None:
+            self.writer.add_scalar('mario/archive_cells',
+                                   self.archive_cells, epoch_num)
+            self.writer.add_scalar('mario/explorer_walks',
+                                   self.explorer_walks, epoch_num)
         if len(self.episode_offroute) > 0:
             self.writer.add_scalar('mario/wrong_exit_rate',
                                    float(np.mean(self.episode_offroute)),
@@ -582,7 +590,8 @@ class MarioObserver(AlgoObserver):
             ec.pop(k, None)
         ec.update(sticky_actions=0.0, explore_eps=0.0, self_restart_prob=0.0,
                   explore_episode_prob=0.0, reset_noops=0, n_threads=4,
-                  dense_infos=False, route_levels=route, full_game=True)
+                  dense_infos=False, route_levels=route, full_game=True,
+                  explorer_envs=0, end_on_stage_exit=False)
         # the levels being TRAINED (random_stages); the route only defines
         # which exits count. A single-level run evaluates that level.
         self._trained_levels = list(ec.get('random_stages') or route)
@@ -778,9 +787,6 @@ class MarioObserver(AlgoObserver):
         training continues undisturbed and no GPU is touched from the thread.
         """
         try:
-            import imageio
-            import tempfile
-            from PIL import Image, ImageDraw, ImageFont
             # sampled-policy evaluations (the numbers to trust); the clips
             # below play the sampled policy too, seeded per epoch and level
             # (reproducible); their scalars carry a _clip suffix (one episode)
@@ -792,6 +798,11 @@ class MarioObserver(AlgoObserver):
                 self._sequential_eval(model, epoch_num, seed=epoch_num)
             except Exception as e:
                 print(f'  [Eval] sequential eval failed: {e}')
+            # video libraries only after the evals: a missing imageio used
+            # to abort the whole recording before any eval metric was written
+            import imageio
+            import tempfile
+            from PIL import Image, ImageDraw, ImageFont
             try:
                 from tensorboardX.proto.summary_pb2 import Summary
             except ImportError:
@@ -887,13 +898,17 @@ class MarioObserver(AlgoObserver):
                 # route-aware: the level index only counts while on the
                 # configured route; an off-route exit (1-2 flag -> 1-3,
                 # warp pipe 2 -> 2-1) is flagged instead of counted
-                route = (self.algo.env_config or {}).get('random_stages') or []
+                # (route_levels first: a 4-2-only run trains random_stages
+                # [4-2], and its correct vine warp into 8-1 read as off-route)
+                ec_now = self.algo.env_config or {}
+                route = ec_now.get('route_levels') or ec_now.get('random_stages') or []
                 rgp = {(int(l[0]) - 1) * 4 + int(l[2]) - 1 for l in route}
                 gp_now = int(info.get('game_progress', 0))
+                off_route = bool(info.get('wrong_exit', False)) or (bool(rgp) and gp_now not in rgp)
                 self.writer.add_scalar('eval/route_progress',
-                                       gp_now if (not rgp or gp_now in rgp) else -1, epoch_num)
+                                       -1 if off_route else gp_now, epoch_num)
                 self.writer.add_scalar('eval/off_route_exit',
-                                       int(bool(rgp) and gp_now not in rgp), epoch_num)
+                                       int(off_route), epoch_num)
                 self.writer.add_scalar(
                     'eval/max_x', max(s[2] for s in step_stats), epoch_num)
                 print(f'  [Video] Epoch {epoch_num}: reward={total_reward:.0f}, '

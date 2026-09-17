@@ -4,7 +4,7 @@ recorded as demos). Writes <out>."""
 import sys, pickle, argparse, yaml, numpy as np; sys.path.insert(0, '.')
 from mario_native_vecenv import MarioNativeVecEnv
 ap = argparse.ArgumentParser(); ap.add_argument('src'); ap.add_argument('out'); ap.add_argument('--config', default='configs/mario_ppo_native_84.yaml'); a = ap.parse_args()
-ec = dict(yaml.safe_load(open(a.config))['params']['config']['env_config']); ec.pop('name', None); ec.pop('action_type', None)
+ec = dict(yaml.safe_load(open(a.config))['params']['config']['env_config']); ec.pop('name', None); ec.pop('action_type', None); ec.pop('explorer_envs', None)
 ec.update(dict(self_restart_prob=1e-6, explore_eps=0.0, explore_episode_prob=0.0, archive_path=None, cell_tiles=True, cell_y_band=32, cell_max_variants=3, sticky_actions=0.0, n_threads=1, dense_infos=True, reset_noops=0))
 env = MarioNativeVecEnv('clean', 1, **ec); env.reset()
 z = pickle.load(open(a.src, 'rb'))

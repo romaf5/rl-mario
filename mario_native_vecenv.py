@@ -14,6 +14,7 @@ import ctypes
 import zlib
 import gzip
 import os
+import time
 
 import numpy as np
 from gymnasium import spaces
@@ -63,6 +64,9 @@ class _Lib:
 
     def __new__(cls):
         if cls._inst is None:
+            if not os.path.exists(LIB):
+                raise FileNotFoundError(
+                    f'{LIB} is missing: build it with native/build.sh')
             lib = ctypes.CDLL(LIB)
             lib.benv_create.restype = ctypes.c_void_p
             lib.benv_create.argtypes = [ctypes.c_char_p, ctypes.c_int,
@@ -142,19 +146,36 @@ class MarioNativeVecEnv(IVecEnv):
                  route_levels=None, cell_tiles=False,
                  frontier_predecessors=0, cell_y_band=64, explore_pure=False,
                  credit_vertical=False, cell_max_variants=0, cell_bonus=0.0, cell_bonus_relative=True, cell_x_bin=128,
-                 frontier_per_level=False, explore_fresh_uses=0, cell_screen_bin=0, **unknown):
+                 frontier_per_level=False, explore_fresh_uses=0, cell_screen_bin=0,
+                 explorer_envs=0, end_on_stage_exit=False, archive_save_secs=60.0,
+                 **unknown):
         assert action_type == 'complex'
         gone = [k for k in unknown if k in self.REMOVED_KWARGS]
         if gone:
             print('[env] ignoring removed reward knobs: %s (rewards are '
                   'positive-only since 2026-09-05, see mario_rewards.py)'
                   % ', '.join(gone))
-        n = self.num_actors = num_actors
+        # invisible explorers (Go-Explore phase 1 outside the learner): extra
+        # cores that random-walk from archive cells purely to grow the
+        # archive. They step in the same batch, but their obs/rewards/dones
+        # never reach the trainer. A walk inside a TRAINING env substitutes
+        # random actions after rl_games stored the policy's own action and
+        # log-prob, so PPO learned from actions that were never played.
+        # Needs an archive (self_restart_prob > 0); never in play mode.
+        self.n_train = int(num_actors)
+        self.n_explorers = (max(0, int(explorer_envs))
+                            if (self_restart_prob > 0 and not play_mode) else 0)
+        n = self.num_actors = self.n_train + self.n_explorers
+        self.is_explorer_env = np.arange(n) >= self.n_train
+        self.explore_walks = {}       # cell -> explorer walks started there
+        self.n_walks = 0
         self.lib = _Lib()
         rom = open(ROM, 'rb').read()
         self.single_stage = (not full_game) and (random_stages is not None)
-        # the C++ pool with 0 threads returns stale obs without stepping
-        n_threads = max(1, int(n_threads))
+        # the C++ pool with 0 threads returns stale obs without stepping;
+        # more threads than cores only adds wakeups (configs say 24, a Mac
+        # has 12); results are bitwise identical for any thread count
+        n_threads = max(1, min(int(n_threads), os.cpu_count() or 1))
         self.env = self.lib.benv_create(rom, len(rom), n, n_threads,
                                         int(self.single_stage))
         # C clamps to >= 2; keep Python in step or the rgb4 buffer is short
@@ -177,6 +198,16 @@ class MarioNativeVecEnv(IVecEnv):
             self.route_gps = np.array(sorted(
                 (int(s.split('-')[0]) - 1) * 4 + int(s.split('-')[1]) - 1
                 for s in route), dtype=np.int32)
+        # the TRAINED levels: the archive only saves states there (a 4-2-only
+        # run with the full route archived and practised 8-x states after
+        # the warp), and end_on_stage_exit ends an episode that leaves them
+        # by a paid route exit instead of playing on into the next level
+        self.train_gps = None
+        if random_stages:
+            self.train_gps = np.array(sorted(
+                (int(s.split('-')[0]) - 1) * 4 + int(s.split('-')[1]) - 1
+                for s in random_stages), dtype=np.int32)
+        self.end_on_stage_exit = bool(end_on_stage_exit)
         self.stage_weights = None
         self.episode_life = episode_life
         self.stage_bonus = stage_bonus
@@ -188,6 +219,8 @@ class MarioNativeVecEnv(IVecEnv):
         self.explore_eps = explore_eps
         self.archive_path = archive_path
         self._archive_dirty = 0
+        self._archive_saved_at = 0.0
+        self.archive_save_secs = float(archive_save_secs)
         self.exp_ep_prob = explore_episode_prob
         self.exp_ep_steps = explore_episode_steps
         self.sr_frontier_prob = self_restart_frontier_prob
@@ -256,16 +289,16 @@ class MarioNativeVecEnv(IVecEnv):
         # group whenever it runs in the horizon; entries seen meanwhile
         # are merged when the trainer unfreezes
         self.door_seen_frozen = False; self._door_seen_pending = {}
-        self.is_door = np.ones(num_actors, dtype=bool)
-        self.exp_persist = np.ones(num_actors, dtype=np.int64)
-        self.explorer = np.zeros(num_actors, dtype=np.int32)
-        self.exp_action = np.zeros(num_actors, dtype=np.int64)
-        self.ep_steps = np.zeros(num_actors, dtype=np.int32)
-        self.start_cell = [None] * num_actors
+        self.is_door = np.ones(n, dtype=bool)
+        self.exp_persist = np.ones(n, dtype=np.int64)
+        self.explorer = np.zeros(n, dtype=np.int32)
+        self.exp_action = np.zeros(n, dtype=np.int64)
+        self.ep_steps = np.zeros(n, dtype=np.int32)
+        self.start_cell = [None] * n
         self.cell_early = {}
         self.cell_wins = {}
         self.cell_tries = {}      # restarts since the last credit reset
-        self.nongame = np.zeros(num_actors, dtype=np.int32)
+        self.nongame = np.zeros(n, dtype=np.int32)
 
         self.rng = np.random.RandomState(seed)
         self.obs_u8 = np.zeros((n, 84, 84), dtype=np.uint8)
@@ -295,7 +328,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.unpaid = z(); self.max_gap = z(); self.page_resets = z()
         self.after_reset = z(bool)
         self.forced_timeup = z()      # eval: cutoffs turned into time-ups
-        self.last_stuck = [None] * num_actors   # eval: (level, x//16) of the last forced time-up
+        self.last_stuck = [None] * n   # eval: (level, x//16) of the last forced time-up
         self.hold_on_done = False     # video: never reset after done
         self.entered_cell = [None] * n  # cell first entered this step (grpo demos)
         self.prev_in_play = np.ones(n, dtype=bool)
@@ -375,6 +408,12 @@ class MarioNativeVecEnv(IVecEnv):
         self.start_cell[i] = None      # door episodes credit no cell
         self.explorer[i] = 0           # no macro-noise leak across episodes
         self.forced_timeup[i] = 0; self.last_stuck[i] = None
+        if self.is_explorer_env[i]:
+            self._reset_explorer(i)
+            self.ep_cells[i] = set()
+            self.rewards.reset([i], None, hard=True)
+            self.ep_steps[i] = 0
+            return
         if (self.sr_prob > 0 and self.archive
                 and self.rng.random_sample() < self.sr_prob):
             # soft least-practiced: p(cell) ~ 1/(1+uses). Uniform-ish
@@ -452,7 +491,9 @@ class MarioNativeVecEnv(IVecEnv):
             p_exp = self.exp_ep_prob
             if self.explore_fresh_uses > 0:
                 p_exp = max(p_exp, 1.0 - (ent[1] - 1) / self.explore_fresh_uses)
-            if self.rng.random_sample() < p_exp:
+            # with invisible explorers the walks happen there, never in a
+            # training env (whose stored actions would not be the played ones)
+            if self.n_explorers == 0 and self.rng.random_sample() < p_exp:
                 self.explorer[i] = self.exp_ep_steps
         else:
             if self.stage_weights is not None:
@@ -477,6 +518,39 @@ class MarioNativeVecEnv(IVecEnv):
         self.cell_wins.pop(cell, None)
         self.cell_tries.pop(cell, None)
         self.cell_early.pop(cell, None)
+        self.explore_walks.pop(cell, None)
+
+    def _reset_explorer(self, i):
+        """Invisible explorer episode: a random walk from the least-walked
+        archive cell (from a trained level's door while the archive is
+        empty). Walks count neither as policy restarts (uses / tries, the
+        practice weights) nor as door episodes (relative novelty counts);
+        a walk that reaches a winning cell still credits its start cell."""
+        self.is_door[i] = False
+        self.explorer[i] = self.exp_ep_steps
+        self.n_walks += 1
+        if not self.archive:
+            s = self.stages[self.rng.randint(len(self.stages))]
+            self.load_state(i, self.states[s])
+            self.start_stage[i] = s
+            return
+        cells = list(self.archive.keys())
+        walks = np.array([self.explore_walks.get(c, 0) for c in cells])
+        if self.explore_fresh_uses > 0 and (walks < self.explore_fresh_uses).any():
+            # fresh cells first: every new cell gets its k walks (a link
+            # found by 10% of walks is found with ~95% at k = 30) before
+            # worn-out cells are walked again
+            keep = np.nonzero(walks < self.explore_fresh_uses)[0]
+            cells = [cells[j] for j in keep]; walks = walks[keep]
+        w = 1.0 / (1.0 + walks)
+        cell = cells[self.rng.choice(len(cells), p=w / w.sum())]
+        self.explore_walks[cell] = self.explore_walks.get(cell, 0) + 1
+        ent = self.archive[cell]
+        states = ent[0] if isinstance(ent[0], list) else [ent[0]]
+        self.load_state(i, states[self.rng.randint(len(states))])
+        self.start_stage[i] = cell[0]
+        self.was_restart[i] = True
+        self.start_cell[i] = cell
 
     @staticmethod
     def _frame_of(gp, area, atype, swim):
@@ -511,6 +585,13 @@ class MarioNativeVecEnv(IVecEnv):
         if self.cell_screen_bin > 0:
             cell = cell + ((int(r[0x71A]) * 256 + int(r[0x71C])) // self.cell_screen_bin,)
         return cell
+
+    def _tile_variants(self, cell):
+        """Archived tile-signature variants of `cell`'s spot: every key slot
+        equal except the signature (slot 6); the camera bin (slot 7, with
+        cell_screen_bin) belongs to the spot."""
+        return sum(1 for c in self.archive
+                   if c[:6] == cell[:6] and c[7:] == cell[7:])
 
     def _seed_cells(self, idx):
         """A new life's visited-cell set starts with the cell it stands in:
@@ -588,11 +669,14 @@ class MarioNativeVecEnv(IVecEnv):
         self._post_reset_init(range(self.num_actors), self.ram)
         f = self.obs_u8.astype(np.float32) / 255.0
         self._ring[:] = f[..., None]
-        return self._obs()
+        return self._obs()[:self.n_train]
 
     def step(self, actions):
         n = self.num_actors
         acts = np.asarray(actions).astype(np.int64).ravel()
+        if self.n_explorers:
+            # explorer cores take their random walk below; pad the batch
+            acts = np.concatenate([acts, np.zeros(self.n_explorers, np.int64)])
         exp_mask = self.explorer > 0
         if exp_mask.any():
             # macro-action random walk: hold each random action for a
@@ -766,6 +850,8 @@ class MarioNativeVecEnv(IVecEnv):
                    & ~bad_world & ~page_reset & ~self.after_reset)
             if self.route_gps is not None:
                 can &= np.isin(gp, self.route_gps)
+            if self.train_gps is not None:
+                can &= np.isin(gp, self.train_gps)
             for i in np.nonzero(can)[0]:
                 # keyed by the level Mario is IN, area, x-bin, y-band, swim
                 # and AreaType: the same physical spot is one cell whatever
@@ -782,8 +868,12 @@ class MarioNativeVecEnv(IVecEnv):
                     continue
                 self.ep_cells[i].add(cell)
                 self.entered_cell[i] = cell; entered[i] = True
+                # the cap counts TILE variants of one spot; the camera bin
+                # (key slot 7) is part of the spot. Counting camera positions
+                # as variants let three screen bins of the 4-2 ledge fill the
+                # cap, so its revealed-block state could never be archived.
                 if cell not in self.archive and self.cell_max_variants > 0 and \
-                        sum(1 for c in self.archive if c[:6] == cell[:6]) >= self.cell_max_variants:
+                        self._tile_variants(cell) >= self.cell_max_variants:
                     continue        # yet another tile variant of a known spot
                 # novelty bonus only for cells the archive keeps (variants beyond
                 # the cap are not new places) and, if relative, only for cells
@@ -826,7 +916,11 @@ class MarioNativeVecEnv(IVecEnv):
                             ent[2] = max(ent[2], int(t[i]))
                         self.cell_early.pop(cell, None)
                         self._archive_dirty += 1
-        if (self.archive_path and self._archive_dirty >= 10):
+        # persistence only (restart recovery, probes), throttled by time: the
+        # whole archive (thousands of cells x up to 4 savestates of 45 KB)
+        # used to be rewritten after every 10 dirty entries
+        if (self.archive_path and self._archive_dirty >= 10
+                and time.time() - self._archive_saved_at >= self.archive_save_secs):
             self._archive_dirty = 0
             self._save_archive()
 
@@ -884,6 +978,11 @@ class MarioNativeVecEnv(IVecEnv):
         else:
             real_done = (game_over | victory | zombie | wrapped | timeout
                          | wrong_exit)
+            if (self.end_on_stage_exit and self.train_gps is not None
+                    and not self.play_mode):
+                # a single-level run ends at its paid route exit: the 4-2
+                # warp used to play on into 8-1, paying 8-1 ground
+                real_done = real_done | (good & ~np.isin(gp, self.train_gps))
         if self.play_mode:
             # inspection: flag, keep the highwater, keep playing
             real_done = real_done & ~(timeout | wrong_exit)
@@ -908,6 +1007,10 @@ class MarioNativeVecEnv(IVecEnv):
                 self.unpaid[i] = 0
                 self.forced_timeup[i] += 1
             real_done = (real_done & ~timeout) | repeat
+        if self.n_explorers:
+            # an explorer walk ends at its step budget or its first death
+            real_done = real_done | (self.is_explorer_env
+                                     & ((self.explorer == 0) | (life < self.lives)))
         # rl_games value bootstrap: the plain cutoff is not part of the
         # game; the post-reset cutoff IS a dead end (no bootstrap)
         time_outs = timeout & ~self.after_reset & \
@@ -953,6 +1056,8 @@ class MarioNativeVecEnv(IVecEnv):
                 'max_unpaid_gap': int(self.max_gap[i]),
                 'forced_timeups': int(self.forced_timeup[i]),
                 'frontier_cells': n_front,
+                'archive_cells': len(self.archive),
+                'explorer_walks': self.n_walks,
             })
 
         done = done_pre
@@ -990,7 +1095,8 @@ class MarioNativeVecEnv(IVecEnv):
             won = victory[i] or self.cleared[i] > 0 or reached
             if won:
                 self.cell_wins[cell] = self.cell_wins.get(cell, 0) + 1
-            if won or self.ep_steps[i] > 8:
+            # a random walk dying early says nothing about the cell
+            if won or self.ep_steps[i] > 8 or self.is_explorer_env[i]:
                 continue
             n_early = self.cell_early.get(cell, 0) + 1
             self.cell_early[cell] = n_early
@@ -1028,6 +1134,7 @@ class MarioNativeVecEnv(IVecEnv):
                 # the restart cell's episode ended here; the next life is
                 # a door-like continuation and credits no cell
                 self.start_cell[i] = None; self.is_door[i] = True
+                self.was_restart[i] = False
                 self._seed_cells([i])
                 self.explorer[i] = 0      # macro noise must not leak on
                 # new life = fresh frame stack
@@ -1037,6 +1144,10 @@ class MarioNativeVecEnv(IVecEnv):
                     self._ring_u8[i] = self.obs_u8[i][..., None]
 
         obs = self._obs()
+        if self.n_explorers:
+            nt = self.n_train
+            out = Infos(infos[:nt]); out.time_outs = time_outs[:nt]
+            return obs[:nt], reward[:nt].astype(np.float32), done[:nt], out
         return obs, reward.astype(np.float32), done, infos
 
     def get_number_of_agents(self):
@@ -1084,6 +1195,7 @@ class MarioNativeVecEnv(IVecEnv):
             with open(tmp, 'wb') as f:
                 pickle.dump(self.archive, f)
             os.replace(tmp, self.archive_path)
+            self._archive_saved_at = time.time()
 
     def close(self):
         self._save_archive()
