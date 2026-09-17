@@ -119,6 +119,12 @@ check('route progress: an off-route exit (4-2 flag -> 4-3) counts as the last on
       MarioObserver.route_progress(14, route_gps) == 13 and MarioObserver.route_progress(2, route_gps) == 1
       and MarioObserver.route_progress(28, route_gps) == 28 and MarioObserver.route_progress(0, route_gps) == 0,
       [MarioObserver.route_progress(g, route_gps) for g in (14, 2, 28, 0)])
+obs_tr = MarioObserver(video_freq=0)
+obs_tr.algo = types.SimpleNamespace(env_config=dict(cfg['env_config']), is_rnn=False)
+obs_tr._process_single_info({'game_progress': 16, 'wrong_exit': True})     # 4-2 world-5 pipe -> 5-1
+obs_tr._process_single_info({'game_progress': 28, 'stages_cleared': 1})    # 4-2 vine warp -> 8-1
+check('training progress metrics: a wrong exit (4-2 -> 5-1) counts as 4-2, the vine warp as 8-1',
+      obs_tr.episode_progress == [13, 28], obs_tr.episode_progress)
 
 # ---------------------------------------------------------------- sequential sampled eval
 seq = obs._sequential_eval(model, 12, n=2, max_steps=30, seed=1)

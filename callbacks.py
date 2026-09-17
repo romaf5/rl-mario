@@ -99,7 +99,11 @@ class MarioObserver(AlgoObserver):
             self.episode_x_pos.append(info['x_pos'])
 
         if 'game_progress' in info:
-            self.episode_progress.append(info['game_progress'])
+            # route-aware: the env's progress also records the level of a
+            # wrong exit (4-2 world-5 pipe -> 5-1), which logged "New best
+            # progress: World 5-1" for a failure at 4-2
+            self.episode_progress.append(
+                self.route_progress(info['game_progress'], self._route_gps()))
 
         if 'flag_get' in info:
             # the flag byte is already clear on the step the episode ends
@@ -148,6 +152,17 @@ class MarioObserver(AlgoObserver):
         if game_res is not None:
             self.game_scores.update(
                 torch.from_numpy(np.asarray([game_res], dtype=np.float32)).to(self.algo.ppo_device))
+
+    def _route_gps(self):
+        """Level indices of the configured route (route_levels, else the
+        trained levels); empty = every level counts."""
+        if getattr(self, '_route_gps_cache', None) is None:
+            ec = getattr(getattr(self, 'algo', None), 'env_config', None)
+            if ec is None:
+                return set()
+            route = ec.get('route_levels') or ec.get('random_stages') or []
+            self._route_gps_cache = {(int(l[0]) - 1) * 4 + int(l[2]) - 1 for l in route}
+        return self._route_gps_cache
 
     def after_clear_stats(self):
         self.game_scores.clear()
