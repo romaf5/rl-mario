@@ -145,6 +145,30 @@ check('frontier: explorer wins do not lower the policy failure rate (12 tries, 0
 env.archive.clear(); env.cell_wins.clear(); env.explore_wins.clear()
 env.close()
 
+# ---------------------------------------------------------------- novelty bonus for door episodes only
+def bonus_collected(door, **kw):
+    """Novelty bonus of the FIRST life only: after a life loss the next life is
+    a door-like continuation by design (is_door True) and is paid again."""
+    env, obs = make(1, cell_bonus=100.0, cell_bonus_relative=True, **kw)
+    env.is_door[0] = door           # a restart episode is not a door episode
+    tot = 0.0
+    pattern = [4] * 6 + [3] * 6     # run and jump: survives the first enemies
+    for s in range(240):
+        obs, r, d, inf = env.step(np.array([pattern[s % len(pattern)]]))
+        tot += float(env.last_terms.get('cell_bonus', np.zeros(1))[0])
+        if d[0]:
+            break
+    env.close()
+    return tot
+
+
+b_restart_default = bonus_collected(False)
+b_restart_door_only = bonus_collected(False, cell_bonus_door_only=True)
+b_door_door_only = bonus_collected(True, cell_bonus_door_only=True)
+check('novelty: by default a restart episode is paid the relative bonus (%.0f)' % b_restart_default, b_restart_default > 0, b_restart_default)
+check('novelty: with cell_bonus_door_only a restart episode is paid nothing (%.0f)' % b_restart_door_only, b_restart_door_only == 0, b_restart_door_only)
+check('novelty: with cell_bonus_door_only a door episode is still paid (%.0f)' % b_door_door_only, b_door_door_only > 0, b_door_door_only)
+
 # ---------------------------------------------------------------- archive persistence of both win counts
 import tempfile
 path = os.path.join(tempfile.mkdtemp(), 'archive.pkl')

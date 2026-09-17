@@ -149,7 +149,7 @@ class MarioNativeVecEnv(IVecEnv):
                  credit_vertical=False, cell_max_variants=0, cell_bonus=0.0, cell_bonus_relative=True, cell_x_bin=128,
                  frontier_per_level=False, explore_fresh_uses=0, cell_screen_bin=0,
                  explorer_envs=0, end_on_stage_exit=False, archive_save_secs=60.0,
-                 **unknown):
+                 cell_bonus_door_only=False, **unknown):
         assert action_type == 'complex'
         gone = [k for k in unknown if k in self.REMOVED_KWARGS]
         if gone:
@@ -287,6 +287,12 @@ class MarioNativeVecEnv(IVecEnv):
         # steps); a bonus paid for every first visit rewarded the runners as
         # much as the climbers
         self.cell_bonus_relative = bool(cell_bonus_relative)
+        # pay the novelty bonus to door episodes only: restarts inside an area
+        # the door episodes never reach (4-2's warp area) collected +100 per new
+        # cell every life (~856 per episode) and wandered instead of warping
+        # (8% warp from warp-area winners, half the episodes still wandering
+        # after 700 steps, Mario_PPO42i ep 3500)
+        self.cell_bonus_door_only = bool(cell_bonus_door_only)
         self.door_seen = {}; self._seen_tick = 0
         # GRPO rollouts freeze the door counts (no decay, no growth) so the
         # bonus is the same function of the state for every rollout of a
@@ -919,7 +925,8 @@ class MarioNativeVecEnv(IVecEnv):
                 # the cap are not new places) and, if relative, only for cells
                 # the door episodes do not reach on their own (count taken
                 # before this entry, so the first discoverer is paid)
-                paid_cell[i] = (not self.cell_bonus_relative) or seen0.get(cell, 0.0) < 1.0
+                paid_cell[i] = (((not self.cell_bonus_relative) or seen0.get(cell, 0.0) < 1.0)
+                                and (self.is_door[i] or not self.cell_bonus_door_only))
                 if self.is_door[i]:
                     seen_inc[cell] = seen_inc.get(cell, 0.0) + 1.0
                 if cell not in self.archive:

@@ -1,3 +1,7 @@
+# 4-2 run j (2026-09-17): run i (9.5 h, epoch ~3500) never cleared from the door. Probes of its policy: from warp-area winners
+# 8% warp, ~half the episodes still wandering after 700 steps collecting ~856 novelty bonus (door episodes never reach the
+# warp area, so every cell there paid +100 per life); one change: cell_bonus_door_only. Launch on a Mac with
+# --minibatch-size 1024 (run i logged 69 MPS command-buffer aborts at 4096).
 # 4-2 run i (2026-09-16 23:05): run h's frontier practice was starved: explorer wins sat in cell_wins against policy-only
 # tries (79 of 340 winners never tried, all 16 frontier slots on old heavily practised cells); explorer wins are now a
 # separate count, untried proven winners get the top practice weight, winning cells are never pruned, the archive is
@@ -37,7 +41,7 @@ params:
       activation: elu
       initializer: {name: orthogonal_initializer, gain: 1.41421356237}
   config:
-    name: Mario_PPO42i
+    name: Mario_PPO42j
     env_name: mario_native
     score_to_win: 100000
     normalize_value: true
@@ -121,6 +125,8 @@ params:
       end_on_stage_exit: true
       cell_bonus: 100
       cell_bonus_relative: true
+      # novelty for door episodes only: restarts in the warp area farmed the bonus instead of warping
+      cell_bonus_door_only: true
       # 32-px x-bins: at 64 px the ledge under the hidden block (x 1030-1050, y 96) and the platform next to it
       # (x 1055-1070, y 112) were ONE cell, so the ledge -- the only spot a random walk bumps the block from
       # (10% per 150-step walk; 0% from the platform) -- never got its own archive state
@@ -132,7 +138,7 @@ params:
       cell_tiles: true
       cell_max_variants: 8
       frontier_per_level: true
-      archive_path: native/archive_42i.pkl
+      archive_path: native/archive_42j.pkl
       # up to ~16k cells x 4 savestates: persist every 3 min, not every minute
       archive_save_secs: 180
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
