@@ -250,3 +250,13 @@
 - Every earlier "vine bonus area" / "vine route" read of runs h and i means the warp area reached through this pipe.
 - User decision: any route that ends in the world-8 warp pipe counts as passing 4-2 with the correct warp. Run i continues unchanged.
 - Revised checkpoints for run i: 2 h (01:05) winning underground cells before the coin-cache pipe (x-bins 34-41, AreaType 2) with policy tries > 0; 4 h (03:05) first door-side clear; 8 h (07:05) sampled `eval/level_clear/4-2` > 0.
+- RESULT (stopped at epoch 3544, 08:34, after 9.5 h): 2 h criterion PASS (1048 underground winners by morning, a credit chain back to the level start, 10.7k policy tries on them); 4 h and 8 h MISS -- `mario/clear_door/4-2` 0 throughout, all 17 sampled level evals clear 0.
+  - restart clears (`mario/clear/4-2`, 250-epoch means) drifted 0.016 -> 0.005; `rewards/iter` flat ~2400-2500 from epoch 750.
+  - door evals: mean max x 2800-3370; epoch 800 index: 21/32 time out at the level end (x 3538-3569), 2 wrong exits there -- the bootstrapped unpaid cutoff makes loitering at a dead end worth more than any exit.
+  - policy probes at epoch 3500 (CPU): from 12 warp-area winners 8% warp, 10% wrong pipe, ~half still wandering after 700 steps with ~856 novelty bonus per episode (door episodes never reach the warp area, so every cell there pays +100 per life); from 12 coin-cache pipe winners (screen x often 190-239) DOWN on a pipe top in 13/96 episodes, 1/96 entered the warp area.
+  - 69 MPS command-buffer aborts over the night, losses finite. Runs_archive/Mario_PPO42i_16-23-05-01.
+
+### 2026-09-17 08:35 — Mario_PPO42j: novelty bonus for door episodes only
+- One change: `cell_bonus_door_only: true` (restart episodes and explorers are never paid the novelty bonus; a life after a life loss is a door-like continuation and still is). Launched with `--minibatch-size 1024` against the MPS aborts (64 optimizer steps per epoch instead of 16 -- an optimisation-side confound, noted).
+- Candidates kept for later runs, one at a time: Mario's on-screen x in the cell key (glitch-ready pipe states as their own cells); no bootstrap at the unpaid cutoff (end-of-level loitering).
+- PREDICTION: 30 min (09:05) training warps (`mario/clear/4-2` > 0) and no command-buffer abort; 2 h (10:35) `mario/clear/4-2` 250-epoch mean above run i's best (0.016) and a probe from warp-area winners warps > 30% with no wandering; 4 h (12:35) first door-side clear; 8 h (16:35) sampled `eval/level_clear/4-2` > 0. Miss at 2 h -> re-probe the warp-area restarts before the next change.
