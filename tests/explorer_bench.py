@@ -131,5 +131,34 @@ check('end_on_stage_exit: a wrong exit (4-3) still ends the episode, every leavi
 check('level change: the pending step before a confirmed clear pays 0, the clear pays on its confirm step',
       len(on) >= 2 and on[0][0] == 0 and on[-1][0] >= 1900, on)
 
+# ---------------------------------------------------------------- explorer wins vs policy practice weights
+env, obs = make(1)
+A = ('4-2', 2, 40, 3, 0, 2, 1, 15); B = ('4-2', 2, 41, 3, 0, 2, 1, 15); C = ('4-2', 2, 42, 3, 0, 2, 1, 15)
+for c in (A, B, C):
+    env.archive[c] = [[b'x'], 0, 300]
+env.cell_tries = {A: 54, C: 12}; env.cell_wins = {A: 1}; env.explore_wins = {B: 3, C: 19}
+check('frontier: explorer-proven cells are winners without any policy win', env._won(A) and env._won(B) and env._won(C))
+check('frontier: an untried explorer-proven winner gets the top practice weight (%.2f vs %.2f for 1 policy win in 54 tries)'
+      % (env._frontier_weight(B), env._frontier_weight(A)), env._frontier_weight(B) == 1.0 > env._frontier_weight(A))
+check('frontier: explorer wins do not lower the policy failure rate (12 tries, 0 policy wins, 19 explorer wins -> %.3f)'
+      % env._frontier_weight(C), abs(env._frontier_weight(C) - (1 - 1 / 14)) < 1e-9, env._frontier_weight(C))
+env.archive.clear(); env.cell_wins.clear(); env.explore_wins.clear()
+env.close()
+
+# ---------------------------------------------------------------- archive persistence of both win counts
+import tempfile
+path = os.path.join(tempfile.mkdtemp(), 'archive.pkl')
+env, obs = make(1, archive_path=path)
+for s in range(60):
+    env.step(np.array([3]))
+cells = list(env.archive)[:2]
+env.cell_wins[cells[0]] = 2; env.explore_wins[cells[1]] = 5
+env.close()
+env2, obs = make(1, archive_path=path)
+check('archive: policy and explorer win counts survive a save and reload (%d cells)' % len(env2.archive),
+      len(cells) == 2 and env2.cell_wins.get(cells[0]) == 2 and env2.explore_wins.get(cells[1]) == 5,
+      (len(cells), env2.cell_wins.get(cells[0]) if cells else None, env2.explore_wins.get(cells[1]) if len(cells) > 1 else None))
+env2.close()
+
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)

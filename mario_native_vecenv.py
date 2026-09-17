@@ -13,6 +13,7 @@ are equivalent-in-expectation rather than bit-identical to the retro chain.
 import ctypes
 import zlib
 import gzip
+import atexit
 import os
 import time
 
@@ -168,6 +169,9 @@ class MarioNativeVecEnv(IVecEnv):
         n = self.num_actors = self.n_train + self.n_explorers
         self.is_explorer_env = np.arange(n) >= self.n_train
         self.explore_walks = {}       # cell -> explorer walks started there
+        # wins of explorer walks started from a cell: existence proofs that
+        # make it a frontier candidate, never mixed into the policy's win rate
+        self.explore_wins = {}
         self.n_walks = 0
         self.lib = _Lib()
         rom = open(ROM, 'rb').read()
@@ -364,8 +368,14 @@ class MarioNativeVecEnv(IVecEnv):
                               if len(e) > 3}
             self.cell_tries = {c: e[4] for c, e in self.archive.items()
                                if len(e) > 4}
+            self.explore_wins = {c: e[5] for c, e in self.archive.items()
+                                 if len(e) > 5 and e[5]}
         self.ep_cells = [set() for _ in range(n)]
         self._sbuf = ctypes.create_string_buffer(self.state_size)
+        if archive_path:
+            # rl_games never closes its vec env: without this the archive
+            # grown since the last throttled save was lost on every exit
+            atexit.register(self._save_archive)
         self._rgb4 = None      # (4,224,240,3) capture buffer when recording
         self._raw_steps = False  # hack-free stepping (video clips, win searches)
 
@@ -445,7 +455,7 @@ class MarioNativeVecEnv(IVecEnv):
                 # tries used to out-weigh every winner (weight ~1.05 vs
                 # ~0.99), so the draw fed the dead ends: 4-2's end section
                 # took 25-60k restarts, the 1-2 warp-zone winners ~50 each.
-                winners = [c for c in cells if self.cell_wins.get(c, 0) > 0]
+                winners = [c for c in cells if self._won(c)]
                 pool = set(winners)
                 if self.frontier_pred > 0:
                     for w in winners:
@@ -459,10 +469,7 @@ class MarioNativeVecEnv(IVecEnv):
                     # practice where you fail: weight by failure rate
                     # (1 - wins/tries) over restarts since the credit reset,
                     # concentrated on the k hardest cells
-                    w = np.array([max(1.0 - (self.cell_wins.get(c, 0) + 1.0)
-                                      / (max(self.cell_tries.get(c, 0),
-                                             self.cell_wins.get(c, 0)) + 2.0), 0.0)
-                                  + 0.05 for c in cells])
+                    w = np.array([self._frontier_weight(c) + 0.05 for c in cells])
                     k = self.sr_frontier_k
                     if k and 0 < k < len(cells):
                         top = np.argpartition(-w, k - 1)[:k]
@@ -519,6 +526,25 @@ class MarioNativeVecEnv(IVecEnv):
         self.cell_tries.pop(cell, None)
         self.cell_early.pop(cell, None)
         self.explore_walks.pop(cell, None)
+        self.explore_wins.pop(cell, None)
+
+    def _won(self, cell):
+        """A cell proven to convert: a policy restart or an explorer walk from
+        it reached a level advance (or a deeper winning cell)."""
+        return self.cell_wins.get(cell, 0) > 0 or self.explore_wins.get(cell, 0) > 0
+
+    def _frontier_weight(self, cell):
+        """Practice weight of a winning cell: the policy's failure rate over
+        its restarts since the credit reset. A winner the policy never tried
+        (proven by explorer walks only) gets the top weight: explorer wins used
+        to sit in cell_wins against policy-only tries, so a fresh link with 19
+        explorer wins and 12 failed policy tries weighed 0.10 and every frontier
+        slot went to old, heavily practised cells."""
+        t = self.cell_tries.get(cell, 0)
+        pw = self.cell_wins.get(cell, 0)
+        if t == 0 and pw == 0:
+            return 1.0
+        return max(1.0 - (pw + 1.0) / (max(t, pw) + 2.0), 0.0)
 
     def _reset_explorer(self, i):
         """Invisible explorer episode: a random walk from the least-walked
@@ -901,8 +927,7 @@ class MarioNativeVecEnv(IVecEnv):
                         # evict the OLDEST cell no episode is practising
                         in_use = {c for c in self.start_cell if c is not None}
                         cand = [c for c in self.archive if c not in in_use]
-                        losers = [c for c in cand
-                                  if self.cell_wins.get(c, 0) == 0] or cand
+                        losers = [c for c in cand if not self._won(c)] or cand
                         if losers:
                             self._forget_cell(losers[0])
                     self.lib.benv_save(self.env, int(i), self._sbuf)
@@ -1046,7 +1071,7 @@ class MarioNativeVecEnv(IVecEnv):
 
         infos = Infos()
         infos.time_outs = time_outs
-        n_front = sum(1 for c in self.archive if self.cell_wins.get(c, 0) > 0) \
+        n_front = sum(1 for c in self.archive if self._won(c)) \
             if self.archive else 0
         done_pre = real_done | (life_lost if self.episode_life else False)
         for i in range(n):
@@ -1100,7 +1125,7 @@ class MarioNativeVecEnv(IVecEnv):
             # (without it the floor only won if the same episode also made
             # the pipe top and entered the pipe: 0 wins in ~5000 tries).
             reached = any(
-                self.cell_wins.get(c, 0) > 0 and (
+                self._won(c) and (
                     c[0] != cell[0] or c[1] != cell[1] or c[4] != cell[4]
                     or c[5] != cell[5] or c[2] >= cell[2] + 4
                     or (self.credit_vertical and c[2] == cell[2]
@@ -1114,9 +1139,14 @@ class MarioNativeVecEnv(IVecEnv):
                 for c in self.ep_cells[i] if c != cell)
             won = victory[i] or self.cleared[i] > 0 or reached
             if won:
-                self.cell_wins[cell] = self.cell_wins.get(cell, 0) + 1
-            # a random walk dying early says nothing about the cell
-            if won or self.ep_steps[i] > 8 or self.is_explorer_env[i]:
+                wins = self.explore_wins if self.is_explorer_env[i] else self.cell_wins
+                wins[cell] = wins.get(cell, 0) + 1
+            # a random walk dying early says nothing about the cell, and a cell
+            # that has converted before is never pruned: only a win in the SAME
+            # episode used to protect it, so a proven link saved on a ledge
+            # edge could be deleted together with its win counts
+            if (won or self.ep_steps[i] > 8 or self.is_explorer_env[i]
+                    or self._won(cell)):
                 continue
             n_early = self.cell_early.get(cell, 0) + 1
             self.cell_early[cell] = n_early
@@ -1207,10 +1237,11 @@ class MarioNativeVecEnv(IVecEnv):
             # then dropped their try counts -- the failure weight of the
             # hardest (never-winning) cells collapsed on every reload
             for c, e in self.archive.items():
-                while len(e) < 5:
+                while len(e) < 6:
                     e.append(0)
                 e[3] = self.cell_wins.get(c, 0)
                 e[4] = self.cell_tries.get(c, 0)
+                e[5] = self.explore_wins.get(c, 0)
             tmp = self.archive_path + '.tmp'
             with open(tmp, 'wb') as f:
                 pickle.dump(self.archive, f)

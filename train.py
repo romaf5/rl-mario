@@ -10,6 +10,8 @@ emulators live in vecenv worker processes.
 """
 
 import argparse
+import signal
+import sys
 
 import yaml
 from rl_games.common import env_configurations
@@ -111,6 +113,9 @@ def main():
                              eval_env_kwargs=eval_env_config,
                              eval_episodes=args.eval_episodes,
                              eval_level_steps=args.eval_level_steps)
+    # a plain `kill` (SIGTERM) exits through SystemExit, so atexit handlers run
+    # (the native env saves its archive there)
+    signal.signal(signal.SIGTERM, lambda signum, frame: sys.exit(128 + signum))
     runner = Runner(algo_observer=observer)
     runner.load(config)
     runner.reset()
