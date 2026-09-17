@@ -10,7 +10,7 @@ import sys
 
 import numpy as np
 
-ROOT = '/home/mario/workdir/rl-mario'
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 HERE = os.path.join(ROOT, 'native')
 ROM = os.path.join(ROOT, 'retro_integration', 'SuperMarioBros-Nes-v0', 'rom.nes')

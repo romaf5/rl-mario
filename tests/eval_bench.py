@@ -102,12 +102,16 @@ class TraceModel:
     def __call__(self, d):
         lg = torch.full((d['obs'].shape[0], 12), -1e9); lg[:, self.acts[min(self.t, len(self.acts) - 1)]] = 0.0; self.t += 1
         return {'logits': lg}
-rows = list(csv.DictReader(open(os.path.join(ROOT, 'traces', 'play_0905-232759.csv'))))     # human: 1-1 -> 1-2 -> 4-1
-acts = [AIDX[r['action']] for r in rows]
-first_12 = next(i for i, r in enumerate(rows) if r['level'] == '1-2')
-res = obs._level_eval(TraceModel(acts), 14, levels=['1-1'], n=1, max_steps=first_12 + 60, seed=0)
-check('level eval: a level cleared mid-episode counts as cleared although the episode plays on into the next level (trace clears 1-1 at step %d)' % first_12,
-      res['1-1']['clear'] == 1.0 and res['1-1']['ends']['clear'] == 1.0, res['1-1'])
+TRACE_11_12 = os.path.join(ROOT, 'traces', 'play_0905-232759.csv')     # human: 1-1 -> 1-2 -> 4-1
+if os.path.exists(TRACE_11_12):
+    rows = list(csv.DictReader(open(TRACE_11_12)))
+    acts = [AIDX[r['action']] for r in rows]
+    first_12 = next(i for i, r in enumerate(rows) if r['level'] == '1-2')
+    res = obs._level_eval(TraceModel(acts), 14, levels=['1-1'], n=1, max_steps=first_12 + 60, seed=0)
+    check('level eval: a level cleared mid-episode counts as cleared although the episode plays on into the next level (trace clears 1-1 at step %d)' % first_12,
+          res['1-1']['clear'] == 1.0 and res['1-1']['ends']['clear'] == 1.0, res['1-1'])
+else:
+    print('SKIP level eval mid-episode clear: %s not present (traces/ is not in git)' % TRACE_11_12)
 
 # ---------------------------------------------------------------- route-aware progress
 route_gps = {0, 1, 12, 13, 28, 29, 30, 31}
@@ -115,6 +119,12 @@ check('route progress: an off-route exit (4-2 flag -> 4-3) counts as the last on
       MarioObserver.route_progress(14, route_gps) == 13 and MarioObserver.route_progress(2, route_gps) == 1
       and MarioObserver.route_progress(28, route_gps) == 28 and MarioObserver.route_progress(0, route_gps) == 0,
       [MarioObserver.route_progress(g, route_gps) for g in (14, 2, 28, 0)])
+obs_tr = MarioObserver(video_freq=0)
+obs_tr.algo = types.SimpleNamespace(env_config=dict(cfg['env_config']), is_rnn=False)
+obs_tr._process_single_info({'game_progress': 16, 'wrong_exit': True})     # 4-2 world-5 pipe -> 5-1
+obs_tr._process_single_info({'game_progress': 28, 'stages_cleared': 1})    # 4-2 vine warp -> 8-1
+check('training progress metrics: a wrong exit (4-2 -> 5-1) counts as 4-2, the vine warp as 8-1',
+      obs_tr.episode_progress == [13, 28], obs_tr.episode_progress)
 
 # ---------------------------------------------------------------- sequential sampled eval
 seq = obs._sequential_eval(model, 12, n=2, max_steps=30, seed=1)
