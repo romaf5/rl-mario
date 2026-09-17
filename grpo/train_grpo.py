@@ -510,7 +510,7 @@ def full_game_eval(model, cfg, device, episodes, max_steps=6000, n_threads=8, se
     """The real objective: sequential game from the first configured level
     with 3 lives, no noise. Reports the level index reached (0-31), mean and
     max, and the victory rate."""
-    ec = dict(cfg['env_config']); [ec.pop(k, None) for k in ('name', 'action_type', 'archive_path')]
+    ec = dict(cfg['env_config']); [ec.pop(k, None) for k in ('name', 'action_type', 'archive_path', 'explorer_envs', 'end_on_stage_exit')]
     first = [l for l in ec.get('random_stages') or ['1-1']][0]
     ec.update(random_stages=[first], route_levels=list(ec.get('random_stages') or [first]), episode_life=False,
               sticky_actions=0.0, explore_eps=0.0, self_restart_prob=0.0, explore_episode_prob=0.0,
@@ -608,6 +608,9 @@ def main():
 
     params = yaml.safe_load(open(a.config))['params']; cfg = params['config']
     ec = dict(cfg['env_config']); ec.pop('name', None); ec.pop('action_type', None)
+    # PPO-only env options: GRPO runs its own explorers (--explorers) and plays
+    # whole segments across level changes
+    ec.pop('explorer_envs', None); ec.pop('end_on_stage_exit', None)
     knobs = resolve_env_overrides(a.cell_bonus, a.cell_x_bin, ec); knobs.update(resolve_cell_keys(ec))
     # the env provides observations, dynamics and the per-step reward, and
     # (grow_archive) records a Go-Explore cell archive from the rollouts:
@@ -629,7 +632,8 @@ def main():
     if a.demo_share > 0 and not a.grow_archive:
         print('[grpo] WARNING: --demo-share needs --grow-archive (cell entries are only detected when the env archives); demos will never be recorded', flush=True)
     eval_env.reset()
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    from device_support import resolve_device
+    device = torch.device(resolve_device('cuda'))
     model = build_model(params, cfg, env.observation_space.shape, a.init).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=a.lr)
     prompts = Prompts(env, a.archive, a.door_share); prompts.demo_share = a.demo_share

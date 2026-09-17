@@ -102,12 +102,16 @@ class TraceModel:
     def __call__(self, d):
         lg = torch.full((d['obs'].shape[0], 12), -1e9); lg[:, self.acts[min(self.t, len(self.acts) - 1)]] = 0.0; self.t += 1
         return {'logits': lg}
-rows = list(csv.DictReader(open(os.path.join(ROOT, 'traces', 'play_0905-232759.csv'))))     # human: 1-1 -> 1-2 -> 4-1
-acts = [AIDX[r['action']] for r in rows]
-first_12 = next(i for i, r in enumerate(rows) if r['level'] == '1-2')
-res = obs._level_eval(TraceModel(acts), 14, levels=['1-1'], n=1, max_steps=first_12 + 60, seed=0)
-check('level eval: a level cleared mid-episode counts as cleared although the episode plays on into the next level (trace clears 1-1 at step %d)' % first_12,
-      res['1-1']['clear'] == 1.0 and res['1-1']['ends']['clear'] == 1.0, res['1-1'])
+TRACE_11_12 = os.path.join(ROOT, 'traces', 'play_0905-232759.csv')     # human: 1-1 -> 1-2 -> 4-1
+if os.path.exists(TRACE_11_12):
+    rows = list(csv.DictReader(open(TRACE_11_12)))
+    acts = [AIDX[r['action']] for r in rows]
+    first_12 = next(i for i, r in enumerate(rows) if r['level'] == '1-2')
+    res = obs._level_eval(TraceModel(acts), 14, levels=['1-1'], n=1, max_steps=first_12 + 60, seed=0)
+    check('level eval: a level cleared mid-episode counts as cleared although the episode plays on into the next level (trace clears 1-1 at step %d)' % first_12,
+          res['1-1']['clear'] == 1.0 and res['1-1']['ends']['clear'] == 1.0, res['1-1'])
+else:
+    print('SKIP level eval mid-episode clear: %s not present (traces/ is not in git)' % TRACE_11_12)
 
 # ---------------------------------------------------------------- route-aware progress
 route_gps = {0, 1, 12, 13, 28, 29, 30, 31}

@@ -131,6 +131,7 @@ def bot_reset():
         log.append((float(r[0]), int(sg.x[0]), bool(d[0]), bool(sg.timeout[0]), bool(inf.time_outs[0]), bool(sg.page_reset[0]), bool(sg.died[0]), bool(env.after_reset[0])))
         if d[0]: break
     env.close(); return first, log
+rst = []
 if os.path.exists(T84):
     first, log = bot_reset()
     check('bot ground approach to pipe 1: exactly one page reset, unpaid state persists (x %d, hw %d)' % (first[1], first[2]), first[0] and first[3])

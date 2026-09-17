@@ -19,6 +19,7 @@ from mario_env import create_mario_env
 from mario_vecenv import register_mario_vecenv
 from mario_native_vecenv import register_mario_native_vecenv
 from callbacks import MarioObserver
+from device_support import resolve_device
 
 
 def register_mario_env():
@@ -54,6 +55,10 @@ def main():
                         help='Sampled-policy door episodes per level at every video epoch')
     parser.add_argument('--eval-level-steps', type=int, default=1500,
                         help='Step cap of a sampled door episode')
+    parser.add_argument('--device', type=str, default=None,
+                        help='Override the config device (cuda:0, mps, cpu). '
+                             'A CUDA device on a machine without CUDA falls '
+                             'back to mps (Apple Silicon) or cpu')
     args = parser.parse_args()
 
     register_mario_env()
@@ -68,6 +73,10 @@ def main():
         config['params']['config']['num_actors'] = args.num_actors
     if args.max_epochs:
         config['params']['config']['max_epochs'] = args.max_epochs
+    if args.device:
+        config['params']['config']['device'] = args.device
+    config['params']['config']['device'] = resolve_device(
+        config['params']['config'].get('device'))
 
     print("=" * 60)
     print(f"  Training: {config['params']['config']['name']}")
