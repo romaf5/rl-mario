@@ -618,6 +618,9 @@ def main():
     ap.add_argument('--init-prompts', default='', help='prompts.pkl of an earlier run: restore demos, graduated links, tails and prompt scores')
     ap.add_argument('--demo-share', type=float, default=0.0, help='fraction of cell groups started from an explorer demo with a forced prefix (backward chaining); needs --explorers')
     ap.add_argument('--winners-only', action='store_true', help='prompt pool = archive cells with policy or explorer wins (PPO archive entries [3]/[5]) plus the doors')
+    ap.add_argument('--outcome', choices=('reward', 'clear'), default='reward',
+                    help='rollout outcome for the group advantages and prompt learnability: the summed env reward, or only the '
+                         'level-clear term (a sparse success signal: progress variance no longer decides which prompts are trained)')
     a = ap.parse_args()
 
     params = yaml.safe_load(open(a.config))['params']; cfg = params['config']
@@ -743,6 +746,13 @@ def main():
             bc_buf[t] = alive & (fz >= 0) & (t >= plen - 2) & bc_ok   # ... but the last 2 of frontier links are imitated (the run's own explorer demos)
             _, r, d_all, inf = env.step(np.concatenate([act_buf[t], np.zeros(a.explorers, np.int64)]) if a.explorers else act_buf[t])
             obs = env.obs_u8_stack()[:N]; r = r[:N]; d = d_all[:N]
+            if a.outcome == 'clear':
+                # sparse outcome: only the level-clear reward. With the summed
+                # reward the learnability score followed progress variance
+                # (rollouts from early cells die or run the whole level) and
+                # 79% of the groups trained survival while the warp-area
+                # prompts, whose std barely moves, got 9% (Mario_GRPO42)
+                r = env.last_terms.get('clear', np.zeros(NX, np.float32))[:N]
             ec = env.entered_cell
             for i in range(N):
                 # only while the rollout is alive: a finished env is reset to
