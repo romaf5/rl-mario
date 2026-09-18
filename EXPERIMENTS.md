@@ -288,3 +288,31 @@
 - One change: `--outcome-progress 0.2` (new trainer option): outcome = clear reward + 0.2 x the first-visit progress reward, so walking right toward the pipes in the warp area and running the main level from the door carry some credit again, while a warp (4700) still dominates any segment's spread (0.2 x a ~2000-px segment = ~400). Init: GRPO42clear iteration 500 (keeps the learned pipe entry); everything else as GRPO42clear.
 - PREDICTION: 30 min door eval mean max x back above 2600 with live groups >= 6/8; 2 h probe from warp-area winners warps > 30% and from at least 4 of the 12 cells; 4 h first door-side clear; 12 h door clear rate > 0.1.
 - 30 min (22:18, iteration ~140): PASS -- door eval mean max x 3309 / 3465 / 3533 / 3383 / 3383 at iterations 25-125 (1473 before the switch), live groups 8/8 throughout, 0 command-buffer aborts, ~10,700 frames/s (every group updates now). Entropy 0.82 -> 0.26 at iteration 75, back to 0.34-0.36. Prompt uses at iteration 75 (the scores restarted at 5: no --init-prompts): other underground 71%, warp area 20%, vine spot 9%, coin-cache pipe 1%; the most-used prompt is the one warping cell (x-bin 24 ground, score 2200 vs ~45-150 for the rest). Door evals clear 0.
+- 1 h 22 min (23:10, iteration ~385), 2 h criterion read early: MISS. Door evals 15/15 clear 0 (mean max x ~3470-3567), live groups 8/8, entropy 0.26-0.76, 0 aborts. Probe of grpo_last from the 12 warp-area winners (96 episodes): 2% warp (2/8 from the x-bin-24 ground cell, which GRPO42clear had at 5/8; 0 elsewhere), 24% wrong pipe (GRPO42clear: 2%), 24% unpaid timeout, ~48% still running. The progress weight walks the policy to the warp pipes but it takes pipes 6/7, and the learned pipe-8 entry decayed; practice was diluted again by the restarted prompt scores (71% other underground at iteration 75).
+- Stopped at iteration ~395 (23:15, user decision); runs_archive/Mario_GRPO42mix_17-21-48-28.
+
+## 2026-09-17 23:15 — stop: summary of the 4-2 push on the M2 Max, open problems, next PPO ideas
+All training stopped (user decision). What the two days established, in order:
+
+**Infrastructure** (branch mac-support, squash-merged as PR #1): Mac support (MPS fallback, float32 value normaliser, native/build.sh, setup_mac.sh); MPS command-buffer aborts traced to the window server needing the GPU (intermittent, e.g. at a screen lock) -> per-minibatch sync + `--minibatch-size 1024` (69 aborts overnight at 4096 vs 11 in 10.5 h at 1024).
+
+**Bugs fixed** (each with a bench check): explorer walk actions trained as policy actions (`explorer_envs`); the tile-variant cap counting camera bins; 8-x states archived in a 4-2 run; the warp playing on into 8-1 (`end_on_stage_exit`); wrong exits paying on their way out; mid-bump ($23) states archived; a wrong exit out-valuing the warp at gamma 0.995 / per_extra 100; eval clip scalars and training progress metrics not route-aware; missing imageio silently skipping every eval; explorer wins starving frontier practice (`explore_wins`, untried winners first); winning cells pruned; the archive lost at exit; novelty farming by restarts (`cell_bonus_door_only`).
+
+**Findings about 4-2**:
+- The warp area is entered through the documented coin-cache pipe "wrong warp" (Mario shifted right on screen while the camera is still left), not the vine (0/768 random walks from pre-vine cells); accepted by the user: any route ending in the world-8 pipe counts.
+- The route is three rare, precise links: (1) the on-screen shift at the coin-cache pipe -- glitch-ready states exist in the archive (screen x 190-239); (2) DOWN into that pipe -- the policy does it 1/96 from those states; (3) the world-8 pipe from the warp area -- 2-8% under PPO and GRPO, while random walks take the wrong pipes 6/7 three times as often as pipe 8.
+- PPO (runs h-j, 9.5-10.5 h each): explorers find all three links within minutes to hours (1000-2200 winning cells, a credit chain back to the level start), restart episodes clear 0.5-1.6%, door episodes never (0 of ~40 evals); door episodes run the main level to its end and loiter there until the unpaid cutoff (38-66% timeouts).
+- GRPO finisher (3 variants, 1-1.5 h each): summed outcome -> practice follows progress variance (79% of groups on survival), 2% warp; clear-only outcome -> learns the pipe-8 entry from one start next to the pipes (5/8) but never the traversal, door running decays (mean max x 3250 -> 1473); clear + 0.2 x progress -> door running back, but 24% wrong pipes and the pipe-8 entry decays to 2/8.
+- User assessment: GRPO is a dead end here, and the 4-2 env is deterministic (sticky 0, reset noops 0, explore_eps 0), so PPO should be able to learn the route much better.
+
+**Open problems** (none solved):
+1. The explorers' successes never become a gradient: PPO learns only from the actions its own policy sampled, so a random walk that reaches the warp area teaches the policy nothing directly.
+2. Door episodes loiter at the level end because the unpaid cutoff is value-bootstrapped (a dead end is worth more than any exit).
+3. Frontier practice weights by transitive credit (reaching a winning cell further right), not by real clears, so the warp area's "wins" are mostly walks, not warps.
+4. Glitch-ready states (on-screen shift) share cells with normal ones within a 64-px camera bin.
+
+**PPO ideas that use the determinism** (one change per run):
+- Replay the run's own successful trajectories as demonstrations: with no sticky actions or noops, an action sequence from the door that ends in 8-1 replays exactly, so self-imitation (SIL) or a behaviour-cloning warm start on those sequences, then PPO fine-tuning, gives the policy the three links directly. Needs explorer episodes that record their action sequences from a door or archived start plus the chain of starts back to the door (Go-Explore phase 2 style, from the agent's own walks: no hand-made demos).
+- No bootstrap at the unpaid cutoff for door episodes.
+- Frontier weights from real clears per cell instead of transitive wins.
+- Mario's on-screen x in the cell key.
