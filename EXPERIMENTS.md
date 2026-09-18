@@ -260,3 +260,13 @@
 - One change: `cell_bonus_door_only: true` (restart episodes and explorers are never paid the novelty bonus; a life after a life loss is a door-like continuation and still is). Launched with `--minibatch-size 1024` against the MPS aborts (64 optimizer steps per epoch instead of 16 -- an optimisation-side confound, noted).
 - Candidates kept for later runs, one at a time: Mario's on-screen x in the cell key (glitch-ready pipe states as their own cells); no bootstrap at the unpaid cutoff (end-of-level loitering).
 - PREDICTION: 30 min (09:05) training warps (`mario/clear/4-2` > 0) and no command-buffer abort; 2 h (10:35) `mario/clear/4-2` 250-epoch mean above run i's best (0.016) and a probe from warp-area winners warps > 30% with no wandering; 4 h (12:35) first door-side clear; 8 h (16:35) sampled `eval/level_clear/4-2` > 0. Miss at 2 h -> re-probe the warp-area restarts before the next change.
+- RESULT (stopped at epoch 3805, 19:08, after 10.5 h): no criterion met.
+  - 30 min: first training warp at ~epoch 200 (32 min; explorers needed longer to find the world-8 pipe: 3/768 random 300-step walks from warp-area cells warp, 10/768 take pipes 6/7); 0 command-buffer aborts in the first 2 h, 11 over the whole run (69 in run i at minibatch 4096).
+  - 2 h: MISS -- `mario/clear/4-2` 0.4-1.4% (125-epoch means), probe from 12 warp-area winners (ep-500 best checkpoint): 3% warp, 22% wrong pipe, ~72% still wandering after 700 steps. Door-only novelty did not change the warp-area behaviour.
+  - whole run: `mario/clear/4-2` flat 0.6-0.9% per 500 epochs, `mario/clear_door/4-2` 0, all 19 level evals clear 0 (mean max x 3040-3390, timeouts 38-66%, wrong exits 3-22%), winners 100 -> 2180, archive 7770 cells, `rewards/iter` plateau ~2280 from epoch 1000.
+  - runs_archive/Mario_PPO42j_17-08-35-26.
+
+### 2026-09-17 19:10 — GRPO finisher from run j (user decision)
+- Why: none of the three links of the glitch route (on-screen shift at the coin-cache pipe, DOWN into it, the world-8 pipe) consolidates under PPO: the proven successes are rare events in a near-uniform policy (entropy ~2.0 of 2.48). GRPO compares 16 rollouts from the identical savestate, which is how the project's first 8-4 victory was amplified from a strong PPO policy.
+- Trainer changes: `--winners-only` (prompt pool = PPO archive cells with policy or explorer wins, plus the door); on MPS the seeded eval generator lives on the CPU (unchanged on CUDA). grpo_bench 23/23.
+- **Mario_GRPO42** (M2 Max, MPS): init run j epoch 3500, archive of run j (read only, no --grow-archive), `--winners-only --rtg --gamma 0.995 --cell-bonus 0 --minibatch 1024`, 8 groups x 16, horizon 256, door share 0.25, door eval of 32 episodes every 25 iterations, 12 h cap.

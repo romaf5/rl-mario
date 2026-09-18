@@ -171,7 +171,15 @@ def sample_actions(logits, gen):
     argmax, which is a different policy from the sampled one PPO/GRPO
     train: one trajectory per level, fixed points, 0/1 flips."""
     probs = torch.softmax(logits, -1)
+    if probs.device.type != gen.device.type:
+        probs = probs.to(gen.device)        # MPS: the eval generator lives on the CPU
     return torch.multinomial(probs, 1, generator=gen).squeeze(1).cpu().numpy()
+
+
+def eval_generator(device, seed):
+    """Seeded generator for the sampled evals: on the training device, except
+    on MPS (seeded device generators there are not something to rely on)."""
+    return torch.Generator(device='cpu' if device.type == 'mps' else device).manual_seed(seed)
 
 
 def route_progress(gp, route_gps):
@@ -199,7 +207,7 @@ class Prompts:
     round_robin = True
     K = 4                     # demos per link from distinct start states
 
-    def __init__(self, env, archive_path, door_share):
+    def __init__(self, env, archive_path, door_share, winners_only=False):
         # one door state per configured level (8-4 only, or the whole route)
         self.levels = [l for l in env.stages if l != 'FullGame']
         self.doors = {l: env.states[l] for l in self.levels}
@@ -216,6 +224,11 @@ class Prompts:
         arch = pickle.load(open(archive_path, 'rb')) if archive_path and os.path.exists(archive_path) else {}
         for k, e in arch.items():
             if k[0] not in self.doors:
+                continue
+            # winners only: cells a policy restart or an explorer walk has
+            # converted from (PPO archive entry[3] / entry[5]) -- a finisher
+            # amplifies proven links instead of spreading over thousands of cells
+            if winners_only and not ((len(e) > 3 and e[3]) or (len(e) > 5 and e[5])):
                 continue
             sts = e[0] if isinstance(e[0], list) else [e[0]]
             self.cells.append(k); self.states.append(sts)
@@ -516,7 +529,7 @@ def full_game_eval(model, cfg, device, episodes, max_steps=6000, n_threads=8, se
               sticky_actions=0.0, explore_eps=0.0, self_restart_prob=0.0, explore_episode_prob=0.0,
               reset_noops=0, n_threads=n_threads, dense_infos=False, seed=seed)
     env = MarioNativeVecEnv('fullgame', episodes, **ec); obs = env.reset(); n = episodes
-    gen = torch.Generator(device=device).manual_seed(int(seed) * 7919 + 1)
+    gen = eval_generator(device, int(seed) * 7919 + 1)
     route_gps = {(int(l[0]) - 1) * 4 + int(l[2]) - 1 for l in ec['route_levels']}
     done_m = np.zeros(n, bool); gp = np.zeros(n, int); vic = np.zeros(n, bool); off = np.zeros(n, bool)
     for _ in range(max_steps):
@@ -543,7 +556,7 @@ def clean_door_eval(model, env, device, episodes, max_steps=1500, seed=0):
     levels = [l for l in env.stages if l != 'FullGame']
     lv = [levels[i % len(levels)] for i in range(n)]
     obs = load_states(env, [env.states[l] for l in lv])
-    gen = torch.Generator(device=device).manual_seed(int(seed) * 1000 + 17)
+    gen = eval_generator(device, int(seed) * 1000 + 17)
     maxx = np.zeros(n); done_m = np.zeros(n, bool); vic = np.zeros(n, bool); loops = np.zeros(n, bool); clear = np.zeros(n, bool)
     for _ in range(max_steps):
         lg = logits_of(model, torch.from_numpy(obs).to(device))
@@ -604,6 +617,7 @@ def main():
     ap.add_argument('--bc', type=float, default=0.1, help='self-imitation weight on the forced prefix steps of demo groups (negative log-likelihood of the demo action)')
     ap.add_argument('--init-prompts', default='', help='prompts.pkl of an earlier run: restore demos, graduated links, tails and prompt scores')
     ap.add_argument('--demo-share', type=float, default=0.0, help='fraction of cell groups started from an explorer demo with a forced prefix (backward chaining); needs --explorers')
+    ap.add_argument('--winners-only', action='store_true', help='prompt pool = archive cells with policy or explorer wins (PPO archive entries [3]/[5]) plus the doors')
     a = ap.parse_args()
 
     params = yaml.safe_load(open(a.config))['params']; cfg = params['config']
@@ -636,7 +650,7 @@ def main():
     device = torch.device(resolve_device('cuda'))
     model = build_model(params, cfg, env.observation_space.shape, a.init).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=a.lr)
-    prompts = Prompts(env, a.archive, a.door_share); prompts.demo_share = a.demo_share
+    prompts = Prompts(env, a.archive, a.door_share, winners_only=a.winners_only); prompts.demo_share = a.demo_share
     if a.init_prompts:
         prompts.load_dump(a.init_prompts)
     rng = np.random.RandomState(a.seed)
