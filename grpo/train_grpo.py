@@ -621,6 +621,9 @@ def main():
     ap.add_argument('--outcome', choices=('reward', 'clear'), default='reward',
                     help='rollout outcome for the group advantages and prompt learnability: the summed env reward, or only the '
                          'level-clear term (a sparse success signal: progress variance no longer decides which prompts are trained)')
+    ap.add_argument('--outcome-progress', type=float, default=0.0,
+                    help='with --outcome clear: add this weight x the first-visit progress reward to the outcome (retention of '
+                         'the main-level running in groups that never clear)')
     a = ap.parse_args()
 
     params = yaml.safe_load(open(a.config))['params']; cfg = params['config']
@@ -753,6 +756,12 @@ def main():
                 # 79% of the groups trained survival while the warp-area
                 # prompts, whose std barely moves, got 9% (Mario_GRPO42)
                 r = env.last_terms.get('clear', np.zeros(NX, np.float32))[:N]
+                if a.outcome_progress > 0:
+                    # retention: door groups never clear, so with the clear
+                    # term alone the main-level running was not trained and
+                    # decayed (door eval mean max x 3250 -> 1473 in 500
+                    # iterations); a small progress weight keeps them live
+                    r = r + a.outcome_progress * env.last_terms.get('progress', np.zeros(NX, np.float32))[:N]
             ec = env.entered_cell
             for i in range(N):
                 # only while the rollout is alive: a finished env is reset to
