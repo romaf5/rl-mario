@@ -28,6 +28,8 @@ Properties:
   * the archive file keeps explorer walk counts and early deaths across a
     reload (every cell was 'fresh' again), and a fresh train.py run refuses
     to continue an existing archive file silently;
+  * the per-spot tile-variant index equals a scan of the archive (after
+    evictions too);
 """
 import os, sys
 import numpy as np, yaml
@@ -320,6 +322,17 @@ cfg = {'params': {'config': {'env_config': {'archive_path': path}}}}
 check('persistence: a fresh train.py run refuses an existing archive file', train.fresh_archive_conflict(cfg, None, False))
 check('persistence: --checkpoint or --resume-archive continue it',
       not train.fresh_archive_conflict(cfg, 'x.pth', False) and not train.fresh_archive_conflict(cfg, None, True))
+
+# ---------------------------------------------------------------- tile-variant index
+env, obs = make(n=4, self_restart_prob=1e-6, self_restart_cells=5, cell_max_variants=3)
+for s in range(200):
+    env.step(np.array([3, 4, 1, 3 if s % 5 else 5]))
+brute = lambda c: sum(1 for k in env.archive if k[:6] == c[:6] and k[7:] == c[7:])
+probe_cells = list(env.archive) + [c[:6] + (12345,) + c[7:] for c in list(env.archive)[:5]]
+ok = all(env._tile_variants(c) == brute(c) for c in probe_cells)
+check('index: tile-variant counts equal a scan of the archive after evictions (%d cells, cap 5)' % len(env.archive),
+      ok and len(env.archive) == 5, [(env._tile_variants(c), brute(c)) for c in probe_cells if env._tile_variants(c) != brute(c)][:5])
+env.close()
 
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)

@@ -307,6 +307,8 @@ class MarioNativeVecEnv(IVecEnv):
         # nor a restart: it credits no cell and is not a door sample
         self.continuation = np.zeros(n, dtype=bool)
         self.door_seen = {}; self._seen_tick = 0
+        self._n_front = None
+        self._spots, self._spots_src, self._spots_n = {}, None, 0
         # GRPO rollouts freeze the door counts (no decay, no growth) so the
         # bonus is the same function of the state for every rollout of a
         # group whenever it runs in the horizon; entries seen meanwhile
@@ -550,7 +552,9 @@ class MarioNativeVecEnv(IVecEnv):
     def _forget_cell(self, cell):
         """Remove a cell and all of its counters (a cell rediscovered later
         must start unproven; stale wins made it satisfy transitive credit)."""
-        self.archive.pop(cell, None)
+        if self.archive.pop(cell, None) is not None and self._spots_src is self.archive:
+            self._spots.get(self._spot_of(cell), set()).discard(cell)
+            self._spots_n -= 1
         self.cell_wins.pop(cell, None)
         self.cell_tries.pop(cell, None)
         self.cell_early.pop(cell, None)
@@ -667,12 +671,27 @@ class MarioNativeVecEnv(IVecEnv):
         of the same AreaType is not a variant of the main area's spot."""
         return int(area) * 256 + int(sub)
 
+    @staticmethod
+    def _spot_of(cell):
+        return cell[:6] + cell[7:]
+
     def _tile_variants(self, cell):
         """Archived tile-signature variants of `cell`'s spot: every key slot
         equal except the signature (slot 6); the camera bin (slot 7, with
-        cell_screen_bin) belongs to the spot."""
-        return sum(1 for c in self.archive
-                   if c[:6] == cell[:6] and c[7:] == cell[7:])
+        cell_screen_bin) belongs to the spot. Indexed per spot (a scan of the
+        whole archive per new cell); the index rebuilds itself when the
+        archive was replaced or resized behind the env's back."""
+        if self._spots_src is not self.archive or self._spots_n != len(self.archive):
+            self._spots = {}
+            for c in self.archive:
+                self._spots.setdefault(self._spot_of(c), set()).add(c)
+            self._spots_src, self._spots_n = self.archive, len(self.archive)
+        return len(self._spots.get(self._spot_of(cell), ()))
+
+    def _index_add(self, cell):
+        if self._spots_src is self.archive:
+            self._spots.setdefault(self._spot_of(cell), set()).add(cell)
+            self._spots_n += 1
 
     def _seed_cells(self, idx):
         """A new life's visited-cell set starts with the cell it stands in:
@@ -989,6 +1008,7 @@ class MarioNativeVecEnv(IVecEnv):
                         if losers:
                             self._forget_cell(losers[0])
                     self.lib.benv_save(self.env, int(i), self._sbuf)
+                    self._index_add(cell)
                     self.archive[cell] = [[bytes(self._sbuf.raw)], 0,
                                           int(t[i])]
                     self._archive_dirty += 1
@@ -1149,8 +1169,12 @@ class MarioNativeVecEnv(IVecEnv):
 
         infos = Infos()
         infos.time_outs = time_outs
-        n_front = sum(1 for c in self.archive if self._won(c)) \
-            if self.archive else 0
+        # a metric (infos of done envs): a scan of the whole archive every
+        # step was ~12% of the batch step at 8k cells; refreshed every 32 steps
+        if self._n_front is None or self._seen_tick % 32 == 0:
+            self._n_front = sum(1 for c in self.archive if self._won(c)) \
+                if self.archive else 0
+        n_front = self._n_front
         done_pre = real_done | (life_lost if self.episode_life else False)
         for i in range(n):
             if not done_pre[i] and not self.dense_infos:
