@@ -16,6 +16,10 @@ Properties:
     halfway point used to continue at x 1576 labelled a door episode; with
     it off the continued life is neither a door episode nor a restart; the
     multi-life eval still plays on after a death;
+  * frontier practice goes where the policy can learn: with outcomes
+    simulated, cells it never converts no longer take the frontier draws
+    (the failure-rate weight grew with every failed try and locked the
+    top-k onto them), untried proven winners and ~40% cells do;
 """
 import os, sys
 import numpy as np, yaml
@@ -203,6 +207,35 @@ for s in range(10):
 check('life loss: the multi-life eval keeps playing after a death (lives %d -> %d, done %s)'
       % (lives0, int(ev.v.ram[0, 0x75A]), dd), not dd and int(ev.v.ram[0, 0x75A]) == lives0 - 1)
 ev.close()
+
+# ---------------------------------------------------------------- frontier practice weights
+env, obs = make(self_restart_prob=1.0, self_restart_frontier_prob=1.0)
+env.lib.benv_save(env.env, 0, env._sbuf); st = bytes(env._sbuf.raw)
+rs = np.random.RandomState(0)
+kinds = {}
+for j in range(48):                     # 16 dead, 24 learnable (40%), 8 untried explorer-proven winners
+    c = ('4-2', 2 * 256 + 1, 100 + j, 5, 0, 2, 0, 0)
+    kind = 'dead' if j < 16 else ('learnable' if j < 40 else 'fresh')
+    env.archive[c] = [[st], 0, 400]; kinds[c] = kind
+    env.explore_wins[c] = 1
+    if kind == 'dead':
+        env.cell_tries[c] = 200
+    elif kind == 'learnable':
+        env.cell_tries[c] = 20; env.cell_wins[c] = 8
+p_true = {'dead': 0.0, 'learnable': 0.4, 'fresh': 0.4}
+draws = {'dead': 0, 'learnable': 0, 'fresh': 0}
+for k in range(1500):
+    env._reset_env(0)
+    c = env.start_cell[0]
+    if c in kinds:
+        draws[kinds[c]] += 1
+        if rs.random_sample() < p_true[kinds[c]]:
+            env.cell_wins[c] = env.cell_wins.get(c, 0) + 1
+env.close()
+tot = sum(draws.values())
+check('frontier: cells the policy never converts get few draws (%s)' % draws,
+      tot > 1000 and draws['dead'] < 0.1 * tot, draws)
+check('frontier: every untried proven winner gets practised', draws['fresh'] >= 8, draws)
 
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)

@@ -320,7 +320,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.start_cell = [None] * n
         self.cell_early = {}
         self.cell_wins = {}
-        self.cell_tries = {}      # restarts since the last credit reset
+        self.cell_tries = {}      # policy restarts per cell (lifetime; persisted)
         self.nongame = np.zeros(n, dtype=np.int32)
 
         self.rng = np.random.RandomState(seed)
@@ -487,10 +487,9 @@ class MarioNativeVecEnv(IVecEnv):
                                 pool.add(c)
                 if pool:
                     cells = list(pool)
-                    # practice where you fail: weight by failure rate
-                    # (1 - wins/tries) over restarts since the credit reset,
-                    # concentrated on the k hardest cells
-                    w = np.array([self._frontier_weight(c) + 0.05 for c in cells])
+                    # practice where it is learnable: weight by p (1 - p)
+                    # (_frontier_weight), concentrated on the k best cells
+                    w = np.array([self._frontier_weight(c) + 0.01 for c in cells])
                     k = self.sr_frontier_k
                     if k and 0 < k < len(cells):
                         top = np.argpartition(-w, k - 1)[:k]
@@ -555,17 +554,19 @@ class MarioNativeVecEnv(IVecEnv):
         return self.cell_wins.get(cell, 0) > 0 or self.explore_wins.get(cell, 0) > 0
 
     def _frontier_weight(self, cell):
-        """Practice weight of a winning cell: the policy's failure rate over
-        its restarts since the credit reset. A winner the policy never tried
-        (proven by explorer walks only) gets the top weight: explorer wins used
-        to sit in cell_wins against policy-only tries, so a fresh link with 19
-        explorer wins and 12 failed policy tries weighed 0.10 and every frontier
-        slot went to old, heavily practised cells."""
+        """Practice weight of a winning cell: its learnability p (1 - p) for
+        the policy, p = (wins + 1) / (tries + 2) over its policy restarts
+        (lifetime counts). Highest where the policy converts about half the
+        time; a winner it never tried (proven by explorer walks only) gets
+        p = 1/2, the top weight. The failure rate 1 - p used before grew with
+        every failed try, so the top-k frontier locked onto cells the policy
+        never converts: in run j 16 cells took 59% of all restarts on
+        winners at a 4.5% policy win rate (one had 884 tries, 0 policy wins)
+        while the median winner got 3 tries."""
         t = self.cell_tries.get(cell, 0)
         pw = self.cell_wins.get(cell, 0)
-        if t == 0 and pw == 0:
-            return 1.0
-        return max(1.0 - (pw + 1.0) / (max(t, pw) + 2.0), 0.0)
+        p = (pw + 1.0) / (max(t, pw) + 2.0)
+        return p * (1.0 - p)
 
     def _reset_explorer(self, i):
         """Invisible explorer episode: a random walk from the least-walked

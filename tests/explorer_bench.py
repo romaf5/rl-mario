@@ -139,9 +139,9 @@ for c in (A, B, C):
 env.cell_tries = {A: 54, C: 12}; env.cell_wins = {A: 1}; env.explore_wins = {B: 3, C: 19}
 check('frontier: explorer-proven cells are winners without any policy win', env._won(A) and env._won(B) and env._won(C))
 check('frontier: an untried explorer-proven winner gets the top practice weight (%.2f vs %.2f for 1 policy win in 54 tries)'
-      % (env._frontier_weight(B), env._frontier_weight(A)), env._frontier_weight(B) == 1.0 > env._frontier_weight(A))
-check('frontier: explorer wins do not lower the policy failure rate (12 tries, 0 policy wins, 19 explorer wins -> %.3f)'
-      % env._frontier_weight(C), abs(env._frontier_weight(C) - (1 - 1 / 14)) < 1e-9, env._frontier_weight(C))
+      % (env._frontier_weight(B), env._frontier_weight(A)), env._frontier_weight(B) == 0.25 > env._frontier_weight(A))
+check('frontier: explorer wins do not enter the policy practice weight (12 tries, 0 policy wins, 19 explorer wins -> %.3f)'
+      % env._frontier_weight(C), abs(env._frontier_weight(C) - (1 / 14) * (13 / 14)) < 1e-9, env._frontier_weight(C))
 env.archive.clear(); env.cell_wins.clear(); env.explore_wins.clear()
 env.close()
 
