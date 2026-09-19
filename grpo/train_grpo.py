@@ -16,7 +16,7 @@ Usage:
   venv_retro/bin/python grpo/train_grpo.py --config configs/mario_ppo_native_84.yaml \
       --init CHECKPOINT.pth --run-name Mario_GRPO84 [--hours 4]
 """
-import argparse, copy, glob, os, pickle, sys, threading, time, math
+import argparse, copy, glob, os, pickle, shutil, sys, threading, time, math
 import numpy as np, torch, yaml
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 from rl_games.algos_torch import model_builder
@@ -112,6 +112,13 @@ def valid_indices(mask, adv):
     return torch.nonzero((mask > 0) & (adv != 0)).squeeze(1)
 
 
+def spread_live(s, m):
+    """Does a group's outcome spread carry signal? Relative to the outcome
+    scale: an absolute 1e-6 let float32 rounding of --outcome-progress
+    (std 2e-5 on R ~200) through as a live group with +-2.8 advantages."""
+    return s > 1e-4 * (np.abs(m) + 1.0)
+
+
 def outcome_advantages(R, groups, group, no_std):
     """One advantage per rollout, group-relative; zero-variance groups -> 0.
     Returns (adv (N,), number of live groups)."""
@@ -119,21 +126,52 @@ def outcome_advantages(R, groups, group, no_std):
     for g in range(groups):
         sl = slice(g * group, (g + 1) * group)
         m, s = R[sl].mean(), R[sl].std()
-        if s > 1e-6:
+        if spread_live(s, m):
             live += 1
             adv[sl] = (R[sl] - m) / (1.0 if no_std else s + 1e-6)
     return adv, live
 
 
-def rtg_advantages(G, groups, group, no_std):
+def rtg_advantages(G, mask, groups, group, no_std):
     """Per-step advantages from discounted reward-to-go G (H, N), normalised
-    within the group at each step; --no-std applies here too (it used to be
-    ignored on this path)."""
+    within the group at each step over the rollouts still live and unmasked
+    there (mask (H, N)): rollouts that had ended sat in the statistics at
+    G = 0, so a lone survivor got +3.87 whatever its return and a weaker
+    survivor was reinforced when the others died. Fewer than 2 live or no
+    spread -> 0. --no-std applies here too."""
     H, N = G.shape
-    Gg = G.reshape(H, groups, group)
-    mu = Gg.mean(2, keepdims=True); sd = Gg.std(2, keepdims=True)
+    Gg = G.reshape(H, groups, group).astype(np.float64)
+    lv = np.asarray(mask).reshape(H, groups, group) > 0
+    n = lv.sum(2, keepdims=True); nz = np.maximum(n, 1)
+    mu = np.where(lv, Gg, 0.0).sum(2, keepdims=True) / nz
+    sd = np.sqrt(np.where(lv, (Gg - mu) ** 2, 0.0).sum(2, keepdims=True) / nz)
     den = np.ones_like(sd) if no_std else sd + 1e-6
-    return np.where(sd > 1e-6, (Gg - mu) / den, 0.0).reshape(H, N).astype(np.float32)
+    ok = lv & (n >= 2) & spread_live(sd, mu)
+    return np.where(ok, (Gg - mu) / den, 0.0).reshape(H, N).astype(np.float32)
+
+
+def clip_objective(ratio, A, cv):
+    """PPO-clip policy loss with a per-sample clip range cv, and the fraction
+    of samples outside it (clipfrac used --clip for every sample, so demo
+    samples inside their --clip-demo range counted as clipped)."""
+    pg = -torch.min(ratio * A, torch.max(torch.min(ratio, 1 + cv), 1 - cv) * A).mean()
+    return pg, ((ratio - 1).abs() > cv).float().mean()
+
+
+def step_outcome(env, r, n, outcome, outcome_progress):
+    """Per-step rollout outcome of the first n envs: the env reward, or
+    (--outcome clear) the level-clear term plus outcome_progress x the
+    progress term. The terms are raw: the env zeroes only its total reward
+    on a zero-pay leaving step (pending step of a clear, any step of a wrong
+    exit), so the outcome is zeroed there too (env.last_leaving)."""
+    if outcome != 'clear':
+        return r
+    z = np.zeros(env.num_actors, np.float32)
+    out = env.last_terms.get('clear', z)[:n]
+    if outcome_progress > 0:
+        out = out + outcome_progress * env.last_terms.get('progress', z)[:n]
+    leaving = getattr(env, 'last_leaving', None)
+    return out if leaving is None else np.where(np.asarray(leaving)[:n], 0.0, out).astype(np.float32)
 
 
 def resolve_env_overrides(cell_bonus, cell_x_bin, env_config):
@@ -144,6 +182,25 @@ def resolve_env_overrides(cell_bonus, cell_x_bin, env_config):
     cb = env_config.get('cell_bonus', 0.0) if cell_bonus is None else cell_bonus
     xb = env_config.get('cell_x_bin', 128) if cell_x_bin is None else cell_x_bin
     return {'cell_bonus': float(cb), 'cell_x_bin': int(xb)}
+
+
+def resolve_archive_caps(max_cells, cell_variants, env_config):
+    """--max-cells / --cell-variants: an explicit value wins, else the
+    config's self_restart_cells / cell_max_variants, else the old CLI
+    defaults 1024 / 3 (which silently replaced the 4-2 config's 16384 / 8)."""
+    mc = env_config.get('self_restart_cells', 1024) if max_cells is None else max_cells
+    cv = env_config.get('cell_max_variants', 3) if cell_variants is None else cell_variants
+    return {'self_restart_cells': int(mc), 'cell_max_variants': int(cv)}
+
+
+def run_archive_copy(src, run_dir):
+    """Archive file the env grows (it writes back to archive_path on a timer,
+    at exit and on close): a copy of the input in the run dir, so the input
+    -- a finished run's archive -- is never modified."""
+    dst = os.path.join(run_dir, os.path.basename(src) if src else 'archive.pkl')
+    if src and os.path.exists(src):
+        shutil.copyfile(src, dst)
+    return dst
 
 
 def resolve_cell_keys(env_config):
@@ -211,7 +268,7 @@ class Prompts:
         # one door state per configured level (8-4 only, or the whole route)
         self.levels = [l for l in env.stages if l != 'FullGame']
         self.doors = {l: env.states[l] for l in self.levels}
-        self.door_share = door_share
+        self.door_share = door_share; self.winners_only = winners_only
         self.clear = {l: 0.0 for l in self.levels}      # EMA of eval clear rate
         self.cells, self.states = [], []
         # demonstrations recorded from the explorers' random walks:
@@ -228,11 +285,11 @@ class Prompts:
             # winners only: cells a policy restart or an explorer walk has
             # converted from (PPO archive entry[3] / entry[5]) -- a finisher
             # amplifies proven links instead of spreading over thousands of cells
-            if winners_only and not ((len(e) > 3 and e[3]) or (len(e) > 5 and e[5])):
+            if winners_only and not self.entry_won(e):
                 continue
             sts = e[0] if isinstance(e[0], list) else [e[0]]
             self.cells.append(k); self.states.append(sts)
-        self.score = np.ones(len(self.cells)) * 5.0     # (rescaled to the running max as scores arrive)
+        self.score = np.ones(len(self.cells)) * 5.0     # placeholder: untried cells sample at the tried cells' max (cell_p)
         self.uses = np.zeros(len(self.cells), int); self.xuses = np.zeros(len(self.cells), int)
         print(f'[prompts] door + {len(self.cells)} archive cells')
         # graduated demos stay: re-checked now and then with no forced
@@ -242,6 +299,21 @@ class Prompts:
         self.grad = {}; self.graduated = 0
         self.door_x = {}                  # per level: EMA of the door groups' max x (the from-the-door frontier)
         self.xbin = int(getattr(env, 'cell_x_bin', 128))
+
+    @staticmethod
+    def entry_won(e):
+        return bool((len(e) > 3 and e[3]) or (len(e) > 5 and e[5]))
+
+    def cell_p(self, ids):
+        """Sampling distribution over cells `ids` by learnability. A cell
+        never tried (uses 0) counts as optimistic: the best score of the
+        tried cells (5.0 before any). Loaded cells used to sit at the initial
+        5.0 against used cells' ~400 and were never drawn (GRPO42: 1868 of
+        2228 winners never used)."""
+        tried = self.uses > 0
+        opt = max(float(self.score[tried].max()), 5.0) if tried.any() else 5.0
+        w = np.where(self.uses[ids] == 0, opt, self.score[ids]) + 0.5
+        return w / w.sum()
 
     def note_door(self, level, x):
         self.door_x[level] = x if level not in self.door_x else 0.8 * self.door_x[level] + 0.2 * x
@@ -397,7 +469,7 @@ class Prompts:
         if len(self.levels) > 1 and self.round_robin:
             return self.sample_round_robin(k, rng)
         out = []
-        n_door = max(1, int(round(k * self.door_share))) if self.cells else k
+        n_door = int(round(k * self.door_share)) if self.cells else k      # --door-share 0: no door group (max(1, ...) forced one)
         # mastered doors fade (0.15 floor keeps every level in rotation)
         w = np.array([0.15 + (1.0 - self.clear[l]) for l in self.levels]); w = w / w.sum()
         for j in range(n_door):
@@ -417,9 +489,8 @@ class Prompts:
                     out.append(dp); continue
             l = lv[rng.choice(len(lv), p=wl)]
             ids = by_level[l]
-            w = self.score[ids] + 0.5; w = w / w.sum()
-            i = ids[rng.choice(len(ids), p=w)]
-            out.append((i, self.states[i][rng.randint(len(self.states[i]))]))
+            i = ids[rng.choice(len(ids), p=self.cell_p(ids))]
+            out.append((self.cells[i], self.states[i][rng.randint(len(self.states[i]))]))
         return out
 
     def sample_round_robin(self, k, rng):
@@ -449,14 +520,17 @@ class Prompts:
                     w = np.array([self._demo_w(c) for c in live]); w = w / w.sum()
                     c = live[rng.choice(len(live), p=w)]; start, acts, _ = self.demos[c][rng.randint(len(self.demos[c]))]
                     out.append(('demo', c, start, acts[:max(0, len(acts) - self.tail[c])], acts)); continue
-            w = self.score[ids] + 0.5; w = w / w.sum()
-            i = ids[rng.choice(len(ids), p=w)]
-            out.append((i, self.states[i][rng.randint(len(self.states[i]))]))
+            i = ids[rng.choice(len(ids), p=self.cell_p(ids))]
+            out.append((self.cells[i], self.states[i][rng.randint(len(self.states[i]))]))
         return out
 
-    def update(self, idx, group_std):
-        if isinstance(idx, str):
+    def update(self, cell, group_std):
+        # cell prompts are identified by their KEY: an index went stale when
+        # refresh() pruned cells between sampling and crediting (wrong cell
+        # credited, IndexError possible); a cell pruned meanwhile gets nothing
+        if isinstance(cell, str) or cell not in self.cells:
             return
+        idx = self.cells.index(cell)
         self.uses[idx] += 1
         self.score[idx] = 0.7 * self.score[idx] + 0.3 * group_std
 
@@ -466,9 +540,12 @@ class Prompts:
             if k in ev:
                 self.clear[l] = 0.7 * self.clear[l] + 0.3 * ev[k]
 
-    def refresh(self, archive):
+    def refresh(self, archive, won=None):
         """Adopt cells the env archived during rollouts (new prompts start
-        optimistic so they get sampled soon)."""
+        optimistic so they get sampled soon). With winners_only, only cells
+        `won(cell)` says converted (the env's live cell_wins / explore_wins;
+        without it the entry's saved counts): refresh used to add every
+        archive cell to a winners-only pool."""
         # cells the env evicted / pruned leave the pool too (their states are
         # stale, and a re-discovered cell must start unproven)
         keep = [i for i, c in enumerate(self.cells) if c in archive]
@@ -480,6 +557,8 @@ class Prompts:
         known = set(self.cells); added = 0
         for k, e in archive.items():
             if k[0] not in self.doors or k in known:
+                continue
+            if self.winners_only and not (won(k) if won is not None else self.entry_won(e)):
                 continue
             sts = e[0] if isinstance(e[0], list) else [e[0]]
             self.cells.append(k); self.states.append(list(sts)); added += 1
@@ -515,6 +594,10 @@ def load_states(env, states, door=None):
     env.is_door[:] = True if door is None else np.asarray(door, bool)      # relative novelty: which rollouts count as the door policy
     env._seed_cells(range(env.num_actors))
     env.ep_steps[:] = 0
+    # no walk carries over into a loaded rollout: a restart walk the env armed
+    # inside step() would substitute random actions after the policy's action
+    # and log-prob were stored (the trainer re-arms its own explorers after this)
+    env.explorer[:] = 0
     return env.obs_u8_stack() if env.u8_obs else env._obs()
 
 
@@ -525,7 +608,11 @@ def full_game_eval(model, cfg, device, episodes, max_steps=6000, n_threads=8, se
     max, and the victory rate."""
     ec = dict(cfg['env_config']); [ec.pop(k, None) for k in ('name', 'action_type', 'archive_path', 'explorer_envs', 'end_on_stage_exit')]
     first = [l for l in ec.get('random_stages') or ['1-1']][0]
-    ec.update(random_stages=[first], route_levels=list(ec.get('random_stages') or [first]), episode_life=False,
+    # exits count by the config's route (as the PPO observer does): with the
+    # trained levels as the route, a 4-2-only run's warp into 8-1 -- its
+    # correct exit -- was a wrong exit
+    route = list(ec.get('route_levels') or ec.get('random_stages') or [first])
+    ec.update(random_stages=[first], route_levels=route, episode_life=False,
               sticky_actions=0.0, explore_eps=0.0, self_restart_prob=0.0, explore_episode_prob=0.0,
               reset_noops=0, n_threads=n_threads, dense_infos=False, seed=seed)
     env = MarioNativeVecEnv('fullgame', episodes, **ec); obs = env.reset(); n = episodes
@@ -601,19 +688,20 @@ def main():
     ap.add_argument('--eval-episodes', type=int, default=32)
     ap.add_argument('--n-threads', type=int, default=12)
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--device', default=None, help='torch device; default: the config\'s device (cuda without CUDA falls back to mps / cpu, device_support.py)')
     ap.add_argument('--grow-archive', action='store_true', help='record rollout cells into the archive and use them as prompts')
-    ap.add_argument('--max-cells', type=int, default=1024)
+    ap.add_argument('--max-cells', type=int, default=None, help='archive cap (env self_restart_cells); default: the config\'s value, else 1024')
     ap.add_argument('--clip-every', type=int, default=100, help='iterations between gameplay clips (background thread, CPU); 0 = off')
     ap.add_argument('--fullgame-every', type=int, default=100, help='iterations between sequential full-game evals (3 lives from the first level); 0 = off')
     ap.add_argument('--rtg', action='store_true', help='per-step advantages from discounted reward-to-go, group-normalised at each step (temporal credit) instead of one outcome per rollout')
     ap.add_argument('--gamma', type=float, default=0.99)
-    ap.add_argument('--cell-variants', type=int, default=3, help='max tile-signature variants per spatial archive cell')
+    ap.add_argument('--cell-variants', type=int, default=None, help='max tile-signature variants per spatial archive cell; default: the config\'s cell_max_variants, else 3')
     ap.add_argument('--explorers', type=int, default=0, help='extra envs per iteration that random-walk from least-visited cells ONLY to grow the archive (never in the update)')
     ap.add_argument('--demo-eps', type=float, default=0.0, help='uniform-random action share in the free steps of demo groups (the collapsed policy puts ~0 on the actions a link needs)')
     ap.add_argument('--cell-x-bin', type=int, default=None, help='archive x-bin in px (64 tells the warp pipes apart); default: the config\'s env_config value, else 128')
     ap.add_argument('--cell-bonus', type=float, default=None, help='env novelty bonus per first entry of a grounded archive cell per life; default: the config\'s env_config value, else 0')
     ap.add_argument('--clip-demo', type=float, default=1.0, help='PPO clip for demo-group samples (the rest use --clip)')
-    ap.add_argument('--hint', type=float, default=1.0, help='soft prefix: prob that a hinted rollout takes the demo action at its first free step (half the group is hinted; 0 = off)')
+    ap.add_argument('--hint', type=float, default=1.0, help='soft prefix: in the hinted half of each demo group, every remaining demo step after the forced prefix takes the demo action with this prob (0 = off)')
     ap.add_argument('--bc', type=float, default=0.1, help='self-imitation weight on the forced prefix steps of demo groups (negative log-likelihood of the demo action)')
     ap.add_argument('--init-prompts', default='', help='prompts.pkl of an earlier run: restore demos, graduated links, tails and prompt scores')
     ap.add_argument('--demo-share', type=float, default=0.0, help='fraction of cell groups started from an explorer demo with a forced prefix (backward chaining); needs --explorers')
@@ -625,6 +713,7 @@ def main():
                     help='with --outcome clear: add this weight x the first-visit progress reward to the outcome (retention of '
                          'the main-level running in groups that never clear)')
     a = ap.parse_args()
+    torch.manual_seed(a.seed)             # --seed used to seed numpy only (model init, sampling, minibatch order)
 
     params = yaml.safe_load(open(a.config))['params']; cfg = params['config']
     ec = dict(cfg['env_config']); ec.pop('name', None); ec.pop('action_type', None)
@@ -632,6 +721,15 @@ def main():
     # whole segments across level changes
     ec.pop('explorer_envs', None); ec.pop('end_on_stage_exit', None)
     knobs = resolve_env_overrides(a.cell_bonus, a.cell_x_bin, ec); knobs.update(resolve_cell_keys(ec))
+    knobs.update(resolve_archive_caps(a.max_cells, a.cell_variants, ec))
+    if not a.grow_archive:
+        # the env's cell block (cell entries, novelty bonus) only runs while it archives
+        if knobs['cell_bonus'] > 0:
+            print(f'[grpo] WARNING: cell_bonus {knobs["cell_bonus"]:g} is never paid without --grow-archive (the env detects cell entries only while it archives)', flush=True)
+        if a.explorers:
+            print('[grpo] WARNING: --explorers does nothing without --grow-archive (their walks archive no cells and record no demos)', flush=True)
+    run_dir = os.path.join('runs', f'{a.run_name}_{time.strftime("%d-%H-%M-%S")}')
+    os.makedirs(os.path.join(run_dir, 'nn'), exist_ok=True)
     # the env provides observations, dynamics and the per-step reward, and
     # (grow_archive) records a Go-Explore cell archive from the rollouts:
     # new cells become prompts, so groups start where the policy's outcomes
@@ -640,8 +738,7 @@ def main():
     # sampling; the tiny restart prob only switches the env's archiving on
     # (dead rollouts are masked, so its resets are never trained on).
     ec.update(dict(self_restart_prob=1e-6 if a.grow_archive else 0.0, explore_eps=0.0,
-                   explore_episode_prob=0.0, archive_path=a.archive if a.grow_archive else None,
-                   self_restart_cells=a.max_cells, cell_max_variants=a.cell_variants,
+                   explore_episode_prob=0.0, archive_path=run_archive_copy(a.archive, run_dir) if a.grow_archive else None,
                    sticky_actions=0.0, n_threads=a.n_threads, dense_infos=True, seed=a.seed, **knobs))
     N = a.group * a.groups
     NX = N + a.explorers              # explorers ride along in the same batch, outside the buffers
@@ -653,7 +750,7 @@ def main():
         print('[grpo] WARNING: --demo-share needs --grow-archive (cell entries are only detected when the env archives); demos will never be recorded', flush=True)
     eval_env.reset()
     from device_support import resolve_device
-    device = torch.device(resolve_device('cuda'))
+    device = torch.device(resolve_device(a.device or cfg.get('device', 'cuda:0')))
     model = build_model(params, cfg, env.observation_space.shape, a.init).to(device)
     opt = torch.optim.Adam(model.parameters(), lr=a.lr)
     prompts = Prompts(env, a.archive, a.door_share, winners_only=a.winners_only); prompts.demo_share = a.demo_share
@@ -661,8 +758,6 @@ def main():
         prompts.load_dump(a.init_prompts)
     rng = np.random.RandomState(a.seed)
 
-    run_dir = os.path.join('runs', f'{a.run_name}_{time.strftime("%d-%H-%M-%S")}')
-    os.makedirs(os.path.join(run_dir, 'nn'), exist_ok=True)
     write_launch_record(run_dir, sys.argv, ec, vars(a))
     writer = SummaryWriter(os.path.join(run_dir, 'summaries'))
     print(f'[grpo] {N} envs = {a.groups} groups x {a.group}; horizon {a.horizon}; run {run_dir}')
@@ -708,10 +803,10 @@ def main():
         # ... and only for links near the door frontier: imitation on demos
         # all over the level (weight 0.1) broke pipe-1 entry within 4 iterations
         bc_ok = np.array([chosen[i // a.group][0] == 'demo' and prompts.near_frontier(chosen[i // a.group][1]) for i in range(N)])
-        # soft prefix: in half of each demo group the first free step takes
-        # the demo's own next action (the state still matches the demo
-        # there) and the second with prob 1/2; hits stop being luck. The
-        # unhinted half alone decides the tail.
+        # soft prefix: in half of each demo group every remaining demo step
+        # after the forced prefix takes the demo's own action with prob
+        # --hint; hits stop being luck. The unhinted half alone decides the
+        # tail.
         full_acts = [chosen[i // a.group][4] if chosen[i // a.group][0] == 'demo' else None for i in range(N)]
         hint_env = np.array([(i % a.group) < a.group // 2 for i in range(N)]) & (plen > 0) & (a.hint > 0)
         model.eval()
@@ -749,19 +844,16 @@ def main():
             bc_buf[t] = alive & (fz >= 0) & (t >= plen - 2) & bc_ok   # ... but the last 2 of frontier links are imitated (the run's own explorer demos)
             _, r, d_all, inf = env.step(np.concatenate([act_buf[t], np.zeros(a.explorers, np.int64)]) if a.explorers else act_buf[t])
             obs = env.obs_u8_stack()[:N]; r = r[:N]; d = d_all[:N]
-            if a.outcome == 'clear':
-                # sparse outcome: only the level-clear reward. With the summed
-                # reward the learnability score followed progress variance
-                # (rollouts from early cells die or run the whole level) and
-                # 79% of the groups trained survival while the warp-area
-                # prompts, whose std barely moves, got 9% (Mario_GRPO42)
-                r = env.last_terms.get('clear', np.zeros(NX, np.float32))[:N]
-                if a.outcome_progress > 0:
-                    # retention: door groups never clear, so with the clear
-                    # term alone the main-level running was not trained and
-                    # decayed (door eval mean max x 3250 -> 1473 in 500
-                    # iterations); a small progress weight keeps them live
-                    r = r + a.outcome_progress * env.last_terms.get('progress', np.zeros(NX, np.float32))[:N]
+            # --outcome clear, sparse outcome: only the level-clear reward. With
+            # the summed reward the learnability score followed progress
+            # variance (rollouts from early cells die or run the whole level)
+            # and 79% of the groups trained survival while the warp-area
+            # prompts, whose std barely moves, got 9% (Mario_GRPO42).
+            # --outcome-progress, retention: door groups never clear, so with
+            # the clear term alone the main-level running was not trained and
+            # decayed (door eval mean max x 3250 -> 1473 in 500 iterations); a
+            # small progress weight keeps them live
+            r = step_outcome(env, r, N, a.outcome, a.outcome_progress)
             ec = env.entered_cell
             for i in range(N):
                 # only while the rollout is alive: a finished env is reset to
@@ -791,9 +883,7 @@ def main():
                 mask_buf[t + 1:] = 0; rew_buf[t + 1:] = 0; bc_buf[t + 1:] = False   # else stale samples from the last iteration get trained on
                 break
         env.freeze_door_seen(False)
-        frames += NX * H * 4
-        if a.grow_archive:
-            prompts.refresh(env.archive)
+        frames += NX * (t + 1) * 4          # the steps actually taken (the loop breaks when every rollout is done)
         R = rew_buf.sum(0)                                        # outcome per rollout
         adv, n_live_groups = outcome_advantages(R, a.groups, a.group, a.no_std)
         for g in range(a.groups):
@@ -813,6 +903,10 @@ def main():
                 prompts.update(chosen[g][0], float(s))
                 if isinstance(chosen[g][0], str) and chosen[g][0].startswith('door:'):
                     prompts.note_door(chosen[g][0][5:], float(maxx[sl].mean()))
+        if a.grow_archive:
+            # after the credit above: a refresh that prunes cells must not run
+            # between sampling a prompt and crediting it
+            prompts.refresh(env.archive, won=env._won)
         if a.rtg:
             # temporal credit: discounted reward-to-go per step, normalised
             # within the group AT THAT STEP (all rollouts of a group share
@@ -823,7 +917,10 @@ def main():
             for t in range(H - 1, -1, -1):
                 run = rew_buf[t] + a.gamma * run * mask_buf[t]
                 G[t] = run
-            adv_t = rtg_advantages(G, a.groups, a.group, a.no_std)
+            adv_t = rtg_advantages(G, mask_buf, a.groups, a.group, a.no_std)
+            # live = any non-zero advantage (the outcome count above says
+            # nothing about the per-step advantages actually trained)
+            n_live_groups = int((adv_t.reshape(H, a.groups, a.group) != 0).any(axis=(0, 2)).sum())
         # ---- update ----
         model.train()
         T = H * N
@@ -852,7 +949,7 @@ def main():
                 lp = dist.log_prob(ac[idx]); ratio = torch.exp(log_ratio(lp, olp[idx]))
                 A = ad[idx]
                 cv = clipv[idx]
-                pg = -torch.min(ratio * A, torch.max(torch.min(ratio, 1 + cv), 1 - cv) * A).mean()
+                pg, cfrac = clip_objective(ratio, A, cv)
                 ent = dist.entropy().mean()
                 loss = pg - a.entropy * ent
                 if a.bc > 0 and len(bci) > 0:
@@ -867,7 +964,7 @@ def main():
                 with torch.no_grad():
                     stats['loss'] += pg.item(); stats['ent'] += ent.item()
                     stats['kl'] += (olp[idx] - lp).mean().item()
-                    stats['clipfrac'] += ((ratio - 1).abs() > a.clip).float().mean().item(); stats['n'] += 1
+                    stats['clipfrac'] += cfrac.item(); stats['n'] += 1
         n_upd = max(stats['n'], 1)
         door = np.array([isinstance(chosen[i // a.group][0], str) and chosen[i // a.group][0].startswith('door') for i in range(N)])
         el = time.time() - t0
@@ -906,12 +1003,6 @@ def main():
             prompts.note_clears(ev)
             extra = ' '.join(f'{k[6:]}:{ev[k]:.2f}' for k in ev if k.startswith('clear_'))
             print(f'  [eval] door: mean_x {ev["mean_x"]:.0f} max_x {ev["max_x"]:.0f} victory {ev["victory"]:.3f} clear {ev["clear"]:.2f} loops {ev["loop"]:.2f} {extra}', flush=True)
-            if a.fullgame_every and it % a.fullgame_every == 0:
-                fg = full_game_eval(model, cfg, device, 16, seed=a.seed * 100000 + it + 2)
-                for k, v in fg.items():
-                    writer.add_scalar(f'eval/fullgame_{k}', v, it)
-                lv = lambda g: '%d-%d' % (g // 4 + 1, g % 4 + 1)
-                print(f'  [fullgame] 3 lives from the start: level reached mean {fg["level_mean"]:.1f} ({lv(int(round(fg["level_mean"])))}) max {lv(fg["level_max"])} victory {fg["victory"]:.3f}', flush=True)
             # prompt state on disk for inspection (demos, tails, per-demo
             # success history, learnability scores)
             with open(os.path.join(run_dir, 'nn', 'prompts.pkl'), 'wb') as f:
@@ -924,6 +1015,15 @@ def main():
             # numbered copy per eval: clips / ghosts for ANY step can be
             # rendered later (tools/clip_watcher.py, tools/ghosts.py)
             torch.save(ck, os.path.join(run_dir, 'nn', 'grpo_it%06d.pth' % it))
+        # on its own schedule: nested in the door eval it only ran when
+        # --fullgame-every was a multiple of --eval-every
+        if a.fullgame_every and it % a.fullgame_every == 0:
+            model.eval()
+            fg = full_game_eval(model, cfg, device, 16, seed=a.seed * 100000 + it + 2)
+            for k, v in fg.items():
+                writer.add_scalar(f'eval/fullgame_{k}', v, it)
+            lv = lambda g: '%d-%d' % (g // 4 + 1, g % 4 + 1)
+            print(f'  [fullgame] 3 lives from the start: level reached mean {fg["level_mean"]:.1f} ({lv(int(round(fg["level_mean"])))}) max {lv(fg["level_max"])} victory {fg["victory"]:.3f}', flush=True)
         writer.flush()
     torch.save({'model': model.state_dict(), 'iter': it, 'frames': frames}, os.path.join(run_dir, 'nn', 'grpo_last.pth'))
     env.close(); eval_env.close()
