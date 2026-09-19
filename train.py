@@ -39,6 +39,20 @@ def register_mario_env():
     })
 
 
+def fresh_archive_conflict(config, checkpoint, resume_archive):
+    """Error text if a FRESH run would silently continue an old archive: the
+    native env loads whatever file sits at env_config.archive_path, so a
+    relaunch of a config (runs normally start from scratch) inherited the
+    previous run's cells, wins and tries."""
+    import os
+    path = (config['params']['config'].get('env_config') or {}).get('archive_path')
+    if path and os.path.exists(path) and not checkpoint and not resume_archive:
+        return (f'{path} exists: a fresh run would continue that archive. Move it '
+                f'next to its run (runs_archive/<run>/), rename archive_path, or '
+                f'pass --resume-archive to continue it on purpose')
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(description='Train Mario PPO agent')
     parser.add_argument('--config', type=str, default='configs/mario_ppo_random_stages.yaml',
@@ -66,6 +80,9 @@ def main():
                         help='Override the config device (cuda:0, mps, cpu). '
                              'A CUDA device on a machine without CUDA falls '
                              'back to mps (Apple Silicon) or cpu')
+    parser.add_argument('--resume-archive', action='store_true',
+                        help='Allow a fresh run (no --checkpoint) to continue '
+                             'the existing archive file at env_config.archive_path')
     args = parser.parse_args()
 
     register_mario_env()
@@ -87,6 +104,9 @@ def main():
             parser.error(f'--minibatch-size {args.minibatch_size} does not divide '
                          f'num_actors * horizon_length = {batch}')
         cc['minibatch_size'] = args.minibatch_size
+    err = fresh_archive_conflict(config, args.checkpoint, args.resume_archive)
+    if err:
+        parser.error(err)
     if args.device:
         config['params']['config']['device'] = args.device
     config['params']['config']['device'] = resolve_device(

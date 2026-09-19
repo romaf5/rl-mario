@@ -376,7 +376,9 @@ class MarioNativeVecEnv(IVecEnv):
         self.play_mode = bool(play_mode)
         # SHARED self-restart archive: all envs contribute and draw from one
         # pool (per-env archives dilute frontier discovery at large N)
-        self.archive = {}                           # cell -> [state, uses]
+        # cell -> [states, uses, best timer, policy wins, policy tries,
+        #          explorer wins, explorer walks, early deaths]
+        self.archive = {}
         if archive_path and os.path.exists(archive_path):
             import pickle
             with open(archive_path, 'rb') as f:
@@ -390,6 +392,13 @@ class MarioNativeVecEnv(IVecEnv):
                                if len(e) > 4}
             self.explore_wins = {c: e[5] for c, e in self.archive.items()
                                  if len(e) > 5 and e[5]}
+            # explorer walk counts and early deaths (entries [6] / [7]): a
+            # reload used to make every cell 'fresh' again (run j: 7810 cells
+            # x 60 walks re-walked before any new cell) and forget doomed ones
+            self.explore_walks = {c: e[6] for c, e in self.archive.items()
+                                  if len(e) > 6 and e[6]}
+            self.cell_early = {c: e[7] for c, e in self.archive.items()
+                               if len(e) > 7 and e[7]}
         self.ep_cells = [set() for _ in range(n)]
         self._sbuf = ctypes.create_string_buffer(self.state_size)
         if archive_path:
@@ -1320,11 +1329,13 @@ class MarioNativeVecEnv(IVecEnv):
             # then dropped their try counts -- the failure weight of the
             # hardest (never-winning) cells collapsed on every reload
             for c, e in self.archive.items():
-                while len(e) < 6:
+                while len(e) < 8:
                     e.append(0)
                 e[3] = self.cell_wins.get(c, 0)
                 e[4] = self.cell_tries.get(c, 0)
                 e[5] = self.explore_wins.get(c, 0)
+                e[6] = self.explore_walks.get(c, 0)
+                e[7] = self.cell_early.get(c, 0)
             tmp = self.archive_path + '.tmp'
             with open(tmp, 'wb') as f:
                 pickle.dump(self.archive, f)

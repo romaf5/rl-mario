@@ -25,6 +25,9 @@ Properties:
   * archive hygiene: a cell in use by another env is not pruned, a cell that
     left the archive is never credited again (stale counters), and a refresh
     stores no byte-identical duplicate state;
+  * the archive file keeps explorer walk counts and early deaths across a
+    reload (every cell was 'fresh' again), and a fresh train.py run refuses
+    to continue an existing archive file silently;
 """
 import os, sys
 import numpy as np, yaml
@@ -298,6 +301,25 @@ dups = sum(len(e[0]) - len(set(e[0])) for e in env.archive.values())
 check('archive: identical envs on identical inputs store no duplicate states (%d duplicates in %d cells)'
       % (dups, len(env.archive)), len(env.archive) > 5 and dups == 0, dups)
 env.close()
+
+# ---------------------------------------------------------------- persistence
+import tempfile
+path = os.path.join(tempfile.mkdtemp(), 'archive.pkl')
+env, obs = make(self_restart_prob=1e-6, archive_path=path)
+for s in range(40):
+    env.step(np.array([3]))
+c0 = list(env.archive)[0]
+env.explore_walks[c0] = 17; env.cell_early[c0] = 5
+env.close()
+env, obs = make(self_restart_prob=1e-6, archive_path=path)
+check('persistence: explorer walks and early deaths survive a save and reload (%s, %s)'
+      % (env.explore_walks.get(c0), env.cell_early.get(c0)), env.explore_walks.get(c0) == 17 and env.cell_early.get(c0) == 5)
+env.close()
+import train
+cfg = {'params': {'config': {'env_config': {'archive_path': path}}}}
+check('persistence: a fresh train.py run refuses an existing archive file', train.fresh_archive_conflict(cfg, None, False))
+check('persistence: --checkpoint or --resume-archive continue it',
+      not train.fresh_archive_conflict(cfg, 'x.pth', False) and not train.fresh_archive_conflict(cfg, None, True))
 
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)
