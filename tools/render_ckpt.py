@@ -23,9 +23,38 @@ def build(cfg_path, ck_path):
                        'normalize_value': cfg['normalize_value'], 'normalize_input': cfg['normalize_input']})
     ck = torch.load(ck_path, map_location='cpu', weights_only=False)
     sd = {k.replace('_orig_mod.', ''): v for k, v in ck['model'].items()}
-    missing, unexpected = model.load_state_dict(sd, strict=False)
-    print('[ckpt] %s  iter/epoch %s  missing %d unexpected %d' % (ck_path, ck.get('iter', ck.get('epoch')), len(missing), len(unexpected)))
+    # strict: with strict=False a wrong --config silently left random layers
+    model.load_state_dict(sd)
+    print('[ckpt] %s  iter/epoch %s' % (ck_path, ckpt_step(ck)))
     model.eval(); return model, cfg
+
+
+def ckpt_step(ck):
+    """Training step of a checkpoint dict: GRPO saves 'iter', rl_games 'epoch'."""
+    return int(ck.get('iter', ck.get('epoch', 0)) or 0)
+
+
+def clip_env_config(cfg, level):
+    """Env kwargs of a clip from `level`'s door: the config's env under the
+    eval overrides, 3 lives. The config's route (route_levels, else its
+    level list) stays the route: random_stages=[level] alone made every
+    legal exit of a route config a terminal wrong exit."""
+    ec = dict(cfg['env_config'])
+    route = list(ec.get('route_levels') or ec.get('random_stages') or [])
+    for k in ('name', 'action_type', 'archive_path', 'video_levels', 'video_level_steps', 'backend'):
+        ec.pop(k, None)
+    ec.update(random_stages=[level], route_levels=route or None, sticky_actions=0, explore_eps=0,
+              self_restart_prob=0, reset_noops=0,
+              episode_life=False)      # a clip plays all 3 lives; the training config ends episodes per life
+    return ec
+
+
+def end_cause(info, step, max_steps):
+    return ('victory' if info.get('victory') else 'wrong exit' if info.get('wrong_exit')
+            else 'level cleared' if info.get('stages_cleared', 0) > 0
+            else 'game over' if info.get('life') == 255 else 'loop' if info.get('loop_timeout')
+            else 'step limit' if step >= max_steps - 1
+            else 'timeout' if info.get('timeout') else 'running')
 
 
 def main():
@@ -38,39 +67,39 @@ def main():
     a = ap.parse_args()
     ck = glob.glob(a.ckpt)[0] if '*' in a.ckpt else a.ckpt
     model, cfg = build(a.config, ck)
-    ec = dict(cfg['env_config']); [ec.pop(k, None) for k in ('name', 'action_type', 'archive_path')]
-    ec.update(random_stages=[a.level], sticky_actions=0, explore_eps=0, self_restart_prob=0, reset_noops=0,
-              episode_life=False)      # a clip plays all 3 lives; the training config ends episodes per life
+    ec = clip_env_config(cfg, a.level)
     torch.manual_seed(a.seed)
     best = None
     for ep in range(a.episodes):
         env = NativeEvalEnv(**ec); v = env.v; v._raw_steps = True; v.hold_on_done = True      # hack-free, no reset after done
         obs = env.reset(); v.lib.benv_save(v.env, 0, v._sbuf); start = bytes(v._sbuf.raw)
-        frames, acts, total, info = [], [], 0.0, {}
+        frames, acts, total, info, mx = [], [], 0.0, {}, 0
         for step in range(a.max_steps):
             with torch.no_grad():
                 logits = model({'obs': torch.from_numpy(obs[None]).float(), 'is_train': False})['logits']
             act = int(logits.argmax()) if a.greedy else int(torch.distributions.Categorical(logits=logits).sample())
             obs, r, done, info = env.step(act); total += r; acts.append(act); frames.extend(env.frames4)
+            # max over ALL lives: info's max_x_pos restarts with every life
+            mx = max(mx, int(info.get('max_x_pos', 0)))
             if done:
                 for _ in range(240 if info.get('victory') else a.outro):    # ending / game-over screen keeps playing
                     obs, r, _d, info2 = env.step(0); frames.extend(env.frames4)
                 break
-        cause = ('victory' if info.get('victory') else 'game over' if info.get('life') == 255 else 'loop' if info.get('loop_timeout')
-                 else 'step limit' if step >= a.max_steps - 1
-                 else 'timeout' if info.get('timeout') else 'running')
-        print('episode %d: %d steps, max x %d, reward %.0f, ended by %s' % (ep, len(acts), info.get('max_x_pos', 0), total, cause))
+        cause = end_cause(info, step, a.max_steps)
+        print('episode %d: %d steps, max x %d, reward %.0f, ended by %s' % (ep, len(acts), mx, total, cause))
         env.close()
-        if best is None or info.get('max_x_pos', 0) > best[0]:
-            best = (info.get('max_x_pos', 0), frames, acts, start, cause, total)
+        if best is None or mx > best[0]:
+            best = (mx, frames, acts, start, cause, total)
     max_x, frames, acts, start, cause, total = best
     run_dir = os.path.dirname(os.path.dirname(ck))
     out = a.out or os.path.join(run_dir, 'videos', 'manual_%s_x%d.mp4' % (os.path.basename(ck)[:-4], max_x))
     os.makedirs(os.path.dirname(out) or '.', exist_ok=True)
     import imageio
     imageio.mimsave(out, frames, fps=60, macro_block_size=None)
+    # + the replay settings (tools/play.py --replay, tools/ghosts.py)
     np.savez_compressed(out[:-4] + '.npz', state=np.frombuffer(start, dtype=np.uint8), actions=np.array(acts, dtype=np.int16),
-                        level=a.level, raw=1, ckpt=ck)
+                        level=a.level, raw=1, ckpt=ck, episode_life=0,
+                        unpaid_timeout=int(ec.get('unpaid_timeout', 250)))
     print('wrote %s (%d frames, %.0fs at 60fps) + %s | max x %d, %s, reward %.0f' % (out, len(frames), len(frames) / 60, out[:-4] + '.npz', max_x, cause, total))
 
 

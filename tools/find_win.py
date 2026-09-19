@@ -10,7 +10,7 @@ tools/clip_watcher.py. Useful when the victory rate is a few percent.
 import argparse, glob, os, sys
 import numpy as np, torch
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0, ROOT); sys.path.insert(0, os.path.join(ROOT, 'tools'))
-from render_ckpt import build
+from render_ckpt import build, ckpt_step
 from clip_watcher import publish
 from mario_native_vecenv import MarioNativeVecEnv, NativeEvalEnv
 
@@ -23,8 +23,11 @@ def main():
     a = ap.parse_args()
     ck = glob.glob(a.ckpt)[0] if '*' in a.ckpt else a.ckpt
     model, cfg = build(a.config, ck)
-    step = int(torch.load(ck, map_location='cpu', weights_only=False).get('iter', 0))
+    step = ckpt_step(torch.load(ck, map_location='cpu', weights_only=False))   # 'iter' (GRPO) or 'epoch' (rl_games)
     ec = dict(cfg['env_config']); [ec.pop(k, None) for k in ('name', 'action_type', 'archive_path')]
+    # the config's route stays the route (random_stages=[level] alone would
+    # turn every legal exit of a route config into a wrong exit)
+    ec['route_levels'] = ec.get('route_levels') or ec.get('random_stages')
     # same settings as the trainer's clean door eval: no sticky actions, but the
     # config's reset_noops (random start delay -> varied enemy/Bowser RNG phase)
     ec.update(random_stages=[a.level], sticky_actions=0, explore_eps=0, self_restart_prob=0, n_threads=8, dense_infos=True)
@@ -70,7 +73,8 @@ def main():
             break
     env.close()
     run_dir = a.run or os.path.dirname(os.path.dirname(ck))
-    path, n = publish(run_dir, step, frames, win[1], start, info.get('max_x_pos', 0), total, info, a.level, pfr)
+    path, n = publish(run_dir, step, frames, win[1], start, info.get('max_x_pos', 0), total, info, a.level, pfr,
+                      unpaid_timeout=ec_r.get('unpaid_timeout', 250))
     print('published %s: %d frames, victory=%s, max x %d' % (path, len(frames), info.get('victory'), info.get('max_x_pos', 0)))
 
 

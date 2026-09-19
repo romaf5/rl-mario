@@ -10,16 +10,20 @@ the run's TensorBoard under gameplay/clip, like the rl_games runs get.
 import argparse, glob, os, sys, time
 import numpy as np, torch
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0, ROOT); sys.path.insert(0, os.path.join(ROOT, 'tools'))
-from render_ckpt import build
+from render_ckpt import build, ckpt_step
 from mario_native_vecenv import NativeEvalEnv
 from callbacks import MarioObserver
 
 
 def record(model, cfg, level, episodes, max_steps, seed, route=None, stop_on_level_change=False):
     """route: the run's level list (so a warp/exit into another route level is
-    a transition, not a wrong exit). stop_on_level_change: end the clip once
-    the level is left (per-level clips); else play on (full game)."""
-    ec = dict(cfg['env_config']); [ec.pop(k, None) for k in ('name', 'action_type', 'archive_path', 'video_levels')]
+    a transition, not a wrong exit; default: the config's route_levels, else
+    its level list -- random_stages=[level] alone made every legal exit of a
+    route config a wrong exit). stop_on_level_change: end the clip once the
+    level is left (per-level clips); else play on (full game)."""
+    ec = dict(cfg['env_config'])
+    route = route or ec.get('route_levels') or ec.get('random_stages')
+    [ec.pop(k, None) for k in ('name', 'action_type', 'archive_path', 'video_levels')]
     ec.update(random_stages=[level], sticky_actions=0, explore_eps=0, self_restart_prob=0, reset_noops=0, episode_life=False)
     if route:
         ec['route_levels'] = list(route)
@@ -28,13 +32,15 @@ def record(model, cfg, level, episodes, max_steps, seed, route=None, stop_on_lev
     for ep in range(episodes):
         env = NativeEvalEnv(**ec); v = env.v; v._raw_steps = True; v.hold_on_done = True; obs = env.reset()     # hack-free, no reset after done
         v.lib.benv_save(v.env, 0, v._sbuf); start = bytes(v._sbuf.raw)
-        frames, acts, total, info = [], [], 0.0, {}
+        frames, acts, total, info, mx = [], [], 0.0, {}, 0
         life_r, prev_life, per_frame_r = 0.0, None, []
         for step in range(max_steps):
             with torch.no_grad():
                 lg = model({'obs': torch.from_numpy(obs[None]).float(), 'is_train': False})['logits']
             act = int(torch.multinomial(torch.softmax(lg, -1), 1, generator=gen).item())   # sampled policy, seeded
             obs, r, done, info = env.step(act); total += r; acts.append(act); frames.extend(env.frames4)
+            # max over ALL lives: info's max_x_pos restarts with every life
+            mx = max(mx, int(info.get('max_x_pos', 0)))
             if prev_life is not None and info.get('life') != prev_life:
                 life_r = 0.0
             prev_life = info.get('life'); life_r += r
@@ -50,13 +56,13 @@ def record(model, cfg, level, episodes, max_steps, seed, route=None, stop_on_lev
                     obs, r, _d, _i = env.step(0); frames.extend(env.frames4); per_frame_r.extend([life_r] * len(env.frames4))
                 break
         env.close()
-        mx = info.get('max_x_pos', 0)
         if best is None or mx > best[0]:
             best = (mx, frames, acts, start, total, info, per_frame_r)
     return best
 
 
-def publish(run_dir, step, frames, acts, start, mx, total, info, level, per_frame_r=None, tag='gameplay/clip', name=None):
+def publish(run_dir, step, frames, acts, start, mx, total, info, level, per_frame_r=None, tag='gameplay/clip', name=None,
+            unpaid_timeout=None):
     from PIL import Image, ImageDraw
     import imageio
     from tensorboardX import SummaryWriter
@@ -67,7 +73,11 @@ def publish(run_dir, step, frames, acts, start, mx, total, info, level, per_fram
     vdir = os.path.join(run_dir, 'videos'); os.makedirs(vdir, exist_ok=True)
     base = os.path.join(vdir, (name or 'clip_%06d' % step) + '_x%d' % mx)
     imageio.mimsave(base + '.mp4', frames, fps=60, macro_block_size=None)
-    np.savez_compressed(base + '.npz', state=np.frombuffer(start, dtype=np.uint8), actions=np.array(acts, dtype=np.int16), level=level, raw=1, step=step)
+    # + the replay settings (a clip plays all lives: episode_life off; the
+    # unpaid cutoff decides its forced time-ups) for tools/play.py --replay
+    meta = dict(episode_life=0) if unpaid_timeout is None else dict(episode_life=0, unpaid_timeout=int(unpaid_timeout))
+    np.savez_compressed(base + '.npz', state=np.frombuffer(start, dtype=np.uint8), actions=np.array(acts, dtype=np.int16), level=level, raw=1, step=step,
+                        **meta)
     # all 60 fps frames, like the observer's clips: _gif_bytes picks every 2nd
     # (30 fps at 33 ms = real time) or every 4th for long clips (15 fps at
     # 67 ms = real time). Feeding it pre-thinned frames played 2-4x too fast.
@@ -99,9 +109,10 @@ def main():
                 stamp = os.path.getmtime(ck)
                 if stamp != last:
                     model, cfg = build(a.config, ck)
-                    step = int(torch.load(ck, map_location='cpu', weights_only=False).get('iter', 0))
+                    step = ckpt_step(torch.load(ck, map_location='cpu', weights_only=False))
                     mx, frames, acts, start, total, info, pfr = record(model, cfg, a.level, a.episodes, a.max_steps, seed=step)
-                    path, n = publish(run_dir, step, frames, acts, start, mx, total, info, a.level, pfr)
+                    path, n = publish(run_dir, step, frames, acts, start, mx, total, info, a.level, pfr,
+                                      unpaid_timeout=cfg['env_config'].get('unpaid_timeout', 250))
                     print(time.strftime('%H:%M:%S'), 'step %d: clip %s (%d frames, max x %d, R %.0f, gif %dKB)' % (step, os.path.basename(path), len(frames), mx, total, n // 1024), flush=True)
                     last = stamp
             except Exception as e:

@@ -13,37 +13,88 @@ episode ends.
 Trace sources (both replayable here and in tools/play.py --replay):
   <run>/eval_traces/epoch_N/ep_XX_<end>_x<max>.npz   clean door eval episodes
   <run>/eval_traces/epoch_N/video_<level>_NN.npz     the visualized clips
+
+A trace replays exactly only in an env with the RECORDING's settings: the
+run's config (--config: reward set, unpaid cutoff, page-reset rules, route)
+under the evaluation overrides, plus the trace's own stepping (raw) and life
+handling. Door eval episodes are single-life (episode_life on); clips play all
+lives (episode_life off), where the eval ends a stuck life by zeroing the game
+timer -- the same env rule fires again in the replay, so a clip with a forced
+time-up replays exactly (with the defaults -- unpaid cutoff 250 instead of the
+run's 500 -- the replay forced time-ups the recording never had).
+
+  python tools/ghosts.py --check --traces 'runs/<run>/eval_traces/epoch_*/*.npz'
+replays every trace and compares its x / lives per step with the recording
+(the npz's x for door episodes, the clip's .csv) instead of rendering.
 """
-import argparse, ctypes, glob, os, sys
+import argparse, csv, ctypes, glob, os, re, sys
 import numpy as np
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import yaml
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 from mario_native_vecenv import MarioNativeVecEnv
 
-ENV_KW = dict(full_game=True, self_restart_prob=0, sticky_actions=0, explore_eps=0,
-              reset_noops=0, n_threads=1, episode_life=False, dense_infos=True)
+DEFAULT_CONFIG = os.path.join(ROOT, 'configs', 'mario_ppo_native_42.yaml')
+
+
+def trace_env_kwargs(env_config, level, episode_life, unpaid_timeout=None):
+    """Env kwargs of the evaluation env that recorded a trace: the run's
+    env_config with the observer's eval overrides (no noise, no restarts or
+    explorers, full game, no end_on_stage_exit, the config's route)."""
+    ec = dict(env_config or {})
+    route = list(ec.get('route_levels') or ec.get('random_stages') or [])
+    for k in ('name', 'action_type', 'archive_path', 'video_levels',
+              'video_level_steps', 'backend'):
+        ec.pop(k, None)
+    ec.update(sticky_actions=0.0, explore_eps=0.0, self_restart_prob=0.0,
+              explore_episode_prob=0.0, reset_noops=0, n_threads=1,
+              dense_infos=True, route_levels=route or None, full_game=True,
+              explorer_envs=0, end_on_stage_exit=False,
+              random_stages=[level] if level else None,
+              episode_life=bool(episode_life))
+    if unpaid_timeout is not None:
+        ec['unpaid_timeout'] = int(unpaid_timeout)
+    return ec
 
 
 def load_trace(path):
+    """Trace + the recording settings it implies. Newer traces store
+    episode_life / unpaid_timeout; older ones: a door eval episode
+    (ep_*.npz, with per-step x) was single-life, every clip multi-life."""
     z = np.load(path, allow_pickle=True)
-    raw = int(z['raw']) if 'raw' in z else int('video' in os.path.basename(path))
-    return dict(name=os.path.basename(path)[:-4], state=bytes(np.asarray(z['state'], dtype=np.uint8)),
-                actions=[int(a) for a in z['actions']], raw=raw,
-                level=str(z['level']) if 'level' in z else None)
+    base = os.path.basename(path)[:-4]
+    raw = int(z['raw']) if 'raw' in z else int('video' in base)
+    door = 'x' in z.files or base.startswith('ep_')
+    m = re.match(r'(?:ep|video)_(\d-\d)_', base)
+    level = str(z['level']) if 'level' in z.files else (m.group(1) if m else None)
+    return dict(name=base, path=path, state=bytes(np.asarray(z['state'], dtype=np.uint8)),
+                actions=[int(a) for a in z['actions']], raw=raw, level=level,
+                episode_life=bool(int(z['episode_life'])) if 'episode_life' in z.files else door,
+                unpaid_timeout=int(z['unpaid_timeout']) if 'unpaid_timeout' in z.files else None,
+                x=[int(v) for v in z['x']] if 'x' in z.files else None)
+
+
+def make_replay_env(trace, env_config, level=None):
+    """A single native env in the trace's start state, set up as the env
+    that recorded it."""
+    lvl = trace['level'] or level
+    env = MarioNativeVecEnv('ghost', 1, **trace_env_kwargs(
+        env_config, lvl, trace['episode_life'], trace['unpaid_timeout']))
+    env.reset()
+    env.load_state(0, trace['state']); env._fetch_obs(0)
+    env._post_reset_init([0], env.ram)
+    env._ring[0] = (env.obs_u8[0].astype(np.float32) / 255.0)[..., None]
+    env._raw_steps = bool(trace['raw'])
+    env.hold_on_done = True     # the terminal step stays (no fresh episode)
+    return env
 
 
 class Replayer:
     """One emulator per trace, stepped in lockstep."""
 
-    def __init__(self, traces, level):
+    def __init__(self, traces, level, env_config=None):
         self.tr = traces
-        self.envs = []
-        for t in traces:
-            env = MarioNativeVecEnv('ghost', 1, random_stages=[level], **ENV_KW)
-            env.reset()
-            env.lib.benv_load(env.env, 0, t['state']); env._fetch_obs(0)
-            env._post_reset_init([0], env.ram)
-            env._raw_steps = bool(t['raw'])
-            self.envs.append(env)
+        self.envs = [make_replay_env(t, env_config, level) for t in traces]
         self.buf = ctypes.create_string_buffer(224 * 240 * 3)
         self.t = 0
         self.alive = [True] * len(traces)
@@ -89,9 +140,65 @@ def paste_ghost(base, crop, gx, gy, alpha, tint):
     base[y0:y1, x0:x1] = region.astype(np.uint8)
 
 
+def recorded_rows(trace):
+    """Per-step (x, life) of the recording: the clip's .csv next to the npz
+    (x, life), or the door episode's stored x (life unknown: None)."""
+    csv_path = trace['path'][:-4] + '.csv'
+    if os.path.exists(csv_path):
+        return [(int(r['x']), int(r['life'])) for r in csv.DictReader(open(csv_path))]
+    if trace['x'] is not None:
+        return [(x, None) for x in trace['x']]
+    return None
+
+
+def check_traces(traces, env_config, level):
+    """Replay each trace and compare x / lives step by step with the
+    recording; returns the number of traces that diverged. A step matches
+    when the lives agree and the recorded x equals the replay's reported x
+    or its RAM x; x is not compared on frames out of player control ($0E in
+    0-5 / 7: dying, pipes, the intermission). The env's reported x is HELD on
+    such frames and on transition garbage, so a trace recorded under other
+    hold rules differs there while the emulated game is identical; a real
+    divergence moves the in-play RAM x as well."""
+    bad = 0
+    for t in traces:
+        rec = recorded_rows(t)
+        if rec is None:
+            print('%-40s no recorded x to compare' % t['name']); continue
+        env = make_replay_env(t, env_config, level)
+        first, n_timeup, n_held = None, 0, 0
+        for k, a in enumerate(t['actions'][:len(rec)]):
+            _, _, _, infos = env.step(np.array([a]))
+            n_timeup += bool(env.last_signals.timeout[0])
+            info = infos[0]
+            x, life = int(info['x_pos']), int(info['life'])
+            r = env.ram[0]
+            ram_x = int(r[0x6D]) * 256 + int(r[0x86])
+            rx, rlife = rec[k]
+            in_play = not (r[0x0E] <= 5 or r[0x0E] == 7)
+            n_held += rx != x and (rx == ram_x or not in_play)
+            if first is None and ((in_play and rx != x and rx != ram_x)
+                                  or (rlife is not None and life != rlife)):
+                first = (k, x, ram_x, rx, life, rlife)
+        env.close()
+        ok = first is None
+        bad += not ok
+        print('%-40s %s  %d steps, %d unpaid cutoffs (episode_life %s, raw %d)%s%s'
+              % (t['name'], 'EXACT   ' if ok else 'DIVERGES', min(len(t['actions']), len(rec)),
+                 n_timeup, t['episode_life'], t['raw'],
+                 ', %d steps with another held x' % n_held if n_held else '',
+                 '' if ok else '  first at step %d: x %d (RAM %d) vs %d, life %s vs %s' % first))
+    return bad
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--traces', required=True, nargs='+', help='npz files or globs')
+    ap.add_argument('--config', default=DEFAULT_CONFIG,
+                    help='the config of the run that recorded the traces (its env_config '
+                         'is part of the replay: unpaid cutoff, reward set, route)')
+    ap.add_argument('--check', action='store_true',
+                    help='replay and compare with the recorded x / lives instead of rendering')
     ap.add_argument('--level', default=None, help='start level (default: from the trace, else 8-4)')
     ap.add_argument('--out', default='ghosts.gif')
     ap.add_argument('--fps', type=int, default=15)
@@ -106,10 +213,13 @@ def main():
         sys.exit('no traces matched')
     traces = [load_trace(p) for p in paths]
     level = args.level or traces[0]['level'] or '8-4'
+    env_config = yaml.safe_load(open(args.config))['params']['config']['env_config']
+    if args.check:
+        sys.exit(1 if check_traces(traces, env_config, level) else 0)
     T = min(args.max_steps, max(len(t['actions']) for t in traces))
 
     # pass 1: positions only -> pick the main run
-    rp = Replayer(traces, level); pos = []
+    rp = Replayer(traces, level, env_config); pos = []
     for _ in range(T):
         pos.append(rp.step())
     rp.close()
@@ -120,7 +230,7 @@ def main():
     # pass 2: render
     from PIL import Image, ImageDraw
     tints = [(255, 90, 90), (90, 160, 255), (90, 230, 120), (250, 200, 60), (220, 100, 230), (80, 220, 220)]
-    rp = Replayer(traces, level); frames = []
+    rp = Replayer(traces, level, env_config); frames = []
     for t in range(T):
         rows = rp.step()
         base = rp.frame(main_i)

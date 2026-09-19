@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """Reward inspector: play the TRAINING env yourself and see every reward.
 
-Exactly the env the agent trains in (4-frame steps, same reward terms and
-signals), without exploration noise or archive restarts. Loops, off-route
-entries and idle timeouts are flagged and paid but never reset the game
-(play mode), so you can watch what happens next.
+The env the agent trains in (4-frame steps, the config's reward terms and
+signals), without exploration noise or archive restarts -- and therefore
+without the novelty bonus (cell_bonus): it is paid against the training
+archive's door-episode counts, which only exist inside a training run.
+Loops, off-route entries and idle timeouts are flagged and paid but never
+reset the game (play mode), so you can watch what happens next.
+
+--replay of an eval trace (.npz) steps with the RECORDING's settings instead
+(its stepping mode, lives handling and unpaid cutoff; play mode off), so a
+clip whose stuck life was ended by a forced time-up replays exactly; a
+play-tool trace (.csv) replays its final timeline (branches abandoned by a
+rewind are dropped).
 
     venv_retro/bin/python tools/play.py --config configs/mario_ppo_native_84.yaml --level 8-4
 
@@ -35,7 +43,9 @@ import numpy as np
 import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from mario_native_vecenv import MarioNativeVecEnv  # noqa: E402
+from ghosts import load_trace, trace_env_kwargs  # noqa: E402
 
 ACT = ['NOOP', 'R', 'R+A', 'R+B', 'R+A+B', 'A', 'L', 'L+A', 'L+B', 'L+A+B',
        'DOWN', 'UP']
@@ -95,6 +105,24 @@ class Snap:
         env._fetch_obs(0)
 
 
+def final_branch(path):
+    """Actions of a play-tool trace's FINAL timeline. The csv logs every
+    executed step with its timeline position ('step' = 1 + the steps before
+    it); a rewind logs a 'rewound to here' row at the position it went back
+    to, and the steps after it overwrite the abandoned ones. Replaying every
+    row replayed the abandoned branches (and the rewind markers) too."""
+    idx = {a: i for i, a in enumerate(ACT)}
+    acts = []
+    for r in csv.DictReader(open(path)):
+        pos = int(r['step'])
+        if r.get('note') in ('rewound to here', 'jumped to bookmark'):
+            del acts[pos:]
+            continue
+        del acts[pos - 1:]
+        acts.append(idx[r['action']])
+    return acts
+
+
 class Inspector:
     def __init__(self, args):
         import pygame as pg
@@ -102,18 +130,36 @@ class Inspector:
         self.args = args
         cfg = yaml.safe_load(open(args.config))['params']['config']
         ec = dict(cfg['env_config'])
-        for k in ('name', 'action_type', 'archive_path'):
-            ec.pop(k, None)
-        ec.update(sticky_actions=0.0, explore_eps=0.0, self_restart_prob=0.0,
-                  explore_episode_prob=0.0, reset_noops=0, n_threads=1,
-                  dense_infos=True, episode_life=True, play_mode=True,
-                  unpaid_timeout=10 ** 9)
-        # --level changes only the START level; the config's level list stays
-        # the on-route set, so a warp out of 1-2 is still on-route
-        if args.level:
-            ec.setdefault('route_levels', list(ec.get('random_stages') or []))
-            ec['random_stages'] = [args.level]
+        if float(ec.get('cell_bonus', 0) or 0) > 0:
+            print('note: the novelty bonus (cell_bonus %g) is not paid here -- it needs the '
+                  'training archive\'s door counts' % float(ec['cell_bonus']))
+        self.trace = (load_trace(args.replay)
+                      if args.replay and args.replay.endswith('.npz') else None)
+        if self.trace is not None:
+            # the recording's env: an eval clip played all lives and ended a
+            # stuck one by a forced time-up at the run's unpaid cutoff -- the
+            # inspector's settings (single lives, no cutoff, play mode) made
+            # every such clip diverge right after its first time-up
+            t = self.trace
+            ec = trace_env_kwargs(ec, t['level'] or args.level, t['episode_life'],
+                                  t['unpaid_timeout'])
+            print('replay: recording settings for this session: episode_life %s, '
+                  'unpaid_timeout %s, play mode off' % (ec['episode_life'], ec.get('unpaid_timeout', 250)))
+        else:
+            for k in ('name', 'action_type', 'archive_path'):
+                ec.pop(k, None)
+            ec.update(sticky_actions=0.0, explore_eps=0.0, self_restart_prob=0.0,
+                      explore_episode_prob=0.0, reset_noops=0, n_threads=1,
+                      dense_infos=True, episode_life=True, play_mode=True,
+                      unpaid_timeout=10 ** 9)
+            # --level changes only the START level; the config's level list
+            # stays the on-route set, so a warp out of 1-2 is still on-route
+            if args.level:
+                ec.setdefault('route_levels', list(ec.get('random_stages') or []))
+                ec['random_stages'] = [args.level]
         self.env = MarioNativeVecEnv('play', 1, **ec)
+        if self.trace is not None:
+            self.env.hold_on_done = True   # the recording's last step stays on screen
         self.env.reset()
         self.rgb = ctypes.create_string_buffer(224 * 240 * 3)
 
@@ -156,24 +202,22 @@ class Inspector:
         hand over paused with the full rewind history: a play-tool trace
         (actions column) or an eval trace .npz (start state + actions)."""
         if path.endswith('.npz'):
-            z = np.load(path, allow_pickle=True)
-            acts = [int(a) for a in z['actions']]
+            t = self.trace
+            acts = list(t['actions'])
             # a trace recorded hack-free (raw=1: eval clips) only replays
             # frame-exactly with hack-free stepping; a training-style trace
             # (raw=0) with the hacked step
-            raw = bool(int(z['raw'])) if 'raw' in z else False
+            raw = bool(t['raw'])
             if raw != bool(self.env._raw_steps):
                 self.env._raw_steps = raw
                 print('replay: switching to %s stepping to match the trace' % ('hack-free' if raw else 'training-style'))
-            if 'state' in z:
-                self.env.load_state(0, bytes(z['state']))
-                self.env._fetch_obs(0)
-                self.env._post_reset_init([0], self.env.ram)
-                self.env._ring[0] = (self.env.obs_u8[0].astype(np.float32) / 255.0)[..., None]
-                self.snaps = [Snap(self.env)]
+            self.env.load_state(0, t['state'])
+            self.env._fetch_obs(0)
+            self.env._post_reset_init([0], self.env.ram)
+            self.env._ring[0] = (self.env.obs_u8[0].astype(np.float32) / 255.0)[..., None]
+            self.snaps = [Snap(self.env)]
         else:
-            idx = {a: i for i, a in enumerate(ACT)}
-            acts = [idx[r['action']] for r in csv.DictReader(open(path))]
+            acts = final_branch(path)
         for a in acts:
             self.step(a)
         self.paused, self.mode = True, 'paused'
@@ -232,6 +276,7 @@ class Inspector:
         self.tf.flush()
 
     def rewind(self, k=1):
+        rec = None
         for _ in range(k):
             if len(self.snaps) <= 1 or not self.records:
                 break
@@ -243,8 +288,11 @@ class Inspector:
                 self.cum[kk] = self.cum.get(kk, 0.0) - v
         self.last = self.records[-1] if self.records else None
         self.mode = 'rewinding'
+        # marks the timeline position for --replay (final_branch)
         if self.records:
             self.write_trace(self.records[-1], note='rewound to here')
+        elif rec is not None:
+            self.write_trace(dict(rec, step=0), note='rewound to here')
 
     def redo(self):
         if self.future:
@@ -450,6 +498,8 @@ class Inspector:
                         snap, recs, cum, total = self.bookmark
                         snap.restore(self.env)
                         self.records, self.cum, self.total = list(recs), dict(cum), total
+                        if self.records:
+                            self.write_trace(self.records[-1], note='jumped to bookmark')
                         self.future, self.snaps = [], [Snap(self.env)]
                         self.last = self.records[-1] if self.records else None
                         self.paused, self.mode = True, 'paused'
