@@ -30,14 +30,22 @@ python train.py --config configs/mario_ppo_random_stages.yaml
 python train.py --config configs/mario_ppo_cpu_smoke.yaml --video-freq 0
 
 # Resume from checkpoint (note: runs are normally started from scratch --
-# the user prefers clean epoch-0 TensorBoard charts)
-python train.py --checkpoint runs/<run_dir>/nn/<checkpoint>.pth
+# the user prefers clean epoch-0 TensorBoard charts). Always pass the run's
+# --config (without it train.py uses the retro random-stages config). A fresh
+# run refuses an existing archive file at env_config.archive_path unless
+# --resume-archive is given.
+python train.py --config configs/<config>.yaml --checkpoint runs/<run_dir>/nn/<checkpoint>.pth
 
 # Override training params
 python train.py --config configs/mario_ppo_random_stages.yaml --num-actors 16 --max-epochs 5000 --video-freq 200
 
-# Evaluate a trained agent on the sequential full game (headless, CPU)
-python play.py runs/<run_dir>/nn/<checkpoint>.pth --games 5 --save-video eval.mp4
+# Evaluate a trained agent: 3-life games on the native env with the sampled
+# policy (the config gives the network and env settings; --argmax, --backend retro)
+python play.py runs/<run_dir>/nn/<checkpoint>.pth --config configs/mario_ppo_native_42.yaml --level 4-2 --games 5 --save-video eval.mp4
+
+# Pre-launch check (3-5 min): the exact training env re-derived from RAM
+# (rewards, dones, time-outs, episode labels, archive keys); must report 0 violations
+python tools/audit_env.py --config configs/mario_ppo_native_42.yaml [--checkpoint <ckpt> --archive <archive.pkl>]
 
 # Re-run env backend validation (obs/reward/RAM semantics, stage states, smoke train)
 python validate_env.py
@@ -60,12 +68,15 @@ The project wraps rl_games' PPO implementation with custom Mario-specific compon
 
 **Native env** (`mario_native_vecenv.py`, all `mario_ppo_native_*` configs; the retro chain above is the reference implementation):
 - The C++ core (`native/`) steps N games per batch; rewards (`mario_rewards.py`, positive-only), dones, the Go-Explore archive (cells keyed by level, area, x-bin, y-band, swim, AreaType, tile signature, camera bin), self-restarts and frontier practice are numpy on top.
+- Frames (the coordinate system of x, highwater and cells) are (level, area, sub-area `$074F`, AreaType, swim): a pipe into a room of the same AreaType is a new frame. Death steps, not-in-control steps and the start cell pay nothing; leaving steps of a level change pay 0 (reward and `last_terms`).
+- `life_loss_reset` (default on, per-life training): a life loss ends the game too and the next episode is a fresh draw (door or archive restart); infos say `door` / `self_restart` / `continuation`. Frontier practice weights winning cells by learnability p(1-p) of the policy's own restarts.
 - `explorer_envs: K` adds K invisible explorer cores that random-walk from the least-walked archive cells (fresh cells first). Their steps never reach PPO, and training envs never walk: a walk inside a training env replaced the actions rl_games had already stored with their log-probs.
 - The archive only saves states of the trained levels (`random_stages`); `end_on_stage_exit` ends an episode at a paid route exit that leaves them (the 4-2 run ends at the warp into 8-1).
 
 **rl_games integration** (`train.py`):
 - Two registrations happen at startup: the vecenv type (`MARIO`) and the env config (`mario`). Both must be registered before `Runner.load()`.
 - `MarioObserver` (in `callbacks.py`) extends rl_games' `AlgoObserver` to log Mario-specific TensorBoard metrics and record gameplay videos. It hooks into `process_infos()` (per-step) and `after_print_stats()` (per-epoch). Video recording runs on a background thread with a CPU deep-copy of the model (never blocks training, never touches the GPU); the eval env comes from the overridable `_make_eval_env()`.
+- `rlg_patches.py` (rl_games 1.6.5, applied by train.py from custom config keys it pops): `shuffle_minibatches` (default on: rl_games never permuted), `value_norm_clip` (the value normaliser's clamp, default 5 sd; 4-2 uses 20 so the warp's return fits), checkpoints load onto the CPU.
 
 **Reward shaping** (`MarioProgressWrapper`):
 - Base reward replicates gym_super_mario_bros: x_pos delta + time penalty + death penalty, clipped to [-15, 15] per frame.
@@ -84,7 +95,7 @@ The project wraps rl_games' PPO implementation with custom Mario-specific compon
 - **Checkpoints do not transfer between backends**: nes_py-era checkpoints see a shifted pixel distribution on the retro backend (224x240 overscan-cropped screen vs 240x256) and play poorly. Train from scratch on the current backend.
 - Action space: COMPLEX_MOVEMENT (12 actions) includes running (B button) and down (pipes), essential for speedrunning.
 - The SMB ROM (`retro_integration/SuperMarioBros-Nes-v0/rom.nes`) is gitignored; restore it by copying from `venv/lib/python3.10/site-packages/gym_super_mario_bros/_roms/` and re-running `python -m retro.import` if needed.
-- **Mac (Apple Silicon)**: `device_support.resolve_device()` maps a configured `cuda:*` device to `mps` when CUDA is absent and keeps rl_games' `RunningMeanStd` buffers in float32 there (MPS has no float64); `--device` overrides. On an M2 Max, MPS is ~40x faster than the CPU for the PPO update. `n_threads` is clamped to the core count. Nothing changes on a CUDA machine. MPS syncs after every minibatch update; the log can still show `command buffer exited with error status ... ImpactingInteractivity`: macOS aborts the running compute command buffer when the window server needs the GPU. The aborts are intermittent -- bursts of 1-3, roughly once an hour over the first 3 h of Mac training; one burst came 11 s after a screen lock (23:27:40), another while the screen was already locked with no visible trigger -- and losses stayed finite. To avoid them launch with `--minibatch-size 1024` (a 4096 minibatch update holds the GPU ~340 ms on an M2 Max).
+- **Mac (Apple Silicon)**: `device_support.resolve_device()` maps a configured `cuda:*` device to `mps` when CUDA is absent and keeps rl_games' `RunningMeanStd` buffers in float32 there (MPS has no float64); `--device` overrides. On an M2 Max, MPS is ~40x faster than the CPU for the PPO update. `n_threads` is clamped to the core count. Nothing changes on a CUDA machine. MPS syncs after every minibatch update; the log can still show `command buffer exited with error status ... ImpactingInteractivity`: macOS aborts the running compute command buffer when the window server needs the GPU. The aborts come in bursts on a fixed clock (run i: every 49-51 min, run j: hourly at ~:51, not tied to screen locks) and losses stayed finite except once (a discarded buffer before a 0.075 KL spike). Launch with `--minibatch-size 1024` (a 4096 minibatch update holds the GPU ~340 ms on an M2 Max): it cut aborts per burst ~3.5x, not the burst rate. The per-minibatch sync patch only matters with use_diagnostics off.
 - Run names follow `Mario_<Experiment>` (e.g. `Mario_RandomStages`); start training runs from scratch, not from checkpoints (user preference: clean epoch-0 charts).
 
 ## Outputs
@@ -92,7 +103,7 @@ The project wraps rl_games' PPO implementation with custom Mario-specific compon
 - `runs/` holds only the runs currently training; finished experiments are moved, never deleted, to `runs_archive/<same name>` (`tensorboard --logdir runs_archive` to revisit)
 - Checkpoints: `runs/<name>_<timestamp>/nn/*.pth`
 - TensorBoard: `runs/<name>_<timestamp>/summaries/`
-- Custom metrics in TensorBoard: `mario/mean_x_pos`, `mario/best_stage_progress`, `mario/flag_get_rate` (primary progress metric under random-stage training)
-- Evaluation metrics to trust (sampled policy, seeded): `eval/level_clear/<lvl>` (32 single-life door episodes per level), `eval/game_progress_sampled_max` (last on-route level reached) / `eval/victory_rate_sampled` / `eval/off_route_exit_rate_sampled` (8 three-life games from 1-1). The clips play the same sampled policy, seeded per epoch (reproducible); their scalars carry a `_clip` suffix (one episode each, so they flip 0/1).
-- Offline checks (seconds, CPU): `tests/reward_bench.py` (reward semantics), `tests/novelty_bench.py`, `tests/grpo_bench.py`, `tests/eval_bench.py`, `tests/explorer_bench.py` (explorer cores, archive level gate, variant cap, end_on_stage_exit). Checks that replay human traces skip when `traces/` (gitignored) is absent.
+- Custom metrics in TensorBoard: `mario/clear/<lvl>` (on-route clears per episode, door + restart), `mario/clear_door/<lvl>` / `mario/clear_restart/<lvl>`, `mario/best_stage_progress` (furthest level reached by a clear), `mario/flag_get_rate` (episodes that left by the level's normal exit, on-route or not -- in 4-2 the flag into 4-3 is a wrong exit), `mario/mean_x_pos` (mixes frames: the warp area has its own x)
+- Evaluation metrics to trust (sampled policy, seeded): `eval/level_clear/<lvl>` (32 single-life door episodes per level; the end rates clear/death/timeout/wrong_exit/running sum to 1), `eval/game_progress_sampled_max` (last on-route level reached) / `eval/victory_rate_sampled` / `eval/off_route_exit_rate_sampled` (8 three-life games from 1-1). The clips play the same sampled policy, seeded per epoch (reproducible); their scalars carry a `_clip` suffix (one episode each, so they flip 0/1).
+- Offline checks (seconds, CPU): `tests/reward_bench.py` (reward semantics), `tests/env_bench.py` (2026-09-19 review fixes), `tests/novelty_bench.py`, `tests/grpo_bench.py`, `tests/eval_bench.py`, `tests/explorer_bench.py` (explorer cores, archive level gate, variant cap, end_on_stage_exit), `tests/vine_bench.py`, `tests/train_bench.py` (rl_games patches), `tests/retro_bench.py` (retro chain, vecenv under spawn and fork). Run all of them after any env/trainer change, plus `tools/audit_env.py` before a launch. Checks that replay human traces skip when `traces/` (gitignored) is absent.
 - Eval videos: `runs/<name>_<timestamp>/videos/epoch_*.mp4` (disk) + animated GIF in TensorBoard Images tab

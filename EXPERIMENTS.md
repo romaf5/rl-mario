@@ -316,3 +316,67 @@ All training stopped (user decision). What the two days established, in order:
 - No bootstrap at the unpaid cutoff for door episodes.
 - Frontier weights from real clears per cell instead of transitive wins.
 - Mario's on-screen x in the cell key.
+
+## 2026-09-18/19 — full review, differential audit, fixes (no training run)
+
+How it was checked: parallel code reviews (native core, env layer, rewards, PPO/rl_games, GRPO, retro chain, tools),
+then data audits: `tools/audit_env.py` (new: runs the exact training env with run j's policy and archive, re-derives
+every step's rewards / dones / time-outs / episode labels from RAM with independent scalar code), replay of every
+recorded trace (76 eval + 74 clip npz of runs h/i/j: all bitwise exact under their code, no drift), invariant checks of
+all five 4-2 archives (every key matches its states, save gate holds) and a sweep of every train.log and TB tag.
+
+What the earlier runs were actually training / measuring (run j unless noted):
+- **43% of all training steps were continued lives** after a death, labelled door episodes; 27% respawned at 4-2's
+  halfway point x 1576, behind the vine and the coin-cache pipe (the camera never scrolls back): clear rate 0 by
+  construction. They fed every `door_*` metric, `clear_door`, the curriculum EMA and the door-only novelty counts.
+- **Frontier practice locked onto 16 cells**: 59% of the restarts on winning cells (12067 / 20472) at a 4.5% policy win
+  rate (one cell 884 tries, 0 policy wins); the median winner got 3 tries. The failure-rate weight grew with every
+  failed try.
+- **The warp's return sat above the critic's ceiling**: rl_games clamps normalised values at +-5 sd; the 4700 warp
+  (47 scaled) was 6.4 sd above the mean (ceiling 37.5), so pre-warp targets were cut.
+- **Minibatches were never shuffled** (rl_games 1.6.5 builds PPODataset with permute=False): each minibatch = the same
+  block of whole trajectories every mini-epoch (8 envs at the Mac's 1024).
+- Smaller: death steps paid +2 cells / some progress (63 in 512k steps); the coin-cache room shared a frame with the
+  main area (`$074F` not in the frame); an unpaid cutoff on a warp's pending step lost the 4700; pruning deleted in-use
+  cells; 83 duplicate states in run j's archive; explorer walk counts were not persisted.
+- Metrics: `mario/flag_get_rate` was an exact copy of `clear/4-2` = `warp/4-2`; `clear/4-2` is per life (door +
+  restart: the per-restart rate was ~3x the logged 0.6-0.9%); `best_stage_progress` recorded the start level; eval
+  'running' ends (1500-step cap, 0-34% per eval) were not logged. Clips paid the death animation and pit falls.
+- GRPO: the full-game eval scored the correct 4-2 warp as a wrong exit (runs used --fullgame-every 0); 84% of the
+  loaded winners were never sampled (stuck at score 5.0); `--rtg` gave a lone surviving rollout +3.87 whatever its
+  return; `--grow-archive` credited wrong cells, dropped `--winners-only`, replaced the config's caps and rewrote the
+  input archive.
+- Mac: the retro chain could not start at all (os.sched_setaffinity; spawn copied the shared memory), so the CLAUDE.md
+  CPU smoke test and validate_env never ran here; play.py evaluated native-trained checkpoints on the retro renderer
+  (argmax agreement 0.74) with argmax.
+
+Corrections to entries above: vine-grown states ARE in the archives of h2 (19), i (212) and j (134), and 105 of 107
+successful random walks from j's vine states reach the warp area through the vine (16 Sep / 17 Sep notes said never);
+GRPO42clear warped 20.7 / 44 per 128 rollouts where the notes say 2-3 / 5-6 (outcome = 4700 x warps / 128); the MPS
+aborts are periodic (run i every 49-51 min, run j hourly at :51), not screen-lock driven; run j's archive had 7810
+cells and 2228 winners (winners were 0 until epoch 200); h2 ran 68 min, not 9.5-10.5 h.
+
+Glitch marker (for the next idea, not changed): whether the coin-cache pipe warps is decided by the area pointer
+`$0750` (0x2F before the pipe's pointer object is decoded, 0x42 after; flips at camera x 1217 +- 2), not by Mario's
+on-screen x: 0 of 1358 DOWN probes from 0x42 states warped, 26 of 1028 from 0x2F states did. Camera bins <= 18 are
+always 0x2F, >= 20 always 0x42; bin 19 mixes both. `$0750` (or a camera-bin edge at 1217) in the cell key would make
+glitch-ready states their own cells.
+
+Fixed (one commit each, every fix with a bench check that fails on the old code; benches 0 FAIL, audit 0 violations):
+life_loss_reset; learnability p(1-p) frontier weights; value_norm_clip (4-2: 20) and minibatch shuffling
+(rlg_patches.py); no reward on death / not-in-control / start-cell steps and zeroed leaving-step terms; sub-area frames;
+no cutoff on a level-change step; archive hygiene; persistence + a fresh run refuses an existing archive file; no
+per-step archive scans; door-count decay across GRPO freezes; observer metrics; the GRPO fixes; the retro chain on
+macOS and its handshake; play.py / replay tools; the native renderer's sprite priority (see its commit).
+
+Left as they are, for later runs (one change per run): entropy_coef 0.02 (entropy stayed 2.0 of 2.48 through all of
+run j: near-uniform over 12 actions), GAE lambda 0.95 (~20-step credit vs ~300 steps from the glitch setup to the
+warp), value bootstrap at the unpaid cutoff (the dead-end zone is worth ~+40 vs 0 for a wrong exit), `$0750` in the
+cell key, doomed saved states (~5% die within 8 NOOPs; pruning is per cell), the tile signature seeing only Mario's
+bin (vine-grown and vine-less states share cells), GRPO rollouts never crediting cell_wins, a 1-up and a death in one
+step hiding the death, savestates being 90% ROM (1 GB archive rewritten every 180 s).
+
+**Mario_PPO42k** (next run, GPU box, from scratch): `python tools/audit_env.py --config configs/mario_ppo_native_42.yaml`
+(0 violations) then `python train.py --config configs/mario_ppo_native_42.yaml --video-freq 200`. Read first:
+episode mix (door vs restart), `mario/clear_restart/4-2`, `mario/clear_door/4-2`, `eval/level_clear/4-2`,
+`eval/level_running_rate/4-2` and the frontier spread (no cell above ~5% of the frontier draws).

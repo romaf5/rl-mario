@@ -12,7 +12,7 @@ Properties:
   * train.py pops the custom keys before rl_games sees them.
 """
 import os, sys, tempfile, types
-import numpy as np, torch, yaml
+import torch, yaml
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__))); sys.path.insert(0, ROOT)
 from rl_games.algos_torch import model_builder, running_mean_std as rms, torch_ext
 from rl_games.common import datasets
