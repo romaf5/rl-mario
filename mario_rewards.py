@@ -13,7 +13,7 @@ Design (docs/reward_redesign_proposals.md, decided with the user):
     of failing (suicide vs loop vs camping) whose sign depended on numbers
     nobody could justify.
   * progress pays for ground never covered in this life, once. Per frame
-    (level, area byte, AreaType, swim flag) the term keeps the highwater x;
+    (level, area, sub-area, AreaType, swim flag) the term keeps the highwater x;
     a step pays clip(x - hw, 0, cap). A page reset / wrong pipe drops Mario
     into ground already paid, so re-runs pay nothing -- no farm, and no
     loop detection needed to prevent one.
@@ -38,7 +38,7 @@ class Signals:
     n: int
     x: np.ndarray            # level x this step (page*256 + sub)
     x_last: np.ndarray       # x last step
-    frame: np.ndarray        # int64 frame id: (gp, area, atype, swim) packed
+    frame: np.ndarray        # int64 frame id: (gp, area, sub-area, atype, swim) packed
     frame_change: np.ndarray # frame differs from last step (transition)
     hold: np.ndarray         # teleport-scale x jump not yet confirmed: no pay
     t: np.ndarray            # game timer

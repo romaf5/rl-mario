@@ -8,6 +8,9 @@ Properties:
     is already the respawn), neither do the hack-free path's death animation,
     pit fall and life-resume step, nor standing in the start cell; the term
     breakdown of a leaving step is zeroed like its reward;
+  * a sub-area ($074F) is its own frame and archive spot: the coin-cache pipe
+    into 4-2's coin room is a transition (not a held teleport paying +20),
+    and 4-2's flag area and warp area are different frames;
 """
 import os, sys
 import numpy as np, yaml
@@ -103,7 +106,7 @@ env, obs = make(self_restart_prob=0.0)
 log = []
 for a in np.load(os.path.join(ROOT, 'tests', 'data', 'exit_flag_4-2.npy')).astype(int):
     obs, r, d, inf = env.step(np.array([a]))
-    log.append((float(r[0]), sum(float(v[0]) for v in env.last_terms.values()), bool(env.last_leaving[0])))
+    log.append((float(r[0]), sum(float(v[0]) for v in env.last_terms.values()), bool(getattr(env, 'last_leaving', np.zeros(1, bool))[0])))
     if d[0]:
         break
 lv = [t for t in log if t[2]]
@@ -112,6 +115,40 @@ check('rewards: the leaving steps of the flag run (%d) pay 0 and their term brea
 check('rewards: every step\'s term breakdown sums to its reward',
       all(abs(r - tot) < 1e-4 for r, tot, _ in log))
 env.close()
+
+# ---------------------------------------------------------------- sub-areas are frames
+import gzip
+env, obs = make(self_restart_prob=1e-6)            # archiving on (cell keys), practically no restarts
+env.load_state(0, gzip.open(os.path.join(ROOT, 'tests', 'data', 'coin_cache_pipe_4-2.state')).read())
+env._fetch_obs(0); env._post_reset_init([0], env.ram)
+key0, x0 = env.cell_of(0), int(env._x()[0])
+obs, r, d, inf = env.step(np.array([10]))           # DOWN into the coin-cache pipe
+sg = env.last_signals
+check('sub-area: the coin-cache pipe (x %d -> %d) is a frame change, not a held teleport' % (x0, sg.x[0]),
+      bool(sg.frame_change[0]) and not bool(sg.hold[0]) and int(sg.x[0]) > x0 + 600,
+      (bool(sg.frame_change[0]), bool(sg.hold[0]), int(sg.x[0])))
+check('sub-area: arriving in the coin room pays no progress (%.1f)' % env.last_terms['progress'][0],
+      float(env.last_terms['progress'][0]) == 0 and not bool(sg.page_reset[0]))
+for s in range(6):
+    env.step(np.array([0]))
+key1 = env.cell_of(0)
+check('sub-area: the coin room is its own archive spot (key slot 1 %d vs %d)' % (key1[1], key0[1]), key1[1] != key0[1],
+      (key0, key1))
+env.close()
+
+
+def arrival_frame(name, atype):
+    env, obs = make(self_restart_prob=0.0)
+    for a in np.load(os.path.join(ROOT, 'tests', 'data', name)).astype(int):
+        obs, r, d, inf = env.step(np.array([a]))
+        if int(env.last_signals.atype[0]) == atype:
+            f = int(env.last_signals.frame[0]); env.close(); return f
+    env.close()
+
+
+fw, ff = arrival_frame('vine_route_4-2.npy', 1), arrival_frame('exit_flag_4-2.npy', 1)
+check('sub-area: 4-2 warp area and flag area are different frames (%s vs %s)' % (fw, ff),
+      fw is not None and ff is not None and fw != ff)
 
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)

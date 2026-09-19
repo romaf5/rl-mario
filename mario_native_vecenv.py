@@ -594,12 +594,17 @@ class MarioNativeVecEnv(IVecEnv):
                  | (pstate == 0x06) | (yvp > 1))
 
     @staticmethod
-    def _frame_of(gp, area, atype, swim):
+    def _frame_of(gp, area, sub, atype, swim):
         """Frame id: the coordinate system x lives in. A level's sections
         that share it are monotone in x; anything else (pipe to a new
-        section, vine to a bonus area, water) starts a new frame."""
-        return (((np.asarray(gp, dtype=np.int64) * 256 + area) * 8 + atype)
-                * 2 + swim)
+        section, vine to a bonus area, water) starts a new frame. `sub` is
+        the sub-area ($074F, the area's offset in its type's table): $0760
+        is one value for a whole level, so a pipe into a room of the same
+        AreaType (4-2's coin room) used to be a same-frame teleport (paid
+        +20 after a hold, and the room's ground raised the main area's
+        highwater), and 4-2's flag area shared a frame with its warp area."""
+        return ((((np.asarray(gp, dtype=np.int64) * 256 + area) * 256 + sub)
+                 * 8 + atype) * 2 + swim)
 
     def _tile_sig(self, i, x):
         """Signature of the level geometry in Mario's current 128-px bin
@@ -625,12 +630,18 @@ class MarioNativeVecEnv(IVecEnv):
         archive save), regardless of whether it would be saved now."""
         r = self.ram[i]; x = int(r[0x6D]) * 256 + int(r[0x86])
         gp = min(max(int(r[0x75F]) * 4 + int(r[0x75C]), 0), 31)
-        cell = ('%d-%d' % (gp // 4 + 1, gp % 4 + 1), int(r[0x760]), x // self.cell_x_bin,
+        cell = ('%d-%d' % (gp // 4 + 1, gp % 4 + 1), self._area_key(r[0x760], r[0x74F]), x // self.cell_x_bin,
                 int(r[0x3B8]) // self.cell_y_band, int(r[0x704]), int(r[0x74E]),
                 self._tile_sig(i, x) if self.cell_tiles else 0)
         if self.cell_screen_bin > 0:
             cell = cell + ((int(r[0x71A]) * 256 + int(r[0x71C])) // self.cell_screen_bin,)
         return cell
+
+    @staticmethod
+    def _area_key(area, sub):
+        """Archive key slot 1: area ($0760) and sub-area ($074F), so a room
+        of the same AreaType is not a variant of the main area's spot."""
+        return int(area) * 256 + int(sub)
 
     def _tile_variants(self, cell):
         """Archived tile-signature variants of `cell`'s spot: every key slot
@@ -660,8 +671,8 @@ class MarioNativeVecEnv(IVecEnv):
             x = int(r[0x6D]) * 256 + int(r[0x86])
             gp = min(max(int(r[0x75F]) * 4 + int(r[0x75C]), 0), 31)
             x0[i] = x; y0[i] = int(r[0x3B8])
-            f0[i] = self._frame_of(gp, int(r[0x760]), int(r[0x74E]),
-                                   int(r[0x704]))
+            f0[i] = self._frame_of(gp, int(r[0x760]), int(r[0x74F]),
+                                   int(r[0x74E]), int(r[0x704]))
             self.x_last[i] = x; self.x_pending[i] = x; self.max_x[i] = x
             self.time_last[i] = (int(r[0x7F8]) * 100 + int(r[0x7F9]) * 10
                                  + int(r[0x7FA]))
@@ -799,9 +810,10 @@ class MarioNativeVecEnv(IVecEnv):
         # world 36, an endless water level); _gp() clips it to 31
         bad_world = self._field(0x75F) > 7
         life = self._field(0x75A); area = self._field(0x760)
+        sub = self._field(0x74F)
         atype = self._field(0x74E); swim = self._field(0x704)
         ypix = self._field(0x3B8)
-        frame = self._frame_of(gp, area, atype, swim)
+        frame = self._frame_of(gp, area, sub, atype, swim)
         frame_change = frame != self.prev_frame
         pstate = self._field(0x0E)
         # player control ($0E not in 0-5,7, not dying / dead / below the
@@ -918,7 +930,7 @@ class MarioNativeVecEnv(IVecEnv):
                         # tile variant of its own and filled the variant cap
                         continue
                     sig = int(zlib.crc32(grid.tobytes()) & 0xFFFF)
-                cell = ('%d-%d' % (g // 4 + 1, g % 4 + 1), int(area[i]),
+                cell = ('%d-%d' % (g // 4 + 1, g % 4 + 1), self._area_key(area[i], sub[i]),
                         int(x[i]) // self.cell_x_bin, int(ypix[i]) // self.cell_y_band,
                         int(swim[i]),
                         int(atype[i]),
