@@ -211,10 +211,11 @@ def check(cfg, D, vms, arch):
                 st['pending'] = gp if inc else -1
                 if good:
                     exp['clear'] = BASE + PER * max(delta - 1, 0)
-                for t in ('progress', 'cells', 'clear'):
-                    if abs(T[t][s][i] - exp[t]) > 1e-3:
-                        bad(f'{t}_term_mismatch', s, i, (round(T[t][s][i], 2), exp[t], 'death' if died else ''))
                 leaving = (inc and not good) or wrong
+                for t in ('progress', 'cells', 'clear'):
+                    e = 0.0 if leaving else exp[t]     # a leaving step pays nothing (term state still advances)
+                    if abs(T[t][s][i] - e) > 1e-3:
+                        bad(f'{t}_term_mismatch', s, i, (round(T[t][s][i], 2), e, 'death' if died else ''))
                 rew = L['rew'][s][i]
                 tot = sum(T[t][s][i] for t in TERMS)
                 if leaving and rew != 0:
@@ -329,9 +330,12 @@ def main():
     ap.add_argument('--seed', type=int, default=123)
     ap.add_argument('--device', default='mps')
     ap.add_argument('--check-cells', type=int, default=500, help='re-key the last N archive cells (0 = all)')
+    ap.add_argument('--save', default=None, help='also save the recording (npz) for offline inspection')
     args = ap.parse_args()
     cfg = yaml.safe_load(open(args.config))
     D, vms, arch = record(cfg, args)
+    if args.save:
+        np.savez_compressed(args.save, addr=np.array(ADDR), **D)
     viol = check(cfg, D, vms, arch)
     sys.exit(1 if viol else 0)
 

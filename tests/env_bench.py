@@ -11,6 +11,11 @@ Properties:
   * a sub-area ($074F) is its own frame and archive spot: the coin-cache pipe
     into 4-2's coin room is a transition (not a held teleport paying +20),
     and 4-2's flag area and warp area are different frames;
+  * life_loss_reset (per-life training): a life loss ends the game too and
+    the next episode is a fresh draw -- a restart that died past 4-2's
+    halfway point used to continue at x 1576 labelled a door episode; with
+    it off the continued life is neither a door episode nor a restart; the
+    multi-life eval still plays on after a death;
 """
 import os, sys
 import numpy as np, yaml
@@ -149,6 +154,55 @@ def arrival_frame(name, atype):
 fw, ff = arrival_frame('vine_route_4-2.npy', 1), arrival_frame('exit_flag_4-2.npy', 1)
 check('sub-area: 4-2 warp area and flag area are different frames (%s vs %s)' % (fw, ff),
       fw is not None and ff is not None and fw != ff)
+
+# ---------------------------------------------------------------- life loss = fresh draw
+env, obs = make(self_restart_prob=0.0)
+for a in np.load(os.path.join(ROOT, 'tests', 'data', 'vine_route_4-2.npy')).astype(int):
+    env.step(np.array([a]))
+    if int(env.last_signals.atype[0]) == 1:
+        break
+for s in range(10):
+    env.step(np.array([3]))
+env.lib.benv_save(env.env, 0, env._sbuf); deep = bytes(env._sbuf.raw); deep_x = int(env._x()[0])
+deep_cell = env.cell_of(0); env.close()
+
+
+def restart_then_die(**kw):
+    env = MarioNativeVecEnv('ebench', 1, **dict(EC, self_restart_prob=1.0, **kw))
+    env.archive = {deep_cell: [[deep], 0, 400]}
+    env.reset()
+    x_start = int(env._x()[0]); lab0 = (bool(env.is_door[0]), bool(env.was_restart[0]))
+    kill(env)
+    for s in range(10):
+        obs, r, d, inf = env.step(np.array([0]))
+        if d[0]:
+            break
+    out = dict(x_start=x_start, lab0=lab0, done=bool(d[0]), info_door=inf[0].get('door'),
+               x_next=int(env._x()[0]), door=bool(env.is_door[0]), restart=bool(env.was_restart[0]),
+               cont=bool(getattr(env, 'continuation', np.zeros(1, bool))[0]))
+    env.close()
+    return out
+
+
+o = restart_then_die()
+check('life loss: a restart from the warp area (x %d) that dies starts a fresh draw (next x %d, restart %s, door %s)'
+      % (o['x_start'], o['x_next'], o['restart'], o['door']),
+      o['lab0'] == (False, True) and o['done'] and o['x_next'] == o['x_start'] and o['restart'] and not o['door'], o)
+check('life loss: the ended restart reports door False', o['info_door'] is False, o['info_door'])
+o = restart_then_die(life_loss_reset=False)
+check('life loss (life_loss_reset off): the continued life (x %d) is neither a door episode nor a restart' % o['x_next'],
+      o['done'] and not o['door'] and not o['restart'] and o['cont'] and o['x_next'] != o['x_start'], o)
+ev = NativeEvalEnv(raw_steps=False, **{k: v for k, v in dict(EC, self_restart_prob=0.0, episode_life=False).items()
+                                       if k != 'dense_infos'})
+ev.reset()
+for s in range(20):
+    ev.step(3)
+lives0 = int(ev.v.ram[0, 0x75A]); kill(ev.v); dd = False
+for s in range(10):
+    obs, r, d, inf = ev.step(0); dd |= d
+check('life loss: the multi-life eval keeps playing after a death (lives %d -> %d, done %s)'
+      % (lives0, int(ev.v.ram[0, 0x75A]), dd), not dd and int(ev.v.ram[0, 0x75A]) == lives0 - 1)
+ev.close()
 
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)

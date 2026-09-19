@@ -126,7 +126,7 @@ class MarioObserver(AlgoObserver):
                  float(info.get('warped', False)),
                  float(info.get('victory', False)),
                  float(info.get('stages_cleared', 0)),
-                 float(not info.get('self_restart', False))))
+                 float(self._is_door(info))))
         if 'victory' in info:
             self.episode_victories.append(float(info['victory']))
         if 'page_resets' in info:
@@ -135,7 +135,7 @@ class MarioObserver(AlgoObserver):
             self.episode_loop_timeouts.append(float(info['loop_timeout']))
         if 'max_unpaid_gap' in info:
             self.episode_gaps.append(float(info['max_unpaid_gap']))
-        if 'self_restart' in info and not info['self_restart']:
+        if 'self_restart' in info and self._is_door(info):
             self.door_x.append(info.get('max_x_pos', 0))
         if 'timeout' in info:
             self.episode_timeouts.append(float(info['timeout']))
@@ -152,6 +152,13 @@ class MarioObserver(AlgoObserver):
         if game_res is not None:
             self.game_scores.update(
                 torch.from_numpy(np.asarray([game_res], dtype=np.float32)).to(self.algo.ppo_device))
+
+    @staticmethod
+    def _is_door(info):
+        """An episode from the level's door state. The native env says so
+        ('door'); a continued life after a restart's death used to count as
+        one (not a restart), although it respawns mid-level."""
+        return bool(info['door']) if 'door' in info else not info.get('self_restart', False)
 
     def _route_gps(self):
         """Level indices of the configured route (route_levels, else the

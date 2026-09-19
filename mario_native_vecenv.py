@@ -149,7 +149,7 @@ class MarioNativeVecEnv(IVecEnv):
                  credit_vertical=False, cell_max_variants=0, cell_bonus=0.0, cell_bonus_relative=True, cell_x_bin=128,
                  frontier_per_level=False, explore_fresh_uses=0, cell_screen_bin=0,
                  explorer_envs=0, end_on_stage_exit=False, archive_save_secs=60.0,
-                 cell_bonus_door_only=False, **unknown):
+                 cell_bonus_door_only=False, life_loss_reset=True, **unknown):
         assert action_type == 'complex'
         gone = [k for k in unknown if k in self.REMOVED_KWARGS]
         if gone:
@@ -293,6 +293,19 @@ class MarioNativeVecEnv(IVecEnv):
         # (8% warp from warp-area winners, half the episodes still wandering
         # after 700 steps, Mario_PPO42i ep 3500)
         self.cell_bonus_door_only = bool(cell_bonus_door_only)
+        # per-life training: every life loss ends the GAME too and the next
+        # episode is a fresh draw (door or archive restart). The continued
+        # life used to be labelled a door episode although it respawns at the
+        # level's halfway point after a death past it: in 4-2 that is x 1576,
+        # behind the vine and the coin-cache pipe (the camera never scrolls
+        # back), so no such life can clear -- 43% of run j's training steps
+        # were continued lives, 27% respawned at 1576 (clear rate 0). Lives
+        # are invisible to the policy (HUD cropped) anyway. The multi-life
+        # eval (episode_life False) and play mode keep playing on.
+        self.life_loss_reset = bool(life_loss_reset)
+        # a continued life (life_loss_reset off) is neither a door episode
+        # nor a restart: it credits no cell and is not a door sample
+        self.continuation = np.zeros(n, dtype=bool)
         self.door_seen = {}; self._seen_tick = 0
         # GRPO rollouts freeze the door counts (no decay, no growth) so the
         # bonus is the same function of the state for every rollout of a
@@ -422,6 +435,7 @@ class MarioNativeVecEnv(IVecEnv):
     def _reset_env(self, i, first=False):
         # self-restart from own archive?
         self.was_restart[i] = False; self.is_door[i] = True
+        self.continuation[i] = False
         self.start_cell[i] = None      # door episodes credit no cell
         self.explorer[i] = 0           # no macro-noise leak across episodes
         self.forced_timeup[i] = 0; self.last_stuck[i] = None
@@ -1070,6 +1084,8 @@ class MarioNativeVecEnv(IVecEnv):
                 # a single-level run ends at its paid route exit: the 4-2
                 # warp used to play on into 8-1, paying 8-1 ground
                 real_done = real_done | (good & ~np.isin(gp, self.train_gps))
+        if self.episode_life and self.life_loss_reset and not self.play_mode:
+            real_done = real_done | (life < self.lives)
         if self.play_mode:
             # inspection: flag, keep the highwater, keep playing
             real_done = real_done & ~(timeout | wrong_exit)
@@ -1135,6 +1151,10 @@ class MarioNativeVecEnv(IVecEnv):
                 'score': int(self.prev_score[i]),
                 'start_stage': self.start_stage[i],
                 'self_restart': bool(self.was_restart[i]),
+                # started from the level's door state (not an archive cell,
+                # not a continued life): what every door metric counts
+                'door': bool(self.is_door[i]),
+                'continuation': bool(self.continuation[i]),
                 'timeout': bool(timeout[i]),
                 'loop_timeout': bool(timeout[i] and self.after_reset[i]),
                 'page_reset': bool(page_reset[i]),
@@ -1223,10 +1243,12 @@ class MarioNativeVecEnv(IVecEnv):
         if soft_idx:
             self._post_reset_init(soft_idx, self.ram)
             for i in soft_idx:
-                # the restart cell's episode ended here; the next life is
-                # a door-like continuation and credits no cell
-                self.start_cell[i] = None; self.is_door[i] = True
-                self.was_restart[i] = False
+                # the ended life's episode is over; the next life continues
+                # the game (life_loss_reset off, or the multi-life eval): it
+                # credits no cell and is not a door episode (it respawns at
+                # the level start or its halfway point)
+                self.start_cell[i] = None; self.is_door[i] = False
+                self.was_restart[i] = False; self.continuation[i] = True
                 self._seed_cells([i])
                 self.explorer[i] = 0      # macro noise must not leak on
                 # new life = fresh frame stack
