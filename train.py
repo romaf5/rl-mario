@@ -144,20 +144,23 @@ def main():
     runner = Runner(algo_observer=observer)
     runner.load(config)
     runner.reset()
-    runner.run({
-        'train': True,
-        'play': False,
-        'checkpoint': args.checkpoint,
-        'sigma': None,
-    })
-    # a recording still running at the end (daemon thread inside the native
-    # core's threadpool) must finish before the interpreter tears the process
-    # down: exiting through it aborted with "terminate called without an
-    # active exception"
-    vt = getattr(observer, '_video_thread', None)
-    if vt is not None and vt.is_alive():
-        print('  [Video] waiting for the last recording to finish')
-        vt.join()
+    try:
+        runner.run({
+            'train': True,
+            'play': False,
+            'checkpoint': args.checkpoint,
+            'sigma': None,
+        })
+    finally:
+        # a recording still running at the end (daemon thread inside the
+        # native core's threadpool) must finish before the interpreter tears
+        # the process down: exiting through it aborted with "terminate called
+        # without an active exception". In `finally` so a SIGTERM (raised as
+        # SystemExit inside run()) waits too; bounded so a kill never hangs.
+        vt = getattr(observer, '_video_thread', None)
+        if vt is not None and vt.is_alive():
+            print('  [Video] waiting for the last recording to finish')
+            vt.join(timeout=300)
 
 
 if __name__ == '__main__':
