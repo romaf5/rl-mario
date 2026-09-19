@@ -1043,7 +1043,11 @@ class MarioNativeVecEnv(IVecEnv):
             page_reset & ~paid,
             np.maximum(self.unpaid, self.unpaid_timeout - self.page_reset_grace),
             self.unpaid)
-        timeout = self.unpaid >= self.unpaid_timeout
+        # a level change in progress never times out: its pending step pays 0
+        # by design, and a cutoff there lost the clear on the confirm step
+        # (the 4700 warp, bootstrapped as a time-out) or bootstrapped a wrong
+        # exit that is a real terminal
+        timeout = (self.unpaid >= self.unpaid_timeout) & ~inc & ~wrong_exit
         sig.timeout = timeout
         # the per-term breakdown of what was PAID: the raw terms of a leaving
         # step used to stay in it (index.csv totals +2 per wrong exit, GRPO's

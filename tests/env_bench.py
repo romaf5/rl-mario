@@ -20,6 +20,8 @@ Properties:
     simulated, cells it never converts no longer take the frontier draws
     (the failure-rate weight grew with every failed try and locked the
     top-k onto them), untried proven winners and ~40% cells do;
+  * the unpaid cutoff never fires on a level-change step: a cutoff landing on
+    the warp's pending step (which pays 0 by design) lost the 4700;
 """
 import os, sys
 import numpy as np, yaml
@@ -236,6 +238,29 @@ tot = sum(draws.values())
 check('frontier: cells the policy never converts get few draws (%s)' % draws,
       tot > 1000 and draws['dead'] < 0.1 * tot, draws)
 check('frontier: every untried proven winner gets practised', draws['fresh'] >= 8, draws)
+
+# ---------------------------------------------------------------- no cutoff on a level-change step
+acts = np.load(os.path.join(ROOT, 'tests', 'data', 'vine_route_4-2.npy')).astype(int)
+env, obs = make(self_restart_prob=0.0)
+pend = None
+for k, a in enumerate(acts):
+    env.step(np.array([a]))
+    if pend is None and int(env.last_signals.gp[0]) > 13:
+        pend = k                      # first step already inside 8-1: the pending step
+        break
+env.close()
+env, obs = make(self_restart_prob=0.0)
+res = None
+for k, a in enumerate(acts):
+    if k == pend:
+        env.unpaid[0] = env.unpaid_timeout - 1     # the cutoff would fire exactly on the pending step
+    obs, r, d, inf = env.step(np.array([a]))
+    if d[0]:
+        res = (k, float(r[0]), bool(inf.time_outs[0]), inf[0]['stages_cleared'])
+        break
+env.close()
+check('cutoff: an unpaid cutoff due on the warp\'s pending step waits for the confirm step (end %s)' % (res,),
+      pend is not None and res is not None and res[0] == pend + 1 and res[1] >= 4700 and not res[2] and res[3] == 1, res)
 
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)
