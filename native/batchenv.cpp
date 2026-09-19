@@ -258,6 +258,18 @@ void benv_set_ram(BatchEnv* e, int i, const uint8_t* ram) {
     smb_set_ram(e->cores[i], ram);
     e->post_game[i] = 0;
 }
+// copy out the PPU memory (2KB nametables, 32B palette, 256B OAM; null =
+// skip): a lockstep test seeds the reference emulator with it next to the
+// RAM, so both start pixel-identical instead of the reference showing its
+// own door state's palette-cycle phase / HUD digits until the game
+// rewrites them (tests/render_bench.py)
+void benv_get_ppu(BatchEnv* e, int i, uint8_t* vram, uint8_t* palette,
+                  uint8_t* oam) {
+    const Ppu& u = e->cores[i]->ppu;
+    if (vram) memcpy(vram, u.vram, sizeof(u.vram));
+    if (palette) memcpy(palette, u.palette, sizeof(u.palette));
+    if (oam) memcpy(oam, u.oam, sizeof(u.oam));
+}
 
 // hack-free single-env step: pure emulated frames so a reference
 // emulator fed the same actions stays in bitwise lockstep (video replay)
@@ -356,6 +368,25 @@ void benv_frames(BatchEnv* e, int i, int nframes, int buttons) {
 void benv_render(BatchEnv* e, int i, uint8_t* out240x224) {
     render_gray(*e->cores[i], out240x224);
 }
+// current frame as 240x224 NES palette indices (0-63): tests map them onto
+// the reference emulator's RGB palette for pixel-exact lockstep checks
+// (NES_PAL RGB is not invertible: several indices share a colour)
+void benv_render_idx(BatchEnv* e, int i, uint8_t* out240x224) {
+    render_idx(*e->cores[i], out240x224);
+}
+// the obs pipeline of step_env (GRAY_LUT, max-pool of the two frames, HUD
+// crop, 84x84 box resize) on two caller 240x224 palette-index frames: tests
+// run reference-emulator frames through it and compare with the obs
+// benv_step returned
+void benv_obs_from_idx(const uint8_t* idx_a, const uint8_t* idx_b,
+                       uint8_t* out84) {
+    static thread_local uint8_t mx[W * H];
+    for (int p = 0; p < W * H; p++) {
+        uint8_t a = GRAY_LUT[idx_a[p] & 0x3F], b = GRAY_LUT[idx_b[p] & 0x3F];
+        mx[p] = a > b ? a : b;
+    }
+    resize_area(mx, out84);
+}
 
 // render current state to 84x84 + RAM snapshot WITHOUT stepping any frames
 // (used after per-env resets)
@@ -368,5 +399,12 @@ void benv_obs(BatchEnv* e, int i, uint8_t* out84, uint8_t* ram_out) {
     memcpy(ram_out, e->cores[i]->ram, 0x800);
 }
 uint8_t* benv_ram(BatchEnv* e, int i) { return e->cores[i]->ram; }
+// per-env flag: the core halted on an illegal opcode (a corrupted state;
+// it no longer advances). Treat it as a done and reset the env -- a
+// benv_load clears it. Without that the frozen env earns nothing and the
+// unpaid-steps timeout resets it eventually.
+void benv_fault(BatchEnv* e, uint8_t* out) {
+    for (int i = 0; i < e->n; i++) out[i] = e->cores[i]->cpu.jammed ? 1 : 0;
+}
 
 }  // extern "C"

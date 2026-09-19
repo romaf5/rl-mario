@@ -138,3 +138,31 @@ if fail is None:
     print(f"end state: world={nr[0x75F]+1}-{nr[0x75C]+1} "
           f"x={int(nr[0x6D])*256+int(nr[0x86])} lives={nr[0x75A]}")
 renv.close()
+
+# fault handling: an illegal opcode (a corrupted state) halts that core --
+# frozen, reported by smb_jammed -- instead of abort()ing the process (the
+# whole trainer); loading a state revives it
+lib.smb_state_size.restype = ctypes.c_int
+lib.smb_save.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+lib.smb_load.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
+lib.smb_jammed.argtypes = [ctypes.c_void_p]
+buf = ctypes.create_string_buffer(lib.smb_state_size())
+lib.smb_save(core, buf)
+bad = bytearray(buf.raw)
+bad[4:6] = (0x0700).to_bytes(2, 'little')   # Core.cpu.pc -> $0700 (RAM)
+lib.smb_load(core, bytes(bad))
+native_ram()[0x700] = 0x02                  # KIL
+before = native_ram().copy()
+for _ in range(5):
+    lib.smb_frame(core, 0x80)
+jam_ok = lib.smb_jammed(core) == 1 and np.array_equal(native_ram(), before)
+lib.smb_load(core, buf.raw)
+jam_ok = jam_ok and lib.smb_jammed(core) == 0
+revived = native_ram().copy()
+for _ in range(30):
+    lib.smb_frame(core, 0x80)
+jam_ok = (jam_ok and lib.smb_jammed(core) == 0
+          and not np.array_equal(native_ram(), revived))   # the game runs again
+print('illegal opcode: core halted and frozen, revived by a state load:',
+      'PASS' if jam_ok else 'FAIL')
+sys.exit(0 if fail is None and jam_ok else 1)

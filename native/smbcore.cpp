@@ -457,9 +457,18 @@ int cpu_step(Core& c) {
     case 0xF8: p.d = true; break;
     case 0xEA: break;                                // NOP
     default:
-        fprintf(stderr, "smbcore: illegal opcode %02X at %04X\n",
-                op, (unsigned)(p.pc - 1));
-        abort();
+        // Undocumented opcode: SMB executes none (lockstep-verified), so
+        // this is a corrupted state (a bad savestate, a RAM hack gone
+        // wrong). The CPU jams on it like the 6502's KIL opcodes instead of
+        // abort()ing the whole trainer (and its atexit archive save):
+        // smb_frame stops at once and the core stays frozen -- RAM and
+        // picture unchanged -- until a state is loaded. benv_fault /
+        // smb_jammed report it.
+        fprintf(stderr, "smbcore: illegal opcode %02X at %04X -- core "
+                "halted until a state is loaded\n", op, (unsigned)(p.pc - 1));
+        p.pc--;
+        p.jammed = true;
+        return 0;
     }
     p.cycles += (unsigned)cyc;
     return cyc;
@@ -581,8 +590,12 @@ inline uint8_t bg_color_gray(Core& c) {
 void render_lut(Core& c, uint8_t* out /*240*224*/, const uint8_t* lut) {
     Ppu& u = c.ppu;
     static thread_local uint8_t fb[256 * 240];
+    // per-line background fetch parameters, kept for the sprite pass
+    struct BgLine { int scroll_x, tile_row, py; uint16_t base; };
+    BgLine bgl[240];
+    const bool bg_on = u.mask & 0x08;
     uint8_t ubg = lut[c.ppu.palette[0] & 0x3F];
-    if (!(u.mask & 0x08)) {
+    if (!bg_on) {
         memset(fb, ubg, sizeof(fb));
     } else {
         int si = 0;
@@ -622,6 +635,7 @@ void render_lut(Core& c, uint8_t* out /*240*224*/, const uint8_t* lut) {
             int ry = sy % 240;
             int tile_row = ry >> 3, py = ry & 7;
             uint16_t bg_base = (sctrl & 0x10) ? 0x1000 : 0x0000;
+            bgl[y] = BgLine{scroll_x, tile_row, py, bg_base};
             uint8_t* line = fb + y * 256;
             for (int x = 0; x < 256; ) {
                 int sx = (scroll_x + x) & 0x1FF;
@@ -653,10 +667,39 @@ void render_lut(Core& c, uint8_t* out /*240*224*/, const uint8_t* lut) {
             }
         }
     }
-    // sprites (8x8; all 64, no 8-per-line limit; SMB never uses 8x16)
+    // sprites (8x8; SMB never uses 8x16), composited like the 2C02: per
+    // pixel the opaque pixel of the LOWEST-index sprite wins, and only then
+    // does its priority bit decide against the background -- a
+    // behind-background sprite over an opaque background pixel shows the
+    // background even where a higher-index front sprite is opaque (the
+    // sprite priority quirk). Like the hardware's sprite evaluation, a
+    // scanline shows only the first 8 sprites (OAM order) whose rows cover
+    // it, opaque or not: the 9th+ drop out (SMB's flicker), exactly as in
+    // stable-retro -- drawing all 64 differed from it where enemies crowd
+    // a line (8-1, the 4-2 flag run).
+    //
+    // Background pixel opaque = its pattern bits != 0 (the same fetch as the
+    // background pass): a behind-background sprite pixel is hidden exactly
+    // there, whatever colour that pixel has. Comparing the drawn colour with
+    // the backdrop colour let behind sprites show through black background
+    // pixels (the 4-2 vine inside its bumped block).
+    auto bg_opaque = [&](int y, int x) -> bool {
+        if (!bg_on) return false;
+        const BgLine& b = bgl[y];
+        int sx = (b.scroll_x + x) & 0x1FF;
+        int rx = sx & 0xFF;
+        uint8_t tid = u.vram[(sx >= 256 ? 0x400 : 0) + b.tile_row * 32
+                             + (rx >> 3)];
+        const uint8_t* pat = u.chr + b.base + tid * 16 + b.py;
+        return ((pat[0] | pat[8]) >> (7 - (rx & 7))) & 1;
+    };
     if (u.mask & 0x10) {
+        // spr_done: a lower-index sprite already owns this pixel (rows are
+        // cleared lazily, on the first sprite that covers them)
+        static thread_local uint8_t spr_done[256 * 240];
+        uint8_t line_cnt[240] = {0};
         uint16_t sp_base = (u.ctrl & 0x08) ? 0x1000 : 0x0000;
-        for (int s = 63; s >= 0; s--) {
+        for (int s = 0; s < 64; s++) {
             uint8_t sy = u.oam[s * 4 + 0];
             if (sy >= 0xEF) continue;
             uint8_t tid = u.oam[s * 4 + 1];
@@ -667,18 +710,23 @@ void render_lut(Core& c, uint8_t* out /*240*224*/, const uint8_t* lut) {
             for (int row = 0; row < 8; row++) {
                 int y = sy + 1 + row;
                 if (y >= 240) break;
+                if (line_cnt[y] >= 8) continue;     // 8 sprites per line
+                if (line_cnt[y]++ == 0) memset(spr_done + y * 256, 0, 256);
                 int pr = fv ? 7 - row : row;
                 const uint8_t* pat = u.chr + sp_base + tid * 16 + pr;
                 uint8_t lo = pat[0], hi = pat[8];
+                if (!(lo | hi)) continue;
                 uint8_t* line = fb + y * 256;
+                uint8_t* done = spr_done + y * 256;
                 for (int k = 0; k < 8; k++) {
                     int x = sx + k;
                     if (x >= 256) break;
                     int bit = fh ? k : 7 - k;
                     uint8_t ci = (uint8_t)(((lo >> bit) & 1)
                                  | (((hi >> bit) & 1) << 1));
-                    if (!ci) continue;
-                    if (behind && line[x] != ubg) continue;
+                    if (!ci || done[x]) continue;
+                    done[x] = 1;
+                    if (behind && bg_opaque(y, x)) continue;
                     line[x] = lut[u.palette[pal * 4 + ci] & 0x3F];
                 }
             }
@@ -724,12 +772,14 @@ void smb_destroy(Core* c) { delete c; }
 
 // run exactly one frame (until scanline wraps past 260->261 end)
 void smb_frame(Core* c, uint8_t buttons) {
+    if (c->cpu.jammed) return;                   // halted: illegal opcode
     c->pad_state = buttons;
     if (c->pad_strobe) c->pad_shift = buttons;
     uint64_t target = c->ppu.frame + 1;
     while (c->ppu.frame < target) {
         if (c->ppu.pending >= c->ppu.next_event) ppu_sync(*c);
         int cyc = cpu_step(*c);
+        if (!cyc) return;                        // jammed mid-frame
         c->ppu.pending += cyc * 3;
     }
     c->frames_done++;
@@ -749,8 +799,11 @@ void smb_load(Core* c, const uint8_t* in) {
     memcpy(&tmp, in, sizeof(Core));
     memcpy(tmp.prg, c->prg, sizeof(tmp.prg));    // ROM stays
     memcpy(tmp.ppu.chr, c->ppu.chr, sizeof(tmp.ppu.chr));
+    tmp.cpu.jammed = false;     // older states: this byte was padding
     memcpy(c, &tmp, sizeof(Core));
 }
+// 1 if the core halted on an illegal opcode (frozen until smb_load)
+int smb_jammed(Core* c) { return c->cpu.jammed ? 1 : 0; }
 
 void smb_set_ram(Core* c, const uint8_t* ram) { memcpy(c->ram, ram, 0x800); }
 
