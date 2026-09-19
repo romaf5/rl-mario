@@ -151,7 +151,7 @@ for s in range(120):
     a = 5 if s % 20 == 10 else 0            # stand still, jump in place every 20 steps
     obs, r, d, inf = env.step(np.array([a])); rs.append(float(r[0])); cells.append(env.last_terms['cells'][0])
 env.close()
-check('cells: standing still pays the start cell once, then 0', cells[0] == 2 and all(c == 0 for c in cells[1:10]), cells[:10])
+check('cells: standing still pays nothing (the start cell is not a discovery)', all(c == 0 for c in cells[:10]), cells[:10])
 check('cells: a jump in place pays the higher y-band once, repeats pay 0', sum(1 for c in cells if c > 0) <= 4 and max(cells) == 2, sum(1 for c in cells if c > 0))
 check('cells: never negative', min(rs) >= 0)
 env = make('8-4', play_mode=True, reward=CELLS); tot = 0.0

@@ -4,6 +4,10 @@ Run: venv_retro/bin/python tests/env_bench.py
 Properties:
   * the step's Signals survive the resets done inside that step (the trackers
     used to alias them: a reset rewrote .t / .frame of the step that ended);
+  * rewards only for what the step did: a death step pays nothing (its RAM
+    is already the respawn), neither do the hack-free path's death animation,
+    pit fall and life-resume step, nor standing in the start cell; the term
+    breakdown of a leaving step is zeroed like its reward;
 """
 import os, sys
 import numpy as np, yaml
@@ -53,6 +57,60 @@ check('signals: the wrong-exit step keeps its own timer (sig.t %d = info time %d
 check('signals: the wrong-exit step keeps its own frame (4-3), not the reset door frame',
       out is not None and bool(sg.wrong_exit[0]) and sg.frame[0] != env.prev_frame[0],
       None if out is None else (int(sg.frame[0]), int(env.prev_frame[0])))
+env.close()
+
+# ---------------------------------------------------------------- no pay for what the step did not do
+from mario_native_vecenv import NativeEvalEnv
+env, obs = make(self_restart_prob=0.0)
+from mario_rewards import FirstVisitCells
+cells = env.rewards.get(FirstVisitCells); r0 = env.ram[0]
+start = (int(env.prev_frame[0]), int(env._x()[0]) // cells.xb, int(r0[0x3B8]) // cells.yb)
+check('rewards: the cell a life starts in is already seen (not paid as a discovery)', start in cells.seen[0],
+      (start, cells.seen[0]))
+for s in range(40):                   # run right a little (death x within 600 px of the respawn)
+    env.step(np.array([3]))
+env._post_reset_init([0], env.ram)    # a life starting here, as an archive restart does: the respawn cell is new
+kill(env)
+for s in range(10):
+    obs, r, d, inf = env.step(np.array([0]))
+    if d[0]:
+        break
+terms = {k: float(v[0]) for k, v in env.last_terms.items()}
+check('rewards: a death step pays nothing (r %.1f, terms %s)' % (r[0], terms),
+      d[0] and float(r[0]) == 0 and all(v == 0 for v in terms.values()), (bool(d[0]), float(r[0]), terms))
+env.close()
+# hack-free path (clips): the pit fall, the death animation and the resume step score nothing
+ev = NativeEvalEnv(raw_steps=True, **{k: v for k, v in dict(EC, self_restart_prob=0.0, episode_life=False).items()
+                                      if k != 'dense_infos'})
+ev.reset()
+for s in range(40):
+    ev.step(3)
+x_kill = int(ev.v.x_last[0]); kill(ev.v)
+paid_dying, lives0, resumed, paid_resume = 0.0, int(ev.v.ram[0, 0x75A]), False, None
+for s in range(200):
+    obs, r, d, inf = ev.step(0)
+    st = int(ev.v.ram[0, 0x0E]); yv = int(ev.v.ram[0, 0xB5])
+    if int(ev.v.ram[0, 0x75A]) == lives0 and (st in (0x0B, 0x06) or yv > 1):
+        paid_dying += r
+    if int(ev.v.ram[0, 0x75A]) < lives0 and st == 8 and not resumed:
+        resumed, paid_resume = True, r
+        break
+check('rewards (hack-free): the pit fall and death animation pay nothing (%.1f)' % paid_dying, paid_dying == 0, paid_dying)
+check('rewards (hack-free): the first control step of the new life pays nothing (%s)' % paid_resume,
+      resumed and paid_resume == 0, (resumed, paid_resume))
+ev.close()
+env, obs = make(self_restart_prob=0.0)
+log = []
+for a in np.load(os.path.join(ROOT, 'tests', 'data', 'exit_flag_4-2.npy')).astype(int):
+    obs, r, d, inf = env.step(np.array([a]))
+    log.append((float(r[0]), sum(float(v[0]) for v in env.last_terms.values()), bool(env.last_leaving[0])))
+    if d[0]:
+        break
+lv = [t for t in log if t[2]]
+check('rewards: the leaving steps of the flag run (%d) pay 0 and their term breakdown sums to 0' % len(lv),
+      len(lv) >= 2 and all(r == 0 and tot == 0 for r, tot, _ in lv), lv)
+check('rewards: every step\'s term breakdown sums to its reward',
+      all(abs(r - tot) < 1e-4 for r, tot, _ in log))
 env.close()
 
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))

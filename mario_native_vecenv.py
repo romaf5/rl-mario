@@ -356,6 +356,7 @@ class MarioNativeVecEnv(IVecEnv):
         self._prog = self.rewards.get(FirstVisitProgress)
         self.last_terms = {}
         self.last_signals = None
+        self.last_leaving = np.zeros(n, dtype=bool)
         # play_mode (tools/play.py): cutoffs and wrong exits are flagged but
         # never reset the game, so a human can inspect what follows; the
         # highwater is kept, exactly as in training minus the terminal
@@ -585,6 +586,14 @@ class MarioNativeVecEnv(IVecEnv):
         self.start_cell[i] = cell
 
     @staticmethod
+    def _in_play_of(pstate, yvp):
+        """Mario under player control: not a transition / intermission state
+        ($0E 0-5, 7), not dying ($0B), dead ($06) or below the screen."""
+        pstate = np.asarray(pstate); yvp = np.asarray(yvp)
+        return ~((pstate <= 5) | (pstate == 7) | (pstate == 0x0B)
+                 | (pstate == 0x06) | (yvp > 1))
+
+    @staticmethod
     def _frame_of(gp, area, atype, swim):
         """Frame id: the coordinate system x lives in. A level's sections
         that share it are monotone in x; anything else (pipe to a new
@@ -645,11 +654,12 @@ class MarioNativeVecEnv(IVecEnv):
         (new episode or new life)."""
         x0 = np.zeros(self.num_actors, dtype=np.int64)
         f0 = np.zeros(self.num_actors, dtype=np.int64)
+        y0 = np.zeros(self.num_actors, dtype=np.int64)
         for i in idx:
             r = ram[i]
             x = int(r[0x6D]) * 256 + int(r[0x86])
             gp = min(max(int(r[0x75F]) * 4 + int(r[0x75C]), 0), 31)
-            x0[i] = x
+            x0[i] = x; y0[i] = int(r[0x3B8])
             f0[i] = self._frame_of(gp, int(r[0x760]), int(r[0x74E]),
                                    int(r[0x704]))
             self.x_last[i] = x; self.x_pending[i] = x; self.max_x[i] = x
@@ -668,8 +678,8 @@ class MarioNativeVecEnv(IVecEnv):
             self.unpaid[i] = 0; self.max_gap[i] = 0; self.page_resets[i] = 0
             self.after_reset[i] = False
             self.pending_life[i] = False; self.pending_life_at_resume[i] = False
-            self.prev_in_play[i] = not (r[0x0E] <= 5 or r[0x0E] == 7)
-        self.rewards.reset(list(idx), SimpleNamespace(x=x0, frame=f0),
+            self.prev_in_play[i] = bool(self._in_play_of(int(r[0x0E]), int(r[0xB5])))
+        self.rewards.reset(list(idx), SimpleNamespace(x=x0, frame=f0, ypix=y0),
                            hard=False)
 
     @property
@@ -794,12 +804,17 @@ class MarioNativeVecEnv(IVecEnv):
         frame = self._frame_of(gp, area, atype, swim)
         frame_change = frame != self.prev_frame
         pstate = self._field(0x0E)
-        # player control ($0E not in 0-5,7). The hacked training step always
-        # ends in control; the hack-free eval path (videos) exposes the
-        # dying / intermission / pipe frames step by step: those score
-        # nothing, and the first control step afterwards re-anchors x so a
-        # respawn or pipe exit is never read as a page reset.
-        in_play = ~((pstate <= 5) | (pstate == 7))
+        # player control ($0E not in 0-5,7, not dying / dead / below the
+        # screen). The hacked training step always ends in control; the
+        # hack-free eval path (videos) exposes the dying / intermission /
+        # pipe frames step by step: those score nothing (a pit fall used to
+        # pay progress on the way down, the death animation new cells), and
+        # the first control step afterwards re-anchors x so a respawn or
+        # pipe exit is never read as a page reset.
+        yvp = self._field(0xB5)
+        dying = (pstate == 0x0B) | (yvp > 1)
+        dead = pstate == 0x06
+        in_play = self._in_play_of(pstate, yvp)
         resume = in_play & ~self.prev_in_play
         self.prev_in_play = in_play.copy()
         self.x_last = np.where(resume, x_raw, self.x_last)
@@ -809,16 +824,16 @@ class MarioNativeVecEnv(IVecEnv):
         # two consecutive steps (the carried x pays nothing meanwhile)
         jump = (np.abs(x_raw - self.x_last) > 600) & ~frame_change
         confirm = np.abs(x_raw - self.x_pending) <= 64
-        hold = (jump & ~confirm) | ~in_play
+        # the first control step of a new life is scored after its re-init
+        # (hack-free path): it used to pay with the ended life's highwater and
+        # cells, and the respawn cell was paid again a step later
+        hold = (jump & ~confirm) | ~in_play | (resume & self.pending_life_at_resume)
         x = np.where(hold, self.x_last, x_raw)
         self.x_pending = np.where(in_play, x_raw, self.x_pending)
         # death = life decrement (0 is the last playable life; 0xFF = game
         # over). The C++ kill-dying hack skips the dying frames inside the
         # step, so pstate can never be relied on for it.
         died = (life == 0xFF) | (life < self.lives)
-        yvp = self._field(0xB5)
-        dying = (pstate == 0x0B) | (yvp > 1)
-        dead = pstate == 0x06
         flag = self._flag()
         gmode = self._field(0x770)
         if self.single_stage:
@@ -1003,9 +1018,15 @@ class MarioNativeVecEnv(IVecEnv):
             self.unpaid)
         timeout = self.unpaid >= self.unpaid_timeout
         sig.timeout = timeout
-        self.last_terms = dict(self.rewards.last)
+        # the per-term breakdown of what was PAID: the raw terms of a leaving
+        # step used to stay in it (index.csv totals +2 per wrong exit, GRPO's
+        # --outcome-progress re-paid the leaving steps)
+        self.last_terms = {k: np.where(leaving, 0.0, v).astype(np.float32)
+                           for k, v in self.rewards.last.items()}
         if self.cell_bonus > 0:
-            self.last_terms['cell_bonus'] = self.cell_bonus * paid_cell
+            self.last_terms['cell_bonus'] = np.where(
+                leaving, 0.0, self.cell_bonus * paid_cell).astype(np.float32)
+        self.last_leaving = leaving
         self.last_signals = sig
 
         # ---- trackers ----

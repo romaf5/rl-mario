@@ -111,7 +111,9 @@ class FirstVisitProgress(Term):
     def __call__(self, s):
         r = np.zeros(s.n, dtype=np.float32)
         for i in range(s.n):
-            if s.hold[i]:
+            # a death step's RAM is already the respawn (hacked path): it pays
+            # nothing, like a teleport-held step
+            if s.hold[i] or s.died[i]:
                 continue
             f = int(s.frame[i]); x = int(s.x[i]); d = self.hw[i]
             hw = d.get(f)
@@ -160,13 +162,18 @@ class FirstVisitCells(Term):
         self.seen = [set() for _ in range(n)]
 
     def reset(self, idx, sig, hard=False):
+        # the cell a life starts in is not a discovery (it paid on the first
+        # step whatever the action)
         for i in idx:
             self.seen[i] = set()
+            if sig is not None and getattr(sig, 'ypix', None) is not None:
+                self.seen[i].add((int(sig.frame[i]), int(sig.x[i]) // self.xb,
+                                  int(sig.ypix[i]) // self.yb))
 
     def __call__(self, s):
         r = np.zeros(s.n, dtype=np.float32)
         for i in range(s.n):
-            if s.hold[i]:
+            if s.hold[i] or s.died[i]:      # death step: RAM is the respawn
                 continue
             key = (int(s.frame[i]), int(s.x[i]) // self.xb,
                    int(s.ypix[i]) // self.yb)

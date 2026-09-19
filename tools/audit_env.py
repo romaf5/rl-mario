@@ -16,7 +16,8 @@ archive_path, so nothing is ever written back. Run it before every launch
 Reference rules (the design in mario_rewards.py / mario_native_vecenv.py):
   * progress: per life and frame, pay min(x - highwater, cap) for new ground;
     teleport-held steps and death steps pay nothing
-  * cells: +bonus once per (frame, x//x_bin, y//y_bin) cell per life
+  * cells: +bonus once per (frame, x//x_bin, y//y_bin) cell per life (the
+    start cell is not a discovery; death steps pay nothing)
   * clear: 500 + per_extra * (levels - 1) on a confirmed on-route advance;
     every step of a wrong exit and the pending step of a clear pay 0
   * dones: death (per-life episodes), wrong exit, the paid exit out of the
@@ -218,6 +219,8 @@ def check(cfg, D, vms, arch):
                 tot = sum(T[t][s][i] for t in TERMS)
                 if leaving and rew != 0:
                     bad('paid_on_leaving_step', s, i, rew)
+                if leaving and tot != 0:
+                    bad('terms_not_zeroed_on_leaving_step', s, i, tot)
                 if not leaving and abs(rew - tot) > 1e-3:
                     bad('reward_not_sum_of_terms', s, i, (rew, tot))
                 if died and rew > 0:
@@ -268,8 +271,9 @@ def check(cfg, D, vms, arch):
                 if L['door1'][s][i] != exp_door or L['restart1'][s][i] != exp_restart:
                     bad('episode_label_wrong', s, i, (ref, 'door' if L['door1'][s][i] else '',
                                                       'restart' if L['restart1'][s][i] else ''))
+                # the start cell is not a discovery
                 st = dict(label=ref, x0=xof(r0), gp0=gpof(r0), lives=f(r0, 0x75A), hw={frameof(r0): xof(r0)},
-                          seen=set(), prog=gpof(r0), pending=-1, unpaid=0, after_reset=False, nongame=0,
+                          seen={(frameof(r0), xof(r0) // CXB, f(r0, 0x3B8) // CYB)}, prog=gpof(r0), pending=-1, unpaid=0, after_reset=False, nongame=0,
                           len=0, ret=0.0, cleared=False, end=None)
 
     print(f'\n[audit] {S} steps x {N} training envs, {len(eps)} complete episodes checked')
