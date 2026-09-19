@@ -997,7 +997,13 @@ class MarioNativeVecEnv(IVecEnv):
                             and (len(ent[0]) < 4 or len(ent) < 3
                                  or int(t[i]) >= ent[2] or early >= 3)):
                         self.lib.benv_save(self.env, int(i), self._sbuf)
-                        ent[0].append(bytes(self._sbuf.raw))
+                        new = bytes(self._sbuf.raw)
+                        # the game is deterministic: the same route saves
+                        # byte-identical states, which wasted reservoir slots
+                        # and doubled a variant's draw weight (run j: 83)
+                        if new in ent[0]:
+                            continue
+                        ent[0].append(new)
                         if len(ent[0]) > 4:
                             ent[0].pop(0)
                         if len(ent) > 2:
@@ -1179,7 +1185,10 @@ class MarioNativeVecEnv(IVecEnv):
         self.ep_steps += 1
         for i in np.nonzero(done)[0]:
             cell = self.start_cell[i]
-            if cell is None:
+            # a cell evicted or pruned while this episode ran gets nothing:
+            # counters written here re-created it (stale wins / early deaths
+            # inherited by a rediscovered cell, which must start unproven)
+            if cell is None or cell not in self.archive:
                 continue
             # transitive credit: reaching a DEEPER cell that already wins is
             # a win for this cell ("deeper" = another frame or >= 4 x-bins)
@@ -1212,13 +1221,18 @@ class MarioNativeVecEnv(IVecEnv):
             # that has converted before is never pruned: only a win in the SAME
             # episode used to protect it, so a proven link saved on a ledge
             # edge could be deleted together with its win counts
+            # only a DEATH within a few steps says the state is doomed (a
+            # quick wrong exit or zombie end said nothing about it)
             if (won or self.ep_steps[i] > 8 or self.is_explorer_env[i]
-                    or self._won(cell)):
+                    or self._won(cell) or not died[i]):
                 continue
             n_early = self.cell_early.get(cell, 0) + 1
             self.cell_early[cell] = n_early
             ent = self.archive.get(cell)
-            if (ent is not None and n_early >= 12
+            # never prune a cell another env is still playing from (its
+            # episode would credit a cell that no longer exists)
+            in_use = any(c == cell for j, c in enumerate(self.start_cell) if j != i)
+            if (ent is not None and n_early >= 12 and not in_use
                     and n_early > 0.5 * max(ent[1], 1)):
                 self._forget_cell(cell)
                 self._archive_dirty += 1

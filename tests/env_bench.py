@@ -22,6 +22,9 @@ Properties:
     top-k onto them), untried proven winners and ~40% cells do;
   * the unpaid cutoff never fires on a level-change step: a cutoff landing on
     the warp's pending step (which pays 0 by design) lost the 4700;
+  * archive hygiene: a cell in use by another env is not pruned, a cell that
+    left the archive is never credited again (stale counters), and a refresh
+    stores no byte-identical duplicate state;
 """
 import os, sys
 import numpy as np, yaml
@@ -261,6 +264,40 @@ for k, a in enumerate(acts):
 env.close()
 check('cutoff: an unpaid cutoff due on the warp\'s pending step waits for the confirm step (end %s)' % (res,),
       pend is not None and res is not None and res[0] == pend + 1 and res[1] >= 4700 and not res[2] and res[3] == 1, res)
+
+# ---------------------------------------------------------------- archive hygiene
+env, obs = make(n=2, self_restart_prob=1.0, self_restart_frontier_prob=0.0)
+X = ('4-2', 2 * 256 + 1, 99, 5, 0, 2, 0, 0)
+env.lib.benv_save(env.env, 0, env._sbuf)
+env.archive = {X: [[bytes(env._sbuf.raw)], 12, 400]}; env.cell_early = {X: 11}
+for i in range(2):
+    env._reset_env(i); env._fetch_obs(i)
+env._post_reset_init([0, 1], env.ram)
+kill(env, 0)
+for s in range(3):
+    env.step(np.array([0, 0]))
+check('archive: an early death does not prune a cell another env is playing from', X in env.archive,
+      (X in env.archive, env.cell_early.get(X)))
+env.archive.pop(X, None)               # evicted while env 1's episode from it still runs
+env.cell_early.pop(X, None); env.cell_wins.pop(X, None)
+kill(env, 1)
+for s in range(3):
+    env.step(np.array([0, 0]))
+check('archive: a cell that left the archive gets no counters back (early %s, wins %s)'
+      % (env.cell_early.get(X), env.cell_wins.get(X)), X not in env.cell_early and X not in env.cell_wins)
+env.close()
+env, obs = make(n=4, self_restart_prob=1e-6)
+class _Always:                         # every refresh chance taken (the env's other draws unchanged)
+    def __init__(self, r): self.r = r
+    def random_sample(self, *a): return np.zeros(a[0]) if a else 0.0
+    def __getattr__(self, k): return getattr(self.r, k)
+env.rng = _Always(env.rng)
+for s in range(80):
+    env.step(np.full(4, 3 if s % 8 else 4))
+dups = sum(len(e[0]) - len(set(e[0])) for e in env.archive.values())
+check('archive: identical envs on identical inputs store no duplicate states (%d duplicates in %d cells)'
+      % (dups, len(env.archive)), len(env.archive) > 5 and dups == 0, dups)
+env.close()
 
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)
