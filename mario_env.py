@@ -106,7 +106,8 @@ class RetroMarioEnv:
     - Same RAM hacks after each step: kill Mario during the dying animation,
       skip end-of-world cutscenes (full game), skip area-change animations and
       "occupied" states (black inter-life screens).
-    - done: single stage -> dying/dead/flag_get; full game -> game over.
+    - done: single stage -> dying/dead/flag_get or a level change (a warp
+      leaves the level without a flag); full game -> game over.
     - Old gym API: reset() -> obs, step() -> (obs, reward, done, info).
     """
 
@@ -167,6 +168,10 @@ class RetroMarioEnv:
         self._x_reward_mode = x_reward
         self._x_highwater = 0
         self._x_context = None    # (life, world, stage, area) rebase key
+        # single-stage mode: the level the episode started in, and a
+        # candidate new level awaiting its second identical read
+        self._start_level = None
+        self._pending_level = None
         # Self-restart curriculum (knowledge-free): each env archives
         # snapshots of cells ITS OWN play visited (grounded, alive); a
         # fraction of real resets resume from the least-practiced cell
@@ -256,10 +261,29 @@ class RetroMarioEnv:
     def _flag_get(self):
         return self._is_world_over or self._is_stage_over
 
+    def _left_level(self):
+        """Single-stage mode: the episode's level was left without a flag
+        (a warp pipe / vine). World/stage RAM holds garbage for a frame
+        during screen transitions, so a new level must be read on 2
+        consecutive frames (the same debounce as MarioProgressWrapper's
+        progress, which confirms it on the same frame)."""
+        level = (self._cur['world0'], self._cur['stage0'])
+        if level == self._start_level:
+            self._pending_level = None
+            return False
+        confirmed = level == self._pending_level
+        self._pending_level = level
+        return confirmed
+
     @property
     def life(self):
         """Lives remaining (public: used by EpisodicLife and eval tooling)."""
         return self._cur['life']
+
+    @property
+    def x_pos(self):
+        """Mario's level x (public: MarioProgressWrapper rebases on it)."""
+        return self._x_position
 
     @property
     def stage_name(self):
@@ -392,9 +416,15 @@ class RetroMarioEnv:
             entry = self._archive[cell]
             entry[1] += 1
             self._em.set_state(entry[0])
-            self._data.update_ram()
-            self._cur = dict(self._data.lookup_all())
+            # the framebuffer is not part of the savestate: get_screen()
+            # would still show the previous episode's last frame. Emulate
+            # one NOOP frame, exactly as RetroEnv.reset() does after loading
+            # a level state, so the first obs is the restored game's.
+            self._frame()
+            self._cur = dict(self._cur)
             self._cur_start = cell[0]
+            self._start_level = (self._cur['world0'], self._cur['stage0'])
+            self._pending_level = None
             self.last_reset_was_restart = True
             self._x_highwater = self._x_position
             self._x_context = self._x_context_key()
@@ -411,6 +441,8 @@ class RetroMarioEnv:
             self._cur_start = '_'
         obs, _ = self._retro.reset()
         self._cur = dict(self._retro.data.lookup_all())
+        self._start_level = (self._cur['world0'], self._cur['stage0'])
+        self._pending_level = None
         self._x_highwater = self._x_position
         self._x_context = self._x_context_key()
         if self._reset_noops:
@@ -458,7 +490,10 @@ class RetroMarioEnv:
             reward = self.reward_range[1]
 
         if self.is_single_stage_env:
-            done = self._is_dying or self._is_dead or self._flag_get
+            # a warp ends the level like a flag does (it used to play on in
+            # the destination level while progress ticked unpaid)
+            left = self._left_level()
+            done = self._is_dying or self._is_dead or self._flag_get or left
             victory = False
         else:
             # world-over cutscene while on 8-4 == the game is beaten
@@ -483,6 +518,11 @@ class RetroMarioEnv:
         if self.self_restart_prob > 0 and not done:
             self._maybe_archive()
         self._did_step(done)
+        # lives AFTER the RAM hacks: the death frame's hacks finish the
+        # dying animation and decrement the counter; read before them, the
+        # death step reported the pre-death life (EpisodicLife already
+        # reads the post-hack value)
+        out_info['life'] = self._cur['life']
         obs = em.get_screen() if self.want_obs else None
 
         return obs, reward, done, out_info
@@ -559,7 +599,11 @@ class EpisodicLifeMarioEnv(Wrapper):
         obs, reward, done, info = self.env.step(action)
         self.was_real_done = done
         lives = self.env.unwrapped.life
-        if lives < self.lives and lives > 0:
+        # SMB's life byte goes 2, 1, 0, 0xFF: 0 is the last PLAYABLE life
+        # (0xFF = game over, which the base env reports as a real done), so
+        # every decrement is a life loss -- `lives > 0` let the 1 -> 0 death
+        # run on inside the same episode
+        if lives < self.lives:
             done = True
         self.lives = lives
         return obs, reward, done, info
@@ -579,8 +623,10 @@ class MarioProgressWrapper(Wrapper):
     - stage_bonus is paid PER STAGE OF GAME PROGRESS: a flag exit into the
       next level pays 1x, a warp pays the number of stages skipped
       (1-2 -> 4-1 is 11x, the 4-2 vine warp to 8-1 is 15x). In single-stage
-      mode (episode ends at the flag, progress never ticks) the same bonus
-      is paid on flag_get instead.
+      mode the episode ends at the flag, before progress can tick, so the
+      flag pays 1x on flag_get instead; a warp ends it too (the base env's
+      done), on the frame its progress is confirmed, and pays the same
+      per-stage bonus as in the full game.
     - Progress increases are debounced (world/stage RAM holds garbage for a
       frame during screen transitions: require 2 consecutive identical
       reads), monotonic per life, and jump-capped at 15 stages.
@@ -627,7 +673,10 @@ class MarioProgressWrapper(Wrapper):
         obs = self.env.reset(**kwargs)
         base = self.env.unwrapped
         self._prev_flag_get = False
-        self._prev_x_pos = 0
+        # from where Mario stands: starting at 0 paid the first frame
+        # min(x, 20) * progress_reward * x whatever the action (+28 at a
+        # respawn at x 1400)
+        self._prev_x_pos = base.x_pos
         self._idle_steps = 0
         self._max_x_pos = 0
         self._start_stage = base.stage_name
@@ -648,7 +697,8 @@ class MarioProgressWrapper(Wrapper):
         single = base.is_single_stage_env
 
         # Flag bonus only in single-stage mode (episode ends at the flag, so
-        # game progress never increases and the bonus below can't fire).
+        # game progress never increases and the bonus below can't fire; a
+        # warp does advance it, and ends the episode on that frame).
         flag_get = info.get('flag_get', False)
         if single and flag_get and not self._prev_flag_get:
             reward += self.stage_bonus
@@ -673,16 +723,14 @@ class MarioProgressWrapper(Wrapper):
                     self._prev_x_pos = 0
                     if delta >= 2:
                         self._warped = True
-                    if not single:
-                        reward += self.stage_bonus * delta
+                    reward += self.stage_bonus * delta
             self._pending_progress = p
         else:
             self._pending_progress = None
 
         # Growing progress reward: forward movement scaled by position
         # At x=0 bonus is ~0, at x=2000 bonus is +2 per step of forward movement
-        # Cap x_delta to avoid spike on episode reset (episode_life resets
-        # _prev_x_pos to 0 but env continues from death position)
+        # (x_delta is capped to normal per-step movement below)
         x_pos = info.get('x_pos', 0)
         x_delta = x_pos - self._prev_x_pos
         area = base.area
@@ -738,9 +786,19 @@ class StickyActionWrapper(Wrapper):
         Wrapper.__init__(self, env)
         self.p = p
         self._last_action = 0
+        # own stream, seeded from the env seed: the global np.random is
+        # copied into every forked worker, so all of them repeated actions
+        # on the same steps (and an unseeded RandomState draws OS entropy)
+        self._rng = np.random.RandomState()
+
+    def seed(self, seed=None):
+        # a distinct stream from the base env's (stage sampling) RNG
+        self._rng.seed(None if seed is None
+                       else [int(seed) % (2 ** 32), 0x571C])
+        return self.env.seed(seed)
 
     def step(self, action):
-        if np.random.random() < self.p:
+        if self._rng.random_sample() < self.p:
             action = self._last_action
         self._last_action = action
         return self.env.step(action)
@@ -784,7 +842,9 @@ class MaxAndSkipEnv(Wrapper):
                 obs, reward, done, info = self.env.step(action)
                 if self._record:
                     base.frames4.append(base.screen.copy())
-                if i == self._skip - 2:
+                # skip=1: both slots take the only frame (the old slot 0 was
+                # never refreshed: obs = max(stale terminal frame, current))
+                if i == max(self._skip - 2, 0):
                     self._obs_buffer[0] = obs
                 if i == self._skip - 1:
                     self._obs_buffer[1] = obs

@@ -28,6 +28,10 @@ import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PYTHON = os.path.join(HERE, 'venv_retro', 'bin', 'python')
+if not os.path.exists(PYTHON):
+    # a git worktree / other checkout has no venv of its own: run the
+    # subprocesses with the interpreter running this script
+    PYTHON = sys.executable
 
 # Absolute single-env throughput floor (steps/s). The C-core emulator does
 # ~500 steps/s on this machine regardless of scene complexity; dipping far
@@ -220,18 +224,33 @@ def probe():
     check('episodic life: death -> done, reset continues with life 1',
           got_done and env.unwrapped._life == 1,
           f'life after reset = {env.unwrapped._life}')
+    # 0 is the last PLAYABLE life (0xFF = game over): the 1 -> 0 death is an
+    # episode boundary too, and the game continues with life 0
+    got_done = False
+    for _ in range(400):
+        obs, r, done, info = env.step(3)
+        if done:
+            got_done = True
+            break
+    obs = env.reset()
+    check('episodic life: the 1 -> 0 death is an episode boundary (life 0 plays on)',
+          got_done and info['life'] == 0 and env.unwrapped._life == 0,
+          f"done={got_done}, info life={info['life']}, life after reset = {env.unwrapped._life}")
     env.close()
 
-    # --- 2g. reward shaping math on a stub env ---
+    # --- 2g. reward shaping math on a stub env (the base env attributes
+    # MarioProgressWrapper reads: stage_name, game_progress, area, x_pos) ---
     class StubEnv:
         observation_space = None
         action_space = None
         is_single_stage_env = True
         stage_name = '1-1'
         game_progress = 0
+        area = 0
 
-        def __init__(self, xs, flags):
+        def __init__(self, xs, flags, x0=0):
             self.xs, self.flags, self.i = xs, flags, 0
+            self.x0 = self.x_pos = x0
             self._life = 2
 
         @property
@@ -240,21 +259,24 @@ def probe():
 
         def reset(self, **kw):
             self.i = 0
+            self.x_pos = self.x0
             return None
 
         def step(self, action):
             x, f = self.xs[self.i], self.flags[self.i]
             self.i += 1
+            self.x_pos = x
             return None, 0.0, False, {'x_pos': x, 'flag_get': f,
                                       'world': 1, 'stage': 1, 'life': 2}
 
-    # progress reward: x 0 -> 1000 (delta capped at 20): 20 * 0.001 * 1000 = 20
-    stub = MarioProgressWrapper(StubEnv([1000, 1005, 1005], [False, False, True]),
+    # progress reward: x 980 -> 1000 (delta 20): 20 * 0.001 * 1000 = 20
+    stub = MarioProgressWrapper(StubEnv([1000, 1005, 1005], [False, False, True],
+                                        x0=980),
                                 stage_bonus=500.0, idle_penalty=0.5,
                                 idle_threshold=10, progress_reward=0.001)
     stub.reset()
     _, r1, _, _ = stub.step(0)
-    check('progress_reward math: capped delta 20 * 0.001 * x 1000 = 20',
+    check('progress_reward math: delta 20 * 0.001 * x 1000 = 20',
           math.isclose(r1, 20.0), f'{r1:.3f}')
     _, r2, _, _ = stub.step(0)
     check('progress_reward math: delta 5 * 0.001 * x 1005 = 5.025',
@@ -263,13 +285,23 @@ def probe():
     check('stage_bonus on flag_get transition (+500)',
           math.isclose(r3, 500.0 - 0.0), f'{r3:.3f}')
 
+    # the first step pays only real movement: an episode / life starting at
+    # x 1400 used to pay min(1400 - 0, 20) * 0.001 * 1400 = +28 for a NOOP
+    stub = MarioProgressWrapper(StubEnv([1400], [False], x0=1400),
+                                stage_bonus=500.0, idle_penalty=0.5,
+                                idle_threshold=10, progress_reward=0.001)
+    stub.reset()
+    _, r0, _, _ = stub.step(0)
+    check('no first-step progress spike at a respawn x (x 1400, NOOP -> 0)',
+          math.isclose(r0, 0.0, abs_tol=1e-9), f'{r0:.3f}')
+
     # idle penalty: x constant; first 10 idle steps free, then -0.5 each
-    stub = MarioProgressWrapper(StubEnv([100] * 15, [False] * 15),
+    stub = MarioProgressWrapper(StubEnv([100] * 15, [False] * 15, x0=80),
                                 stage_bonus=500.0, idle_penalty=0.5,
                                 idle_threshold=10, progress_reward=0.001)
     stub.reset()
     rs = [stub.step(0)[1] for _ in range(15)]
-    # rs[0]: first move 0->100, delta capped at 20 -> 20 * 0.001 * 100 = 2.0
+    # rs[0]: first move 80->100, delta 20 -> 20 * 0.001 * 100 = 2.0
     # rs[1..10]: idle steps 1-10 within threshold -> 0.0
     # rs[11..]: idle steps 11+ -> -0.5 each
     check('idle_penalty math: free for 10 steps, then -0.5/step',
