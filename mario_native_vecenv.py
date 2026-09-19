@@ -801,7 +801,7 @@ class MarioNativeVecEnv(IVecEnv):
         # respawn or pipe exit is never read as a page reset.
         in_play = ~((pstate <= 5) | (pstate == 7))
         resume = in_play & ~self.prev_in_play
-        self.prev_in_play = in_play
+        self.prev_in_play = in_play.copy()
         self.x_last = np.where(resume, x_raw, self.x_last)
         self.x_pending = np.where(resume, x_raw, self.x_pending)
         # transition frames can leave garbage in the x page byte: a
@@ -1009,9 +1009,11 @@ class MarioNativeVecEnv(IVecEnv):
         self.last_signals = sig
 
         # ---- trackers ----
-        self.prev_frame = frame
+        # copies: _post_reset_init writes these per env on a reset, which used
+        # to rewrite last_signals (.frame / .t) of the step that just ended
+        self.prev_frame = frame.copy()
         self.x_last = x.copy()
-        self.time_last = t
+        self.time_last = t.copy()
         self.max_x = np.maximum(self.max_x, x)
         self.prev_score = self._score()
 
@@ -1068,7 +1070,7 @@ class MarioNativeVecEnv(IVecEnv):
         time_outs = timeout & ~self.after_reset & \
             ~(died | game_over | victory | zombie | wrapped)
         life_lost = life < self.lives
-        self.lives = life
+        self.lives = life.copy()
         # the new-life re-sync must see the RESPAWN position: in the
         # hack-free path the life counter drops during the intermission, so
         # defer it to the first control step (immediate in the hacked path)
