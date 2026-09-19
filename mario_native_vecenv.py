@@ -313,7 +313,7 @@ class MarioNativeVecEnv(IVecEnv):
         # bonus is the same function of the state for every rollout of a
         # group whenever it runs in the horizon; entries seen meanwhile
         # are merged when the trainer unfreezes
-        self.door_seen_frozen = False; self._door_seen_pending = {}
+        self.door_seen_frozen = False; self._door_seen_pending = {}; self._decays_pending = 0
         self.is_door = np.ones(n, dtype=bool)
         self.exp_persist = np.ones(n, dtype=np.int64)
         self.explorer = np.zeros(n, dtype=np.int32)
@@ -935,9 +935,12 @@ class MarioNativeVecEnv(IVecEnv):
         self.entered_cell = [None] * n
         entered = np.zeros(n, dtype=bool); paid_cell = np.zeros(n, dtype=bool)
         self._seen_tick += 1
-        if self._seen_tick % 32 == 0 and self.door_seen and not self.door_seen_frozen:
-            for k in self.door_seen:
-                self.door_seen[k] *= 0.9
+        if self._seen_tick % 32 == 0 and self.door_seen:
+            if self.door_seen_frozen:
+                self._decays_pending += 1     # applied at unfreeze
+            else:
+                for k in self.door_seen:
+                    self.door_seen[k] *= 0.9
         # the bonus is decided against the counts as they stood BEFORE this
         # step for every env: the loop below used to bump the count as it
         # went, so of two envs entering the same new cell in one step only
@@ -1191,7 +1194,8 @@ class MarioNativeVecEnv(IVecEnv):
                 'flag_get': bool(flag[i]), 'life': int(life[i]),
                 'world': int(ram[i, 0x75F]) + 1,
                 'stage': int(ram[i, 0x75C]) + 1,
-                'time': int(t[i]), 'coins': int(ram[i, 0x7ED]),
+                'time': int(t[i]),
+                'coins': int(ram[i, 0x7ED]) * 10 + int(ram[i, 0x7EE]),   # two BCD digits
                 'score': int(self.prev_score[i]),
                 'start_stage': self.start_stage[i],
                 'self_restart': bool(self.was_restart[i]),
@@ -1329,6 +1333,15 @@ class MarioNativeVecEnv(IVecEnv):
         novelty bonus. Unfreezing merges the entries seen meanwhile."""
         flag = bool(flag)
         if self.door_seen_frozen and not flag:
+            # the decay ticks that passed while frozen (GRPO freezes for
+            # every rollout step, so the counts never decayed and a cell the
+            # door groups entered once never paid again), then the entries
+            # seen meanwhile
+            if self._decays_pending:
+                f = 0.9 ** self._decays_pending
+                for k in self.door_seen:
+                    self.door_seen[k] *= f
+                self._decays_pending = 0
             for k, v in self._door_seen_pending.items():
                 self.door_seen[k] = self.door_seen.get(k, 0.0) + v
             self._door_seen_pending = {}

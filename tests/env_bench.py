@@ -30,6 +30,8 @@ Properties:
     to continue an existing archive file silently;
   * the per-spot tile-variant index equals a scan of the archive (after
     evictions too);
+  * door counts of the relative novelty bonus decay across a GRPO freeze
+    (applied at unfreeze; they never decayed); info coins has both digits;
 """
 import os, sys
 import numpy as np, yaml
@@ -332,6 +334,21 @@ probe_cells = list(env.archive) + [c[:6] + (12345,) + c[7:] for c in list(env.ar
 ok = all(env._tile_variants(c) == brute(c) for c in probe_cells)
 check('index: tile-variant counts equal a scan of the archive after evictions (%d cells, cap 5)' % len(env.archive),
       ok and len(env.archive) == 5, [(env._tile_variants(c), brute(c)) for c in probe_cells if env._tile_variants(c) != brute(c)][:5])
+env.close()
+
+# ---------------------------------------------------------------- frozen door counts decay; coins
+env, obs = make(self_restart_prob=1e-6)
+env.door_seen = {('x',): 5.0}
+env.freeze_door_seen(True)
+for s in range(256):
+    env.step(np.array([0]))
+env.freeze_door_seen(False)
+v = env.door_seen[('x',)]
+check('novelty: door counts decay across a freeze (5.0 -> %.2f after 256 steps, expect 5 x 0.9^8 = %.2f)' % (v, 5 * 0.9 ** 8),
+      abs(v - 5 * 0.9 ** 8) < 1e-6, v)
+env.ram[0, 0x7ED] = 1; env.ram[0, 0x7EE] = 7; env.lib.benv_set_ram(env.env, 0, env.ram[0].tobytes())
+obs, r, d, inf = env.step(np.array([0]))
+check('info: coins reads both digits (%s)' % inf[0].get('coins'), inf[0].get('coins') == 17, inf[0].get('coins'))
 env.close()
 
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
