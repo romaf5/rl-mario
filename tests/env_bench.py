@@ -32,6 +32,8 @@ Properties:
     evictions too);
   * door counts of the relative novelty bonus decay across a GRPO freeze
     (applied at unfreeze; they never decayed); info coins has both digits;
+  * a core halted on an illegal opcode ends its episode at once and the reset
+    revives it (it used to abort() the whole trainer);
 """
 import os, sys
 import numpy as np, yaml
@@ -349,6 +351,25 @@ check('novelty: door counts decay across a freeze (5.0 -> %.2f after 256 steps, 
 env.ram[0, 0x7ED] = 1; env.ram[0, 0x7EE] = 7; env.lib.benv_set_ram(env.env, 0, env.ram[0].tobytes())
 obs, r, d, inf = env.step(np.array([0]))
 check('info: coins reads both digits (%s)' % inf[0].get('coins'), inf[0].get('coins') == 17, inf[0].get('coins'))
+env.close()
+
+# ---------------------------------------------------------------- a jammed core
+env, obs = make(n=2, self_restart_prob=0.0)
+for s in range(5):
+    env.step(np.array([3, 3]))
+env.lib.benv_save(env.env, 0, env._sbuf)
+bad = bytearray(env._sbuf.raw); bad[4:6] = (0x0700).to_bytes(2, 'little')   # Core.cpu.pc -> $0700 (RAM)
+env.load_state(0, bytes(bad)); env._fetch_obs(0)
+env.ram[0, 0x700] = 0x02                                                     # KIL
+env.lib.benv_set_ram(env.env, 0, env.ram[0].tobytes())
+obs, r, d, inf = env.step(np.array([3, 3]))
+first = (bool(d[0]), bool(d[1]))
+x1 = [int(env._x()[0])]
+for s in range(20):
+    obs, r, d, inf = env.step(np.array([3, 3])); x1.append(int(env._x()[0]))
+check('fault: a core halted on an illegal opcode ends its episode at once, the other env plays on (done %s)' % (first,),
+      first == (True, False), first)
+check('fault: the reset revives the core (x %d -> %d)' % (x1[0], x1[-1]), x1[-1] > x1[0], x1)
 env.close()
 
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))

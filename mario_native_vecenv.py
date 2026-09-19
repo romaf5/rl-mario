@@ -103,6 +103,8 @@ class _Lib:
             lib.benv_transit.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
             lib.benv_ram.restype = ctypes.POINTER(ctypes.c_uint8)
             lib.benv_ram.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            if hasattr(lib, 'benv_fault'):      # older builds lack it
+                lib.benv_fault.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
             cls._inst = lib
         return cls._inst
 
@@ -324,6 +326,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.cell_wins = {}
         self.cell_tries = {}      # policy restarts per cell (lifetime; persisted)
         self.nongame = np.zeros(n, dtype=np.int32)
+        self._fault = np.zeros(n, dtype=np.uint8)
 
         self.rng = np.random.RandomState(seed)
         self.obs_u8 = np.zeros((n, 84, 84), dtype=np.uint8)
@@ -1121,6 +1124,12 @@ class MarioNativeVecEnv(IVecEnv):
         # on its own -- force a reset after 8 consecutive non-game steps
         self.nongame = np.where(gmode == 1, 0, self.nongame + 1)
         zombie = self.nongame >= 8
+        # a core halted on an illegal opcode (a corrupted state) is frozen
+        # until a state is loaded: end its episode now (the reset revives it)
+        # instead of after unpaid_timeout frozen steps
+        if hasattr(self.lib, 'benv_fault'):
+            self.lib.benv_fault(self.env, self._fault.ctypes.data)
+            zombie = zombie | (self._fault > 0)
         # wrap guard: progress below the episode's start can only mean the
         # game rolled through the ending into a new quest -- terminal
         wrapped = (gp < self.start_progress) | bad_world
