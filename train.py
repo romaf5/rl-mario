@@ -127,6 +127,11 @@ def main():
     # - eval_env_config: overrides for the video/eval env (e.g. start stage)
     curriculum_freq = config['params']['config'].pop('stage_curriculum_freq', 0)
     eval_env_config = config['params']['config'].pop('eval_env_config', None)
+    # - shuffle_minibatches / value_norm_clip: rl_games patches (rlg_patches.py)
+    import rlg_patches
+    rlg_patches.apply(
+        shuffle_minibatches=config['params']['config'].pop('shuffle_minibatches', True),
+        value_norm_clip=config['params']['config'].pop('value_norm_clip', None))
 
     observer = MarioObserver(video_freq=args.video_freq,
                              curriculum_freq=curriculum_freq,

@@ -47,9 +47,11 @@ def apply_mps_patches():
     # macOS aborts a GPU command buffer that runs too long while the display
     # needs the GPU (kIOGPUCommandBufferCallbackErrorImpactingInteractivity,
     # then "victim of GPU error/recovery" for queued work), and PyTorch goes on
-    # with whatever the aborted ops left behind. rl_games only syncs once per
-    # mini-epoch, so several minibatch updates were one long buffer: sync after
-    # every minibatch update (no change to the maths).
+    # with whatever the aborted ops left behind. Sync after every minibatch
+    # update (no change to the maths). NB with use_diagnostics (every config)
+    # rl_games already reads exp_var / clip_frac to the CPU after each update,
+    # which drains the queue too, so this only matters with diagnostics off;
+    # what shortened each buffer was --minibatch-size 1024 (~350 -> ~90 ms).
     from rl_games.algos_torch import a2c_discrete, a2c_continuous
     for cls in (a2c_discrete.DiscreteA2CAgent, a2c_continuous.A2CAgent):
         orig_train = cls.train_actor_critic
