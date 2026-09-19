@@ -47,6 +47,7 @@ class MarioObserver(AlgoObserver):
         # Metrics buffers (collected across episodes within an epoch)
         self.episode_x_pos = []
         self.episode_progress = []
+        self.episode_progress_cleared = []
         self.episode_flags = []
         self.episode_lives = []
         # start_stage -> (progress_gain, warped, victory) per finished episode
@@ -102,13 +103,20 @@ class MarioObserver(AlgoObserver):
             # route-aware: the env's progress also records the level of a
             # wrong exit (4-2 world-5 pipe -> 5-1), which logged "New best
             # progress: World 5-1" for a failure at 4-2
-            self.episode_progress.append(
-                self.route_progress(info['game_progress'], self._route_gps()))
+            prog = self.route_progress(info['game_progress'], self._route_gps())
+            self.episode_progress.append(prog)
+            # the best is a level REACHED by a clear: with random stages the
+            # start level itself (an 8-4 restart) was logged as the best
+            if info.get('stages_cleared', 0) > 0 or info.get('victory', False):
+                self.episode_progress_cleared.append(prog)
 
-        if 'flag_get' in info:
-            # the flag byte is already clear on the step the episode ends
-            # (level change), so the rate read 0.000 forever; count the
-            # level advance instead
+        if 'exit_delta' in info:
+            # the level's NORMAL exit (flag / axe: the next level), on-route or
+            # not: the flag frames are skipped inside the training step, so
+            # the flag byte never shows; the level-advance count used instead
+            # made this a copy of the clear rate (in 4-2: the warp rate)
+            self.episode_flags.append(float(info['exit_delta'] == 1))
+        elif 'flag_get' in info:
             self.episode_flags.append(float(bool(info['flag_get'])
                                             or info.get('stages_cleared', 0) > 0))
 
@@ -121,12 +129,15 @@ class MarioObserver(AlgoObserver):
             # outright victory. progress_gain also counts OFF-ROUTE exits
             # (1-2 -> 1-3), which made the curriculum starve exactly the
             # level whose wrong exit the policy was taking.
+            # gain counts ON-route advances only (a wrong exit's levels are no gain)
+            cleared = info.get('stages_cleared', 0) > 0 or info.get('victory', False)
             self.stage_records.setdefault(info['start_stage'], []).append(
-                (float(info.get('progress_gain', 0)),
+                (float(info.get('progress_gain', 0)) if cleared else 0.0,
                  float(info.get('warped', False)),
                  float(info.get('victory', False)),
                  float(info.get('stages_cleared', 0)),
-                 float(self._is_door(info))))
+                 float(self._is_door(info)),
+                 float(info.get('self_restart', False))))
         if 'victory' in info:
             self.episode_victories.append(float(info['victory']))
         if 'page_resets' in info:
@@ -204,17 +215,17 @@ class MarioObserver(AlgoObserver):
             max_prog = np.max(self.episode_progress)
             self.writer.add_scalar('mario/mean_stage_progress', mean_prog, epoch_num)
             self.writer.add_scalar('mario/max_stage_progress', max_prog, epoch_num)
-            if max_prog > self.best_progress:
-                self.best_progress = max_prog
+            best_now = max(self.episode_progress_cleared, default=-1)
+            if best_now > self.best_progress:
+                self.best_progress = best_now
                 world = int(self.best_progress // 4) + 1
                 stage = int(self.best_progress % 4) + 1
                 print(f'  [Mario] New best progress: World {world}-{stage}')
             self.writer.add_scalar('mario/best_stage_progress', self.best_progress, epoch_num)
 
         if len(self.episode_flags) > 0:
-            # NB in full-game mode the flag is not a terminal, so this only
-            # catches episodes that happened to end on a flag frame; the
-            # meaningful signal is mario/clear/<level> and the rate below
+            # episodes that left their level by its normal exit (flag / axe),
+            # on-route or not; the clear KPI is mario/clear/<level>
             self.writer.add_scalar('mario/flag_get_rate',
                                    float(np.mean(self.episode_flags)),
                                    epoch_num)
@@ -231,7 +242,7 @@ class MarioObserver(AlgoObserver):
 
         # Per-start-stage metrics + clear-rate EMA (drives the curriculum)
         for stage, recs in self.stage_records.items():
-            # columns: gain, warped, victory, stages_cleared, is_door
+            # columns: gain (on-route), warped, victory, stages_cleared, is_door, is_restart
             arr = np.array(recs)
             cleared = (arr[:, 3] > 0) | (arr[:, 2] > 0)
             self.writer.add_scalar(f'mario/gain/{stage}',
@@ -243,6 +254,11 @@ class MarioObserver(AlgoObserver):
             # the curriculum re-weights DOOR resets, so its signal must come
             # from door episodes (archive restarts start mid-level and would
             # make a level look mastered)
+            # per archive restart (clear/<stage> pools door and restart episodes)
+            restart = arr[:, 5] > 0
+            if restart.any():
+                self.writer.add_scalar(f'mario/clear_restart/{stage}',
+                                       float(cleared[restart].mean()), epoch_num)
             door = arr[:, 4] > 0
             if door.any():
                 dclear = float(cleared[door].mean())
@@ -307,6 +323,7 @@ class MarioObserver(AlgoObserver):
         # Clear buffers
         self.episode_x_pos.clear()
         self.episode_progress.clear()
+        self.episode_progress_cleared.clear()
         self.episode_flags.clear()
         self.episode_lives.clear()
         self.stage_records.clear()
@@ -567,7 +584,11 @@ class MarioObserver(AlgoObserver):
                                 state=np.frombuffer(state, dtype=np.uint8),
                                 actions=np.array(acts, dtype=np.int16),
                                 term_names=np.array(term_names), epoch=epoch_num,
-                                raw=int(raw))
+                                raw=int(raw),
+                                # the stepping a replay must use (the multi-life
+                                # eval's stuck-life rule depends on both)
+                                episode_life=0,
+                                unpaid_timeout=int((self.algo.env_config or {}).get('unpaid_timeout', 250)))
         except Exception as e:
             print(f'  [Video] trace dump failed: {e}')
 
@@ -693,6 +714,9 @@ class MarioObserver(AlgoObserver):
             self.writer.add_scalar(f'eval/level_timeout_rate/{lvl}', ends['timeout'], epoch_num)
             self.writer.add_scalar(f'eval/level_wrong_exit_rate/{lvl}', ends['wrong_exit'], epoch_num)
             self.writer.add_scalar(f'eval/level_death_rate/{lvl}', ends['death'], epoch_num)
+            # still playing at the step cap (the level-end loiterers were
+            # invisible: the logged rates did not sum to 1)
+            self.writer.add_scalar(f'eval/level_running_rate/{lvl}', ends['running'], epoch_num)
             order = np.argsort(-maxx)
             for i in range(n):
                 dump.append((lvl, i, fin[i], int(maxx[i]), acts[i], terms[i], xs[i], starts[i],
@@ -727,7 +751,8 @@ class MarioObserver(AlgoObserver):
                             actions=np.array(acts, dtype=np.int16),
                             terms=np.array(terms, dtype=np.float32),
                             term_names=np.array(names or []), x=np.array(xs),
-                            level=str(lvl), epoch=epoch_num, raw=0)
+                            level=str(lvl), epoch=epoch_num, raw=0, episode_life=1,
+                            unpaid_timeout=int((self.algo.env_config or {}).get('unpaid_timeout', 250)))
                     f.write(f'{lvl},{i},{end},{mx},{len(acts)},{tot:.1f},{fn}\n')
         except Exception as e:
             print(f'  [Eval] trace dump failed: {e}')
@@ -915,7 +940,7 @@ class MarioObserver(AlgoObserver):
                 stage = info.get('stage', 1)
                 # Eval frontier scalars of the sequential CLIP from 1-1 (one seeded game)
                 # (eval/game_progress_sampled_* hold the sampled-policy rate)
-                self.writer.add_scalar('eval/game_progress',
+                self.writer.add_scalar('eval/game_progress_clip',
                                        info.get('game_progress', 0), epoch_num)
                 # route-aware: the level index only counts while on the
                 # configured route; an off-route exit (1-2 flag -> 1-3,
@@ -927,12 +952,14 @@ class MarioObserver(AlgoObserver):
                 rgp = {(int(l[0]) - 1) * 4 + int(l[2]) - 1 for l in route}
                 gp_now = int(info.get('game_progress', 0))
                 off_route = bool(info.get('wrong_exit', False)) or (bool(rgp) and gp_now not in rgp)
-                self.writer.add_scalar('eval/route_progress',
+                # one seeded clip each: the _clip suffix says so (the sampled
+                # rates are eval/*_sampled and eval/level_*)
+                self.writer.add_scalar('eval/route_progress_clip',
                                        -1 if off_route else gp_now, epoch_num)
-                self.writer.add_scalar('eval/off_route_exit',
+                self.writer.add_scalar('eval/off_route_exit_clip',
                                        int(off_route), epoch_num)
                 self.writer.add_scalar(
-                    'eval/max_x', max(s[2] for s in step_stats), epoch_num)
+                    'eval/max_x_clip', max(s[2] for s in step_stats), epoch_num)
                 print(f'  [Video] Epoch {epoch_num}: reward={total_reward:.0f}, '
                       f'world={world}-{stage}, x_pos={x_pos}, '
                       f'gif={len(gif_bytes)/1024:.0f}KB, mp4={mp4_path}')

@@ -348,6 +348,11 @@ class MarioNativeVecEnv(IVecEnv):
         self.progress = z(); self.pending = np.full(n, -1, np.int32)
         self.start_progress = z(); self.cleared = z()
         self.warped = z(bool); self.vic_paid = z(bool)
+        # levels gained by the episode's first level change, on-route or not
+        # (1 = the level's normal exit: flag / axe; 15 = 4-2's warp). The flag
+        # frames are skipped inside the hacked step, so no step ever shows
+        # the flag byte: this is how a flag exit is counted
+        self.exit_delta = z()
         self.max_x = z(np.int64); self.last_action = z()
         self.prev_frame = z(np.int64)
         self.unpaid = z(); self.max_gap = z(); self.page_resets = z()
@@ -727,6 +732,7 @@ class MarioNativeVecEnv(IVecEnv):
             self.progress[i] = gp; self.start_progress[i] = gp
             self.pending[i] = -1; self.cleared[i] = 0
             self.warped[i] = False; self.vic_paid[i] = False
+            self.exit_delta[i] = 0
             self.nongame[i] = 0
             self.prev_frame[i] = f0[i]
             self.unpaid[i] = 0; self.max_gap[i] = 0; self.page_resets[i] = 0
@@ -906,6 +912,7 @@ class MarioNativeVecEnv(IVecEnv):
         else:
             wrong_exit = bad_world.copy()
         good = ok & ~wrong_exit
+        self.exit_delta = np.where(ok & (self.exit_delta == 0), delta, self.exit_delta)
         if ok.any():
             self.cleared += good.astype(np.int32)
             self.warped |= good & (delta >= 2)
@@ -1190,6 +1197,7 @@ class MarioNativeVecEnv(IVecEnv):
                                      - self.start_progress[i]),
                 'stages_cleared': int(self.cleared[i]),
                 'warped': bool(self.warped[i]),
+                'exit_delta': int(self.exit_delta[i]),
                 'victory': bool(victory[i]),
                 'flag_get': bool(flag[i]), 'life': int(life[i]),
                 'world': int(ram[i, 0x75F]) + 1,

@@ -142,5 +142,53 @@ check('level eval defaults to the TRAINED levels (a 4-2 run evaluates 4-2 only, 
 s42 = obs42._sequential_eval(model, 31, n=2, max_steps=20, seed=1)
 check('sequential eval starts from the first trained level (a 4-2 run: progress index 13 at the start)', s42['progress_max'] == 13 and s42['progress_mean'] == 13.0, s42)
 
+# ---------------------------------------------------------------- training metrics (2026-09-19 review)
+check('level eval logs the running rate (episodes still playing at the step cap)',
+      'eval/level_running_rate/1-1' in obs.writer.scalars, sorted(t for t in obs.writer.scalars if 'running' in t))
+obs_m = MarioObserver(video_freq=0)
+obs_m.algo = types.SimpleNamespace(env_config=dict(ec42), is_rnn=False); obs_m.writer = FakeWriter(os.path.join(run_dir, 'sm'))
+obs_m.game_scores = types.SimpleNamespace(current_size=0); obs_m.stage_list = None
+eps = [  # 4-2 run: flag into 4-3 (wrong exit), world-5 pipe, warp (restart), a death (restart), a door death
+    dict(start_stage='4-2', game_progress=14, progress_gain=1, exit_delta=1, wrong_exit=True, stages_cleared=0, self_restart=False, door=True),
+    dict(start_stage='4-2', game_progress=16, progress_gain=3, exit_delta=3, wrong_exit=True, stages_cleared=0, self_restart=False, door=True),
+    dict(start_stage='4-2', game_progress=28, progress_gain=15, exit_delta=15, warped=True, stages_cleared=1, self_restart=True, door=False),
+    dict(start_stage='4-2', game_progress=28, progress_gain=15, exit_delta=15, warped=True, stages_cleared=1, self_restart=True, door=False),
+    dict(start_stage='4-2', game_progress=13, progress_gain=0, exit_delta=0, stages_cleared=0, self_restart=True, door=False),
+    dict(start_stage='4-2', game_progress=13, progress_gain=0, exit_delta=0, stages_cleared=0, self_restart=False, door=True)]
+for e in eps:
+    obs_m._process_single_info(dict(e, max_x_pos=100, flag_get=False))
+obs_m.after_print_stats(0, 1, 0.0)
+sc = {k: v[-1][1] for k, v in obs_m.writer.scalars.items()}
+check('metrics: flag_get_rate counts normal exits (1 flag of 6), not clears (2 warps) (%.3f)' % sc.get('mario/flag_get_rate', -1),
+      abs(sc.get('mario/flag_get_rate', -1) - 1 / 6) < 1e-9, sc.get('mario/flag_get_rate'))
+check('metrics: clear_restart is the clear rate per archive restart (2 of 3)', abs(sc.get('mario/clear_restart/4-2', -1) - 2 / 3) < 1e-9,
+      sc.get('mario/clear_restart/4-2'))
+check('metrics: clear_door counts door episodes only (0 of 3)', sc.get('mario/clear_door/4-2') == 0.0, sc.get('mario/clear_door/4-2'))
+check('metrics: gain counts on-route advances only (30 / 6 = 5.0; wrong exits gain nothing)', sc.get('mario/gain/4-2') == 5.0,
+      sc.get('mario/gain/4-2'))
+check('metrics: best progress is the warp\'s 8-1 (28), not a wrong exit', sc.get('mario/best_stage_progress') == 28,
+      sc.get('mario/best_stage_progress'))
+obs_b = MarioObserver(video_freq=0)
+obs_b.algo = types.SimpleNamespace(env_config=dict(cfg['env_config']), is_rnn=False); obs_b.writer = FakeWriter(os.path.join(run_dir, 'sb'))
+obs_b.game_scores = types.SimpleNamespace(current_size=0); obs_b.stage_list = None
+obs_b._process_single_info(dict(start_stage='8-4', game_progress=31, stages_cleared=0, self_restart=True, door=False))
+obs_b.after_print_stats(0, 1, 0.0)
+check('metrics: a random-stage restart at 8-4 that clears nothing is not the best progress (%s)'
+      % obs_b.writer.scalars.get('mario/best_stage_progress'),
+      obs_b.writer.scalars.get('mario/best_stage_progress', [(0, 0.0)])[-1][1] == 0)
+from mario_native_vecenv import MarioNativeVecEnv as _E
+def _exit_delta(name):
+    e = _E('xd', 1, **dict(ec42, archive_path=None, explorer_envs=0, n_threads=1, dense_infos=True, seed=0,
+                           self_restart_prob=0.0, end_on_stage_exit=True))
+    e.reset(); out = None
+    for a in np.load(os.path.join(ROOT, 'tests', 'data', name)).astype(int):
+        o, r, d, inf = e.step(np.array([a]))
+        if d[0]:
+            out = inf[0].get('exit_delta'); break
+    e.close(); return out
+check('env: exit_delta is 1 for the flag into 4-3 and 15 for the warp into 8-1',
+      _exit_delta('exit_flag_4-2.npy') == 1 and _exit_delta('vine_route_4-2.npy') == 15,
+      (_exit_delta('exit_flag_4-2.npy'), _exit_delta('vine_route_4-2.npy')))
+
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)
