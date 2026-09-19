@@ -380,3 +380,12 @@ step hiding the death, savestates being 90% ROM (1 GB archive rewritten every 18
 (0 violations) then `python train.py --config configs/mario_ppo_native_42.yaml --video-freq 200`. Read first:
 episode mix (door vs restart), `mario/clear_restart/4-2`, `mario/clear_door/4-2`, `eval/level_clear/4-2`,
 `eval/level_running_rate/4-2` and the frontier spread (no cell above ~5% of the frontier draws).
+- Benches 0 FAIL on the GPU box after `native/build.sh` (the .so files predated the core changes); audit (random policy,
+  2000 x 128 steps) 0 violations, 585 archive states re-keyed, 0 mismatches (door 25% / restart 75% of steps).
+- **Mario_PPO42k** started 2026-09-19 14:17 on GPU 1 (`CUDA_VISIBLE_DEVICES=1`: GPU 0 carried an outside load), config
+  unchanged, `--video-freq 200`; ~2,500 fps total (128 training + 128 explorer cores). Log `logs/train_ppo_42k_0919-1417.log`.
+- PREDICTION: 30 min (14:48) training warps (`mario/clear_restart/4-2` > 0) and no cell above ~5% of the frontier draws;
+  2 h (16:17) `mario/clear_restart/4-2` above run j's per-restart rate (~2-3%) and rising; 4 h (18:17) first door-side
+  clear (`mario/clear_door/4-2` > 0); 8 h (22:17) sampled `eval/level_clear/4-2` > 0. Miss at 2 h -> check the critic
+  on pre-warp states (does the value reach the warp's return under the 20-sd clamp?) and the frontier spread before any
+  config change.
