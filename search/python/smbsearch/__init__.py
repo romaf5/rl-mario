@@ -87,6 +87,10 @@ class Search:
         L.ss_frames.restype = I; L.ss_frames.argtypes = [P, ctypes.c_char_p, I, I, P]
         L.ss_obs.restype = I; L.ss_obs.argtypes = [P, ctypes.c_char_p, P]
         L.ss_replay_obs.restype = I; L.ss_replay_obs.argtypes = [P, ctypes.c_char_p, P, I, P, P, P]
+        L.ss_forced_along.restype = I; L.ss_forced_along.argtypes = [P, ctypes.c_char_p, P, I, P]
+        L.ss_lookahead.restype = I
+        L.ss_lookahead.argtypes = [P, ctypes.c_char_p, P, I, P, I, ctypes.c_char_p, I, I, I, P, I,
+                                   ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int32)]
         rom_bytes = open(rom, 'rb').read()
         self._ctx = L.ss_create(rom_bytes, len(rom_bytes), int(threads or os.cpu_count()))
         if not self._ctx:
@@ -171,6 +175,18 @@ class Search:
                                   ctypes.byref(st), None if ref_start is None else self._state(ref_start))
         return self._result(out, n, st)
 
+    def lookahead(self, state, route, reference, ref_start=None, beam=200, per_cell=16, horizon=50):
+        """Local teacher: the beam for at most `horizon` steps along the reference.
+        Returns (actions of the best path, frames to the goal (exact if found), found)."""
+        r, rp, rn = self._route(route)
+        ref = np.ascontiguousarray(reference, dtype=np.uint8)
+        out = np.zeros(max(horizon, 1), dtype=np.uint8)
+        est, found = ctypes.c_double(), ctypes.c_int32()
+        n = self._lib.ss_lookahead(self._ctx, self._state(state), rp, rn, ref.ctypes.data, len(ref),
+                                   None if ref_start is None else self._state(ref_start), int(beam), int(per_cell),
+                                   int(horizon), out.ctypes.data, len(out), ctypes.byref(est), ctypes.byref(found))
+        return out[:max(n, 0)].copy(), est.value, bool(found.value)
+
     def frames(self, state, n, buttons=0):
         """n raw frames holding buttons (a start delay: NOOP frames). Returns the end state."""
         end = ctypes.create_string_buffer(self.state_size)
@@ -182,6 +198,14 @@ class Search:
         out = np.zeros((OBS, OBS), dtype=np.uint8)
         self._lib.ss_obs(self._ctx, self._state(state), out.ctypes.data)
         return out
+
+    def forced_along(self, state, actions):
+        """Per step of the replay: True where the input did nothing (all actions reach one state)."""
+        a = np.ascontiguousarray(actions, dtype=np.uint8)
+        out = np.zeros(len(a), np.uint8)
+        if self._lib.ss_forced_along(self._ctx, self._state(state), a.ctypes.data, len(a), out.ctypes.data) < 0:
+            raise ValueError('bad action index')
+        return out.astype(bool)
 
     def replay_obs(self, state, actions):
         """replay() plus each step's 84x84 frame: (obs (n, 84, 84) uint8, trace, end state)."""
@@ -198,7 +222,7 @@ class Search:
 
 class _MctsParams(ctypes.Structure):
     _fields_ = [('c_puct', ctypes.c_float), ('fpu', ctypes.c_float), ('scale', ctypes.c_float),
-                ('v_death', ctypes.c_float), ('max_nodes', ctypes.c_int32)]
+                ('v_death', ctypes.c_float), ('max_nodes', ctypes.c_int32), ('value_mix', ctypes.c_float)]
 
 
 class Forest:
@@ -216,7 +240,7 @@ class Forest:
     RUNNING, GOAL, DEAD = 0, 1, 2
 
     def __init__(self, search, n_trees, c_puct=1.5, fpu=0.5, scale=32.0, v_death=4096.0, max_nodes=1 << 16,
-                 max_leaves=2048, stacks=None):
+                 max_leaves=2048, stacks=None, value_mix=1.0):
         self.s = search
         L = self._lib = search._lib
         P, I, F = ctypes.c_void_p, ctypes.c_int, ctypes.c_float
@@ -231,7 +255,9 @@ class Forest:
         L.ss_mcts_forced.argtypes = [P, P, I, P]
         L.ss_mcts_state.argtypes = [P, I, P, P, P]
         L.ss_mcts_nodes.restype = I; L.ss_mcts_nodes.argtypes = [P, I]
-        self.params = _MctsParams(c_puct, fpu, scale, v_death, max_nodes)
+        L.ss_mcts_set_route.argtypes = [P, I, ctypes.c_char_p, P, I]
+        L.ss_mcts_set_value_mix.argtypes = [P, F]
+        self.params = _MctsParams(c_puct, fpu, scale, v_death, max_nodes, value_mix)
         self.v_death = v_death
         self.n_trees = n_trees
         self._m = L.ss_mcts_create(search._ctx, n_trees, ctypes.byref(self.params))
@@ -294,3 +320,12 @@ class Forest:
 
     def nodes(self, tree):
         return self._lib.ss_mcts_nodes(self._m, tree)
+
+    def set_route(self, level, start, actions):
+        """Leaf values for the level also use frames to go along this route (its actions from start)."""
+        a = np.ascontiguousarray(actions, dtype=np.uint8)
+        self._lib.ss_mcts_set_route(self._m, gp(level), self.s._state(start), a.ctypes.data, len(a))
+
+    def set_value_mix(self, mix):
+        """Leaf value = mix x net + (1 - mix) x route (where a route is set)."""
+        self._lib.ss_mcts_set_value_mix(self._m, float(mix))

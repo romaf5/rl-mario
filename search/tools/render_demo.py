@@ -29,7 +29,7 @@ def mp4_writer(path, crf=18):
                                              '-movflags', '+faststart'])
 
 
-def frames_of(start, actions, title, retro_state='Level1-1', scale=4, sink=None):
+def frames_of(start, actions, title, retro_state='Level1-1', scale=4, sink=None, lead_frames=0):
     """verified frames with the HUD, passed to sink (or returned as a list); returns (frames, splits)"""
     out, splits, cur = [], [], [None]
     sink = sink or out.append
@@ -54,7 +54,7 @@ def frames_of(start, actions, title, retro_state='Level1-1', scale=4, sink=None)
         full.paste(bar, (0, 0)); full.paste(im, (0, bh))
         sink(np.asarray(full))
 
-    res = verify(start, actions, on_frame=on_frame, retro_state=retro_state)
+    res = verify(start, actions, on_frame=on_frame, retro_state=retro_state, lead_frames=lead_frames)
     if not res['ok']:
         raise SystemExit('[render] verification FAILED at frame %d: %s' % (res['frames'], res['mismatch']))
     return out, splits
@@ -84,7 +84,8 @@ def main():
         if n[0] % a.gif_every == 0:
             gif.append(np.asarray(Image.fromarray(x).resize((a.gif_width, gh(x)), Image.BILINEAR)))
         n[0] += 1
-    _, splits = frames_of(start, z['actions'], 'optimised' if keep else None, rs, a.scale, sink)
+    lead = int(z['lead_frames']) if 'lead_frames' in z.files else 0
+    _, splits = frames_of(start, z['actions'], 'optimised' if keep else None, rs, a.scale, sink, lead)
     w.close()
     imageio.mimwrite(os.path.join(out, 'demo.gif'), gif, duration=a.gif_every / FPS, loop=0)
     print('[render] demo.mp4: %d frames (%.2f s, %.1f MB); splits %s' % (

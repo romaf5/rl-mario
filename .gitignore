@@ -6,3 +6,6 @@ build/
 *.log
 .claude/
 retro_integration/SuperMarioBros-Nes-v0/rom.nes
+smbzero/data/
+smbzero/runs/
+smbzero/runs_archive/

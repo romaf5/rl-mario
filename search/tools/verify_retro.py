@@ -65,7 +65,8 @@ def retro_state_of(start):
     return 'FullGame' if start == 'FullGame' else 'Level%s' % start
 
 
-def verify(start_state, actions, on_frame=None, retro_state='Level1-1'):
+def verify(start_state, actions, on_frame=None, retro_state='Level1-1', lead_frames=0):
+    """lead_frames: NOOP frames before the first action (a start delay)."""
     import stable_retro as retro
     retro.data.Integrations.add_custom_path(os.path.join(REPO, 'retro_integration'))
     nat = _Native(start_state)
@@ -83,28 +84,28 @@ def verify(start_state, actions, on_frame=None, retro_state='Level1-1'):
     renv.em.set_state(bytes(st))
     f = 0
     rr = np.frombuffer(renv.get_ram(), dtype=np.uint8)[:0x800]
-    for a in np.asarray(actions, dtype=np.uint8):
-        b = ACTION_BUTTONS[int(a)]
-        for _ in range(4):
-            nat.frame(b)
-            renv.em.set_button_mask(_pad_mask(b), 0)
-            renv.em.step()
-            rr = np.frombuffer(renv.get_ram(), dtype=np.uint8)[:0x800]
-            nr = nat.ram()
-            if not np.array_equal(nr[GAME], rr[GAME]):
-                d = np.nonzero((nr != rr) & GAME)[0]
-                renv.close()
-                return dict(ok=False, frames=f, mismatch=['$%04X:%02X!=%02X' % (x, nr[x], rr[x]) for x in d[:6]])
-            if on_frame is not None:
-                on_frame(f, renv.em.get_screen(), rr)
-            f += 1
+    buttons = [0] * int(lead_frames) + [ACTION_BUTTONS[int(a)] for a in np.asarray(actions, dtype=np.uint8) for _ in range(4)]
+    for b in buttons:
+        nat.frame(b)
+        renv.em.set_button_mask(_pad_mask(b), 0)
+        renv.em.step()
+        rr = np.frombuffer(renv.get_ram(), dtype=np.uint8)[:0x800]
+        nr = nat.ram()
+        if not np.array_equal(nr[GAME], rr[GAME]):
+            d = np.nonzero((nr != rr) & GAME)[0]
+            renv.close()
+            return dict(ok=False, frames=f, mismatch=['$%04X:%02X!=%02X' % (x, nr[x], rr[x]) for x in d[:6]])
+        if on_frame is not None:
+            on_frame(f, renv.em.get_screen(), rr)
+        f += 1
     renv.close()
     return dict(ok=True, frames=f, mismatch=[], end_level=level_name(int(rr[0x75F]) * 4 + int(rr[0x75C])))
 
 
 if __name__ == '__main__':
     z = np.load(sys.argv[1])
-    res = verify(load_state(str(z['start'])), z['actions'], retro_state=retro_state_of(str(z['start'])))
+    lead = int(z['lead_frames']) if 'lead_frames' in z.files else 0
+    res = verify(load_state(str(z['start'])), z['actions'], retro_state=retro_state_of(str(z['start'])), lead_frames=lead)
     print('[verify] %s: %d frames, %s%s' % ('PASS' if res['ok'] else 'FAIL', res['frames'],
                                             res.get('end_level', ''), ' ' + ' '.join(res['mismatch'])))
     sys.exit(0 if res['ok'] else 1)

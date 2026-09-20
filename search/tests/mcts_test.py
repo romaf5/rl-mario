@@ -50,14 +50,16 @@ def main():
     print('forced: 1-1 start %s, 1-2 intermediate screen %s (level %s)' % (fz[0], fz[1], s.level(s_end11)))
     assert not fz[0] and fz[1]
 
-    # 3. the goal: 6 steps before 1-2 loads (castle walk, forced) b = 24 frames exactly
+    # 3. the goal: 6 steps before 1-2 loads (the castle walk, forced) the search sees it
+    #    (every simulation that gets there returns 4 frames per step), and the 6th commit is the goal
     _, s390 = s.replay(start, route[:390])
     f3 = Forest(s, 1, max_leaves=256)
     assert f3.reset(0, s390, ROUTE)
-    think(f3, [0], 3000, 128)
+    think(f3, [0], 3000, 128, value=0.0)
     visits, best, rb, rn = f3.root(0)
-    print('6 steps before the goal: root b = %.0f frames (want 24), %d simulations' % (rb, rn))
-    assert rb == 24.0
+    terms = [f3.commit(0, 0) for _ in range(6)]
+    print('6 steps before the goal: root b = %.1f frames (<= 24), commits %s' % (rb, terms))
+    assert 0 < rb <= 24.0 and terms == [0, 0, 0, 0, 0, Forest.GOAL]
 
     # 4. throughput: one tree, waves of 256
     f4 = Forest(s, 1, max_leaves=256)

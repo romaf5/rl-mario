@@ -5,6 +5,7 @@
 #include <random>
 #include <thread>
 #include <vector>
+#include "core/keys.h"
 #include "core/pool.h"
 #include "emu/emu.h"
 #include "emu/obs.h"
@@ -76,6 +77,18 @@ int ss_replay(ss_ctx* c, const uint8_t* start, const uint8_t* actions, int n, in
     return n;
 }
 
+int ss_lookahead(ss_ctx* c, const uint8_t* start, const int32_t* route, int n_route, const uint8_t* ref, int n_ref,
+                 const uint8_t* ref_start, int beam, int per_cell, int horizon, uint8_t* out, int max_out,
+                 double* est_frames, int32_t* found) {
+    OptimizeParams p;
+    p.beam = beam; p.per_cell = per_cell; p.max_depth = horizon; p.partial = true;
+    const OptimizeResult r = optimize(*c->pool, c->emus, start, std::vector<int>(route, route + n_route),
+                                      std::vector<uint8_t>(ref, ref + n_ref), p, ref_start);
+    if (est_frames) *est_frames = r.est_frames;
+    if (found) *found = r.found;
+    return copy_out(r.actions, out, max_out);
+}
+
 int ss_frames(ss_ctx* c, const uint8_t* state, int n, int buttons, uint8_t* end_state) {
     Emu& e = *c->emus[0];
     e.load_full(state);
@@ -100,6 +113,32 @@ int ss_replay_obs(ss_ctx* c, const uint8_t* start, const uint8_t* actions, int n
         if (trace) trace_row(e.ram(), trace + (size_t)i * SS_TRACE);
     }
     if (end_state) e.save_full(end_state);
+    return n;
+}
+
+int ss_forced_along(ss_ctx* c, const uint8_t* start, const uint8_t* actions, int n, uint8_t* out) {
+    const size_t CS = compact_state_size();
+    std::vector<uint8_t> st((size_t)n * CS);
+    Emu& e0 = *c->emus[0];
+    e0.load_full(start);
+    for (int i = 0; i < n; i++) {
+        if (actions[i] >= kNumActions) return -1;
+        e0.save(st.data() + (size_t)i * CS);
+        e0.step(actions[i]);
+    }
+    std::vector<uint64_t> key((size_t)n * kNumActions);
+    c->pool->parallel_for((int64_t)n * kNumActions, [&](int64_t j, int w) {
+        Emu& e = *c->emus[w];
+        e.load(st.data() + (size_t)(j / kNumActions) * CS);
+        e.step((int)(j % kNumActions));
+        e.step(0);
+        key[j] = exact_key(e.ram());
+    }, 4);
+    for (int i = 0; i < n; i++) {
+        out[i] = 1;
+        for (int a = 1; a < kNumActions; a++)
+            if (key[(size_t)i * kNumActions + a] != key[(size_t)i * kNumActions]) { out[i] = 0; break; }
+    }
     return n;
 }
 
@@ -185,7 +224,10 @@ int ss_optimize(ss_ctx* c, const uint8_t* start, const int32_t* route, int n_rou
 
 ss_mcts* ss_mcts_create(ss_ctx* c, int n_trees, const ss_mcts_params* p) {
     MctsParams q;
-    if (p) { q.c_puct = p->c_puct; q.fpu = p->fpu; q.scale = p->scale; q.v_death = p->v_death; q.max_nodes = p->max_nodes; }
+    if (p) {
+        q.c_puct = p->c_puct; q.fpu = p->fpu; q.scale = p->scale; q.v_death = p->v_death;
+        q.max_nodes = p->max_nodes; q.value_mix = p->value_mix;
+    }
     return n_trees > 0 ? new ss_mcts(c, n_trees, q) : nullptr;
 }
 
@@ -218,5 +260,9 @@ void ss_mcts_state(ss_mcts* m, int t, uint8_t* full, uint8_t* ram, uint8_t* stac
     m->forest.root_state(t, full, ram, stack);
 }
 int ss_mcts_nodes(ss_mcts* m, int t) { return m->forest.nodes(t); }
+void ss_mcts_set_route(ss_mcts* m, int level_gp, const uint8_t* start, const uint8_t* actions, int n) {
+    m->forest.set_route(level_gp, start, actions, n);
+}
+void ss_mcts_set_value_mix(ss_mcts* m, float mix) { m->forest.set_value_mix(mix); }
 
 }  // extern "C"

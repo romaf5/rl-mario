@@ -48,6 +48,19 @@ public:
     }
     int len() const { return (int)x_.size() - 1; }
 
+    // the reference step nearest to a state in its area (a start that matches no
+    // situation exactly: mid-level, reached another way); 0 if the area never occurs
+    int nearest(const uint8_t* r) const {
+        const uint32_t f = frame_id(r);
+        int best = 0, bd = 1 << 30;
+        for (int t = 0; t <= len(); t++) {
+            if (frame_[t] != f) continue;
+            const int d = std::max(std::abs(x_[t] - mario_x(r)), std::abs(y_[t] - mario_y(r)));
+            if (d <= bd) { bd = d; best = t; }                   // ties: the later step
+        }
+        return best;
+    }
+
     // a child's (tau, rank) from its RAM and its parent's (tau, rank)
     void rank(const uint8_t* r, int ptau, int64_t prank, int* tau, int64_t* rank) const {
         if (len() <= 0) { *tau = 0; *rank = px_units(100000 - mario_x(r)); return; }   // no reference: go right

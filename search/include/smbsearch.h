@@ -40,10 +40,19 @@ SS_API int ss_explore(ss_ctx* ctx, const uint8_t* start, const int32_t* route, i
 SS_API int ss_optimize(ss_ctx* ctx, const uint8_t* start, const int32_t* route, int n_route,
                        const uint8_t* ref, int n_ref, int beam, int per_cell, int max_depth,
                        int verbose, uint8_t* out, int max_out, ss_stats* st, const uint8_t* ref_start);
+/* local teacher: the beam for at most `horizon` steps from start along the reference;
+ * returns the best path (to the goal if within the horizon, else to the best-ranked
+ * node) and its frames to the goal in *est_frames (exact if the goal was reached) */
+SS_API int ss_lookahead(ss_ctx* ctx, const uint8_t* start, const int32_t* route, int n_route,
+                        const uint8_t* ref, int n_ref, const uint8_t* ref_start, int beam, int per_cell,
+                        int horizon, uint8_t* out, int max_out, double* est_frames, int32_t* found);
 /* the net's frames: 84x84 grayscale, status bar cropped, max of each step's last 2 frames */
 #define SS_OBS 84
 SS_API int ss_frames(ss_ctx* ctx, const uint8_t* state, int n, int buttons, uint8_t* end_state);
 SS_API int ss_obs(ss_ctx* ctx, const uint8_t* state, uint8_t* obs_out /* 84*84: the current frame */);
+/* per step of a replay: 1 if the input did nothing there (every (action, NOOP) pair from
+ * that state reaches one exact state: transitions, flag, pipes) */
+SS_API int ss_forced_along(ss_ctx* ctx, const uint8_t* start, const uint8_t* actions, int n, uint8_t* out);
 SS_API int ss_replay_obs(ss_ctx* ctx, const uint8_t* start, const uint8_t* actions, int n,
                          uint8_t* obs_out /* n*84*84 */, int32_t* trace, uint8_t* end_state);
 
@@ -52,7 +61,7 @@ SS_API int ss_replay_obs(ss_ctx* ctx, const uint8_t* start, const uint8_t* actio
  * them (priors as probabilities, values in frames to the segment goal) and backs up.
  * Leaves are (tree, node) int32 pairs; stacks are 4 x 84 x 84 uint8, oldest first. */
 typedef struct ss_mcts ss_mcts;
-typedef struct { float c_puct, fpu, scale, v_death; int32_t max_nodes; } ss_mcts_params;
+typedef struct { float c_puct, fpu, scale, v_death; int32_t max_nodes; float value_mix; } ss_mcts_params;
 SS_API ss_mcts* ss_mcts_create(ss_ctx* ctx, int n_trees, const ss_mcts_params* p);
 SS_API void ss_mcts_destroy(ss_mcts* m);
 SS_API int ss_mcts_reset(ss_mcts* m, int tree, const uint8_t* state, const int32_t* route, int n_route);
@@ -65,6 +74,10 @@ SS_API int ss_mcts_commit(ss_mcts* m, int tree, int action);   /* new root: 0 ru
 SS_API void ss_mcts_forced(ss_mcts* m, const int32_t* trees, int n, int32_t* out);
 SS_API void ss_mcts_state(ss_mcts* m, int tree, uint8_t* full, uint8_t* ram, uint8_t* stack);
 SS_API int ss_mcts_nodes(ss_mcts* m, int tree);
+/* leaf values = value_mix x net + (1 - value_mix) x frames to go along the level's route
+ * (the search's progress rank) where a route is set: its actions from its start state */
+SS_API void ss_mcts_set_route(ss_mcts* m, int level_gp, const uint8_t* start, const uint8_t* actions, int n);
+SS_API void ss_mcts_set_value_mix(ss_mcts* m, float mix);
 #ifdef __cplusplus
 }
 #endif

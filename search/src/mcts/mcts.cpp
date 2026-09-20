@@ -11,8 +11,8 @@ namespace {
 void init_node(MctsNode& n, int32_t parent, uint8_t action) {
     n.parent = parent;
     for (int a = 0; a < kNumActions; a++) { n.child[a] = -1; n.prior[a] = 1.0f / kNumActions; }
-    n.n = 0; n.pending = 0; n.b = 0; n.action = action;
-    n.term = kRunning; n.evaluated = 0; n.inflight = 0;
+    n.n = 0; n.pending = 0; n.w = 0; n.b = 0; n.action = action;
+    n.term = kRunning; n.evaluated = 0; n.inflight = 0; n.tau = 0; n.rank = 0;
 }
 
 uint8_t term_of(Outcome o) { return o == Outcome::Goal ? kGoal : o == Outcome::Dead ? kDead : kRunning; }
@@ -36,6 +36,37 @@ int32_t Forest::alloc(MctsTree& T) {
     return id;
 }
 
+void Forest::set_route(int level, const uint8_t* start_full, const uint8_t* actions, int n) {
+    auto rp = std::make_unique<RefProgress>();
+    Emu& e = *emus_[0];
+    e.load_full(start_full);
+    rp->add(e.ram(), 0);
+    for (int i = 0; i < n; i++) {
+        e.step(actions[i]);
+        if (level_gp(e.ram()) != level || e.ram()[0x770] == 2) break;   // the segment's goal
+        rp->add(e.ram(), i + 1);
+    }
+    routes_[level] = std::move(rp);
+}
+
+// the root's route progress: anchored at the nearest reference step (like a beam start)
+void Forest::route_root(MctsTree& T) {
+    auto it = routes_.find(T.seg.start_gp);
+    T.rp = it == routes_.end() ? nullptr : it->second.get();
+    if (!T.rp) return;
+    MctsNode& R = T.nodes[T.root];
+    const uint8_t* r = emus_[0]->ram();                   // the root's state is loaded
+    const int tau0 = T.rp->nearest(r);
+    T.rp->rank(r, tau0, (int64_t)1 << 40, &R.tau, &R.rank);
+    if (!in_control(r)) R.rank = (int64_t)(T.rp->len() - tau0) * kStepUnits;
+}
+
+float Forest::route_value(int t, int32_t node) const {
+    const MctsTree& T = trees_[t];
+    if (!T.rp) return -1.f;
+    return std::min(p_.v_death, std::max(0.f, (float)T.nodes[node].rank / 16.f));
+}
+
 bool Forest::reset(int t, const uint8_t* full, const std::vector<int>& route) {
     MctsTree& T = trees_[t];
     T.nodes.clear(); T.states.clear(); T.frames.clear(); T.free_ids.clear();
@@ -51,6 +82,7 @@ bool Forest::reset(int t, const uint8_t* full, const std::vector<int>& route) {
     for (auto& h : T.hist) memcpy(h, &T.frames[(size_t)r * kObsSize], kObsSize);
     T.nodes[r].term = term_of(T.seg.classify(e.ram()));
     T.root = r;
+    route_root(T);
     return true;
 }
 
@@ -66,14 +98,17 @@ void Forest::stack_of(const MctsTree& T, int32_t node, uint8_t* out) const {
     }
 }
 
-void Forest::refresh(MctsTree& T, int32_t x) {
-    MctsNode& N = T.nodes[x];
-    float best = 1e30f;
-    for (int a = 0; a < kNumActions; a++) {
-        const int32_t c = N.child[a];
-        if (c >= 0 && T.nodes[c].evaluated) best = std::min(best, T.nodes[c].b);
+// a finished simulation: the leaf is worth v frames to go; each ancestor k steps up
+// gets 4k + v (pending: the path was counted in flight by select)
+void Forest::add_path(MctsTree& T, int32_t leaf, float v, bool pending) {
+    double g = v;
+    for (int32_t x = leaf; x >= 0; x = T.nodes[x].parent) {
+        MctsNode& N = T.nodes[x];
+        if (pending && x != leaf) N.pending--;
+        N.w += g; N.n++;
+        N.b = (float)(N.w / N.n);
+        g += kFrameSkip;
     }
-    if (best < 1e30f) N.b = std::min(p_.v_death, kFrameSkip + best);
 }
 
 int Forest::select(const int32_t* trees, int n_trees, int per_tree, int max_leaves, MctsLeaf* leaves,
@@ -141,8 +176,7 @@ int Forest::select(const int32_t* trees, int n_trees, int per_tree, int max_leav
             }
             if (leaf < 0) continue;
             if (terminal) {                               // a known end: count it, no net
-                T.nodes[leaf].n++;
-                for (int j = (int)path.size() - 1; j >= 0; j--) { T.nodes[path[j]].n++; refresh(T, path[j]); }
+                add_path(T, leaf, T.nodes[leaf].term == kGoal ? 0.f : p_.v_death, false);
                 continue;
             }
             for (int32_t p : path) T.nodes[p].pending++;
@@ -161,6 +195,10 @@ int Forest::select(const int32_t* trees, int n_trees, int per_tree, int max_leav
         e.step_obs(C.action, &T.frames[(size_t)J.node * kObsSize]);
         e.save(&T.states[(size_t)J.node * cs_]);
         C.term = term_of(T.seg.classify(e.ram()));
+        if (T.rp) {
+            const MctsNode& P = T.nodes[C.parent];
+            T.rp->rank(e.ram(), P.tau, P.rank, &C.tau, &C.rank);
+        }
     }, 1);
 
     int n_out = 0;
@@ -168,11 +206,8 @@ int Forest::select(const int32_t* trees, int n_trees, int per_tree, int max_leav
         MctsTree& T = trees_[J.t];
         MctsNode& C = T.nodes[J.node];
         if (C.term == kRunning) { leaves[n_out++] = {J.t, J.node}; continue; }
-        const float v = C.term == kGoal ? 0.f : p_.v_death;   // a new terminal: back it up now
-        C.evaluated = 1; C.inflight = 0; C.b = v; C.n = 1;
-        for (int32_t x = C.parent; x >= 0; x = T.nodes[x].parent) {
-            T.nodes[x].pending--; T.nodes[x].n++; refresh(T, x);
-        }
+        C.evaluated = 1; C.inflight = 0;                  // a new terminal: back it up now
+        add_path(T, J.node, C.term == kGoal ? 0.f : p_.v_death, true);
     }
     pool_.parallel_for(n_out, [&](int64_t i, int) {
         stack_of(trees_[leaves[i].tree], leaves[i].node, obs + (size_t)i * kStack * kObsSize);
@@ -185,11 +220,10 @@ void Forest::backup(int n, const MctsLeaf* leaves, const float* priors, const fl
         MctsTree& T = trees_[leaves[i].tree];
         MctsNode& C = T.nodes[leaves[i].node];
         memcpy(C.prior, priors + (size_t)i * kNumActions, sizeof C.prior);
-        C.b = std::min(p_.v_death, std::max(0.f, values[i]));
-        C.evaluated = 1; C.inflight = 0; C.n++;
-        for (int32_t x = C.parent; x >= 0; x = T.nodes[x].parent) {
-            T.nodes[x].pending--; T.nodes[x].n++; refresh(T, x);
-        }
+        C.evaluated = 1; C.inflight = 0;
+        float v = std::min(p_.v_death, std::max(0.f, values[i]));
+        if (T.rp) v = p_.value_mix * v + (1 - p_.value_mix) * route_value(leaves[i].tree, leaves[i].node);
+        add_path(T, leaves[i].node, v, true);
     }
 }
 
@@ -244,7 +278,8 @@ int Forest::commit(int t, int action) {
         e.save(&T.states[(size_t)c * cs_]);
         MctsNode& C = T.nodes[c];
         C.term = term_of(T.seg.classify(e.ram()));
-        if (C.term != kRunning) { C.evaluated = 1; C.b = C.term == kGoal ? 0.f : p_.v_death; }
+        if (T.rp) T.rp->rank(e.ram(), T.nodes[T.root].tau, T.nodes[T.root].rank, &C.tau, &C.rank);
+        if (C.term != kRunning) { C.evaluated = 1; C.b = C.term == kGoal ? 0.f : p_.v_death; C.w = C.b; C.n = 1; }
     }
     memmove(T.hist[1], T.hist[0], (size_t)(kStack - 2) * kObsSize);
     memcpy(T.hist[0], &T.frames[(size_t)T.root * kObsSize], kObsSize);

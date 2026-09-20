@@ -40,7 +40,10 @@ OptimizeResult optimize(Pool& pool, std::vector<Emu*>& emus, const uint8_t* star
     e0.load(s0.data());
     int t0v = 0;
     int64_t d0 = 0;
-    rp.rank(e0.ram(), 0, (int64_t)1 << 40, &t0v, &d0);
+    // a start away from the reference's own (mid-level): anchor at its nearest reference step
+    const int tau0 = ref_start_full ? rp.nearest(e0.ram()) : 0;
+    rp.rank(e0.ram(), tau0, (int64_t)1 << 40, &t0v, &d0);
+    if (!in_control(e0.ram())) d0 = (int64_t)(rp.len() - tau0) * kStepUnits;   // in a transition: the reference's time left
 
     const int B = std::max(1, p.beam);
     std::vector<uint8_t> cur(s0), nxt;
@@ -56,7 +59,9 @@ OptimizeResult optimize(Pool& pool, std::vector<Emu*>& emus, const uint8_t* star
     std::vector<uint64_t> ek, cek;
     int64_t emu = 0, kept = 0;
 
+    int last = 0;
     for (int depth = 1; depth <= p.max_depth; depth++) {
+        last = depth;
         const int np = (int)cur_k.size();
         const size_t nc = (size_t)np * kNumActions;
         if (chs.size() < nc * CS) chs.resize(nc * CS);
@@ -91,6 +96,7 @@ OptimizeResult optimize(Pool& pool, std::vector<Emu*>& emus, const uint8_t* star
             for (int d = depth - 1; d >= 1; d--) { path.push_back(act[d - 1][node]); node = par[d - 1][node]; }
             std::reverse(path.begin(), path.end());
             res.found = true; res.actions = std::move(path); res.depth = depth;
+            res.est_frames = (double)depth * kFrameSkip;
             break;
         }
 
@@ -122,7 +128,7 @@ OptimizeResult optimize(Pool& pool, std::vector<Emu*>& emus, const uint8_t* star
             n++;
             sel.push_back(c);
         }
-        if (sel.empty()) break;
+        if (sel.empty()) { last = depth - 1; break; }
 
         const int ns = (int)sel.size();
         nxt.resize((size_t)ns * CS);
@@ -153,6 +159,14 @@ OptimizeResult optimize(Pool& pool, std::vector<Emu*>& emus, const uint8_t* star
             fprintf(stderr, "[beam] depth %d (%d frames): %d nodes of %zu, best %.0f frames left, reference step %d/%d, %.0f frames/s\n",
                     depth, depth * kFrameSkip, ns, order.size(), *std::min_element(cur_d.begin(), cur_d.end()) / 16.0,
                     (int)*std::max_element(cur_k.begin(), cur_k.end()), ref_len, emu / elapsed());
+    }
+    if (!res.found && p.partial && last > 0 && !cur_d.empty()) {   // the best node's path
+        uint32_t node = (uint32_t)(std::min_element(cur_d.begin(), cur_d.end()) - cur_d.begin());
+        res.est_frames = (double)last * kFrameSkip + cur_d[node] / 16.0;
+        std::vector<uint8_t> path;
+        for (int d = last; d >= 1; d--) { path.push_back(act[d - 1][node]); node = par[d - 1][node]; }
+        std::reverse(path.begin(), path.end());
+        res.actions = std::move(path); res.depth = last;
     }
     res.emu_frames = emu;
     res.nodes = kept;

@@ -17,6 +17,7 @@ namespace ss {
 struct OptimizeParams {
     int beam = 20000, per_cell = 16, max_depth = 6000;
     int verbose = 0;               // 1: progress every 25 depths, 2: + the best node's state
+    bool partial = false;          // no goal within max_depth: return the path to the best-ranked node
 };
 
 struct OptimizeResult {
@@ -25,6 +26,7 @@ struct OptimizeResult {
     int64_t emu_frames = 0, nodes = 0;
     int depth = 0;
     double seconds = 0;
+    double est_frames = 0;         // frames to the goal: exact if found, else the path + the best node's rank
 };
 
 OptimizeResult optimize(Pool& pool, std::vector<Emu*>& emus, const uint8_t* start_full,

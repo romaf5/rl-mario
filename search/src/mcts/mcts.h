@@ -4,12 +4,22 @@
 // Children are created lazily: a simulation descends by PUCT to an edge with no
 // child, emulates that one step (the parent's compact state + action) and renders
 // its frame; the net then scores the new node (prior, value), batched over every
-// leaf of a wave across all trees of the forest. The game is deterministic, so the
-// backup is min: b(leaf) = the net's frames to go (goal 0, dead v_death),
-// b(n) = 4 + min over created children. q(c) = clamp(1 - (b(c) - best sibling) / scale).
+// leaf of a wave across all trees of the forest. Backup is the mean (AlphaZero): a
+// simulation reaching a leaf worth v frames to go (the net; goal 0, dead v_death)
+// adds 4 * depth + v to each node on its path; b(n) = that sum / n. (A min backup
+// was tried first: over noisy net values the minimum is optimistic and the most
+// explored subtree looked best -- the agent stalled in 1-1.)
+// q(c) = clamp(1 - (b(c) - best sibling) / scale).
+//
+// Leaf values: value_mix * net + (1 - value_mix) * route, where route is the frames to
+// go along the level's route (the beam's progress rank, optimize/progress.h, carried
+// from parent to child) when a route is registered for the level (set_route).
 #pragma once
 #include <cstdint>
+#include <map>
+#include <memory>
 #include <vector>
+#include "../optimize/progress.h"
 #include "../core/pool.h"
 #include "../emu/emu.h"
 #include "../emu/obs.h"
@@ -23,6 +33,7 @@ struct MctsParams {
     float scale = 32.0f;           // frames: a child this much slower than its best sibling has q = 0
     float v_death = 4096.0f;       // frames to go of a dead end (the top of the net's value range)
     int max_nodes = 1 << 16;       // per tree
+    float value_mix = 1.0f;        // leaf value: this x net + (1 - this) x route (1 without a route)
 };
 
 enum : uint8_t { kRunning = 0, kGoal = 1, kDead = 2 };
@@ -34,11 +45,14 @@ struct MctsNode {
     float prior[kNumActions];
     int32_t n;                     // finished simulations through this node
     int32_t pending;               // simulations of the current wave through this node
-    float b;                       // frames to go: the best found below, or the net's value
+    double w;                      // sum over simulations of the frames to go they found
+    float b;                       // w / n: mean frames to go (the net's value at a new leaf)
     uint8_t action;                // the edge from the parent
     uint8_t term;                  // kRunning / kGoal / kDead
     uint8_t evaluated;             // prior and value set (terminals: at creation)
     uint8_t inflight;              // waiting for the net this wave
+    int32_t tau;                   // route progress: the latest reference step matched
+    int64_t rank;                  // route progress: frames to go x 16 (progress.h units)
 };
 
 struct MctsTree {
@@ -49,6 +63,7 @@ struct MctsTree {
     int32_t root = -1;
     Segment seg;
     uint8_t hist[kStack - 1][kObsSize];   // committed frames before the root, newest first
+    const RefProgress* rp = nullptr;      // the segment level's route, if registered
 };
 
 struct MctsLeaf { int32_t tree, node; };
@@ -76,13 +91,19 @@ public:
     void root_state(int t, uint8_t* full, uint8_t* ram, uint8_t* stack) const;
     int nodes(int t) const { return (int)(trees_[t].nodes.size() - trees_[t].free_ids.size()); }
     const MctsParams& params() const { return p_; }
+    // the route for a level: the reference actions from their start state (full)
+    void set_route(int level_gp, const uint8_t* start_full, const uint8_t* actions, int n);
+    void set_value_mix(float mix) { p_.value_mix = mix; }
+    float route_value(int t, int32_t node) const;
 
 private:
     int32_t alloc(MctsTree& T);
     void stack_of(const MctsTree& T, int32_t node, uint8_t* out) const;
-    void refresh(MctsTree& T, int32_t node);
+    void add_path(MctsTree& T, int32_t leaf, float v, bool pending);
     void gc(MctsTree& T);
+    void route_root(MctsTree& T);
     Pool& pool_;
+    std::map<int, std::unique_ptr<RefProgress>> routes_;
     std::vector<Emu*>& emus_;
     std::vector<MctsTree> trees_;
     MctsParams p_;
