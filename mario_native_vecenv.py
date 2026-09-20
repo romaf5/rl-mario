@@ -33,6 +33,9 @@ ROM = os.path.join(HERE, 'retro_integration', 'SuperMarioBros-Nes-v0',
 STATE_DIR = os.path.join(HERE, 'native', 'states')
 
 FRAME_STACK = 4
+# longest episode the action log records (the game timer bounds an episode at
+# ~2400 agent steps); a longer one leaves its states without a prefix
+ACT_LOG_MAX = 8192
 # RAM feature layout: 12x13 tile grid (2 cols behind Mario, 9 ahead; all 13
 # playfield rows) + 5 enemy slots x 4 + 12 Mario/game scalars
 
@@ -151,7 +154,9 @@ class MarioNativeVecEnv(IVecEnv):
                  credit_vertical=False, cell_max_variants=0, cell_bonus=0.0, cell_bonus_relative=True, cell_x_bin=128,
                  frontier_per_level=False, explore_fresh_uses=0, cell_screen_bin=0,
                  explorer_envs=0, end_on_stage_exit=False, archive_save_secs=60.0,
-                 cell_bonus_door_only=False, life_loss_reset=True, **unknown):
+                 cell_bonus_door_only=False, life_loss_reset=True,
+                 demo_start_prob=0.0, demo_window=32, demo_step=16,
+                 demo_success=0.2, demo_success_n=64, **unknown):
         assert action_type == 'complex'
         gone = [k for k in unknown if k in self.REMOVED_KWARGS]
         if gone:
@@ -177,6 +182,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.n_walks = 0
         self.lib = _Lib()
         rom = open(ROM, 'rb').read()
+        self._rom = rom
         self.single_stage = (not full_game) and (random_stages is not None)
         # the C++ pool with 0 threads returns stale obs without stepping;
         # more threads than cores only adds wakeups (configs say 24, a Mac
@@ -220,6 +226,20 @@ class MarioNativeVecEnv(IVecEnv):
         self.sticky = sticky_actions
         self.reset_noops = reset_noops
         self.sr_prob = self_restart_prob
+        # backward curriculum (Go-Explore phase 2, Salimans & Chen 2018): once
+        # a door->clear route of the agent's own is known, demo_start_prob of
+        # the resets start on it, near its end, and the start moves back
+        # demo_step steps whenever the policy clears from the current band
+        # often enough. Part of the self-restart machinery (evals and tools set
+        # self_restart_prob 0 and never see it); needs exact replays.
+        self.demo_prob = float(demo_start_prob)
+        self.demo_on = self.demo_prob > 0 and self_restart_prob > 0 and not play_mode
+        self.demo_window = int(demo_window); self.demo_step = int(demo_step)
+        self.demo_success = float(demo_success); self.demo_success_n = int(demo_success_n)
+        if self.demo_on:
+            assert int(reset_noops) == 0, 'the route curriculum needs exact replays: reset_noops 0'
+            assert random_stages and len(random_stages) == 1, 'the route curriculum trains one level'
+        self.route = None
         self.sr_cells = self_restart_cells
         self.dense_infos = dense_infos
         self.explore_eps = explore_eps
@@ -321,6 +341,12 @@ class MarioNativeVecEnv(IVecEnv):
         self.explorer = np.zeros(n, dtype=np.int32)
         self.exp_action = np.zeros(n, dtype=np.int64)
         self.ep_steps = np.zeros(n, dtype=np.int32)
+        # applied actions of the current episode (after every substitution) and
+        # the prefix from the level's door to the episode's start state: an
+        # archived state's prefix is start prefix + the episode's actions
+        self.act_log = np.zeros((n, ACT_LOG_MAX), dtype=np.int8)
+        self.start_prefix = [b''] * n
+        self.demo_tau = np.full(n, -1, dtype=np.int32)   # route start index (-1: none)
         self.start_cell = [None] * n
         self.cell_early = {}
         self.cell_wins = {}
@@ -455,6 +481,7 @@ class MarioNativeVecEnv(IVecEnv):
         # self-restart from own archive?
         self.was_restart[i] = False; self.is_door[i] = True
         self.continuation[i] = False
+        self.demo_tau[i] = -1; self.start_prefix[i] = b''
         self.start_cell[i] = None      # door episodes credit no cell
         self.explorer[i] = 0           # no macro-noise leak across episodes
         self.forced_timeup[i] = 0; self.last_stuck[i] = None
@@ -527,7 +554,9 @@ class MarioNativeVecEnv(IVecEnv):
             # phases); sampling among them exposes the policy to the full
             # local distribution instead of one replayed setup
             states = ent[0] if isinstance(ent[0], list) else [ent[0]]
-            self.load_state(i, states[self.rng.randint(len(states))])
+            k = self.rng.randint(len(states))
+            self.load_state(i, states[k])
+            self.start_prefix[i] = self._prefixes(ent)[k] if self.demo_on else None
             self.start_stage[i] = cell[0]
             self.was_restart[i] = True; self.is_door[i] = False
             self.start_cell[i] = cell
@@ -569,6 +598,26 @@ class MarioNativeVecEnv(IVecEnv):
         self.explore_walks.pop(cell, None)
         self.explore_wins.pop(cell, None)
 
+    def _prefixes(self, ent):
+        """Entry [8]: the action prefix from the level's door (bytes, None if
+        unknown) of each state variant in entry [0], index-aligned. Archives
+        saved before prefixes existed are padded with None."""
+        if not isinstance(ent[0], list):
+            ent[0] = [ent[0]]
+        while len(ent) < 9:
+            ent.append(0 if len(ent) < 8 else None)
+        if not isinstance(ent[8], list) or len(ent[8]) != len(ent[0]):
+            ent[8] = [None] * len(ent[0])
+        return ent[8]
+
+    def _episode_prefix(self, i):
+        """Actions from the level's door to env i's CURRENT state, or None.
+        Valid inside _after_step before ep_steps is incremented."""
+        p = self.start_prefix[i]; k = int(self.ep_steps[i]) + 1
+        if p is None or k > ACT_LOG_MAX:
+            return None
+        return p + self.act_log[i, :k].tobytes()
+
     def _won(self, cell):
         """A cell proven to convert: a policy restart or an explorer walk from
         it reached a level advance (or a deeper winning cell)."""
@@ -598,6 +647,7 @@ class MarioNativeVecEnv(IVecEnv):
         self.is_door[i] = False
         self.explorer[i] = self.exp_ep_steps
         self.n_walks += 1
+        self.start_prefix[i] = b''
         if not self.archive:
             s = self.stages[self.rng.randint(len(self.stages))]
             self.load_state(i, self.states[s])
@@ -616,7 +666,9 @@ class MarioNativeVecEnv(IVecEnv):
         self.explore_walks[cell] = self.explore_walks.get(cell, 0) + 1
         ent = self.archive[cell]
         states = ent[0] if isinstance(ent[0], list) else [ent[0]]
-        self.load_state(i, states[self.rng.randint(len(states))])
+        k = self.rng.randint(len(states))
+        self.load_state(i, states[k])
+        self.start_prefix[i] = self._prefixes(ent)[k] if self.demo_on else None
         self.start_stage[i] = cell[0]
         self.was_restart[i] = True
         self.start_cell[i] = cell
@@ -824,6 +876,9 @@ class MarioNativeVecEnv(IVecEnv):
             rep = self.rng.random_sample(n) < self.sticky
             acts = np.where(rep, self.last_action, acts)
         self.last_action[:] = acts
+        if self.demo_on:
+            k = self.ep_steps; m = k < ACT_LOG_MAX
+            self.act_log[np.nonzero(m)[0], k[m]] = acts[m].astype(np.int8)
         self.actions_buf[:] = _ACTION_BYTES[acts]
         if self._raw_steps and self._rgb4 is not None and n == 1:
             # hack-free + RGB capture of all emulated frames (video clips)
@@ -1024,6 +1079,8 @@ class MarioNativeVecEnv(IVecEnv):
                     self._index_add(cell)
                     self.archive[cell] = [[bytes(self._sbuf.raw)], 0,
                                           int(t[i])]
+                    if self.demo_on:
+                        self.archive[cell] += [0, 0, 0, 0, 0, [self._episode_prefix(i)]]
                     self._archive_dirty += 1
                 else:
                     # refresh: grow a small reservoir of state variants
@@ -1034,6 +1091,7 @@ class MarioNativeVecEnv(IVecEnv):
                     if not isinstance(ent[0], list):
                         ent[0] = [ent[0]]
                     early = self.cell_early.get(cell, 0)
+                    pre = self._prefixes(ent) if self.demo_on else None
                     p_ref = min(0.5, 0.05 + early / max(ent[1], 1))
                     if (self.rng.random_sample() < p_ref
                             and (len(ent[0]) < 4 or len(ent) < 3
@@ -1046,8 +1104,12 @@ class MarioNativeVecEnv(IVecEnv):
                         if new in ent[0]:
                             continue
                         ent[0].append(new)
+                        if pre is not None:
+                            pre.append(self._episode_prefix(i))
                         if len(ent[0]) > 4:
                             ent[0].pop(0)
+                            if pre is not None:
+                                pre.pop(0)
                         if len(ent) > 2:
                             ent[2] = max(ent[2], int(t[i]))
                         self.cell_early.pop(cell, None)
@@ -1322,6 +1384,7 @@ class MarioNativeVecEnv(IVecEnv):
                 # the level start or its halfway point)
                 self.start_cell[i] = None; self.is_door[i] = False
                 self.was_restart[i] = False; self.continuation[i] = True
+                self.demo_tau[i] = -1     # the prefix stays valid: the same game
                 self._seed_cells([i])
                 self.explorer[i] = 0      # macro noise must not leak on
                 # new life = fresh frame stack
