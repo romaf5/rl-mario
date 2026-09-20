@@ -62,6 +62,11 @@ class MarioObserver(AlgoObserver):
         self._last_logged_epoch = -1
         self.door_x = []          # max_x of NON-restart (from-door) episodes
         self._clear_ema = {}  # start_stage -> EMA of clear rate
+        # backward curriculum: route start per episode, clears of route starts
+        # per stage, and the latest (route length, tau*, band success)
+        self.episode_demo = []
+        self.demo_clears = {}
+        self.demo_state = None
 
         self.best_progress = 0
         self.best_x_pos = 0
@@ -138,6 +143,13 @@ class MarioObserver(AlgoObserver):
                  float(info.get('stages_cleared', 0)),
                  float(self._is_door(info)),
                  float(info.get('self_restart', False))))
+        if 'demo_start' in info:
+            self.episode_demo.append(float(info['demo_start']))
+            if info['demo_start']:
+                self.demo_clears.setdefault(info.get('start_stage', '?'), []).append(
+                    float(info.get('stages_cleared', 0) > 0))
+        if 'demo_tau_star' in info:
+            self.demo_state = (info['demo_len'], info['demo_tau_star'], info.get('demo_rate', -1.0))
         if 'victory' in info:
             self.episode_victories.append(float(info['victory']))
         if 'page_resets' in info:
@@ -309,6 +321,17 @@ class MarioObserver(AlgoObserver):
             self.writer.add_scalar('mario/door_mean_x',
                                    float(np.mean(self.door_x)), epoch_num)
 
+        if self.episode_demo:
+            self.writer.add_scalar('mario/demo_share', float(np.mean(self.episode_demo)), epoch_num)
+        for stage, v in self.demo_clears.items():
+            self.writer.add_scalar(f'mario/clear_demo/{stage}', float(np.mean(v)), epoch_num)
+        if self.demo_state is not None:
+            ln, ts, rate = self.demo_state
+            self.writer.add_scalar('mario/demo_len', ln, epoch_num)
+            self.writer.add_scalar('mario/demo_tau', ts, epoch_num)
+            if rate >= 0:
+                self.writer.add_scalar('mario/demo_frontier_success', rate, epoch_num)
+
         # Curriculum: sample unmastered stages more often
         if (self.curriculum_freq > 0 and epoch_num % self.curriculum_freq == 0
                 and self.stage_list
@@ -335,6 +358,8 @@ class MarioObserver(AlgoObserver):
         self.episode_gaps.clear()
         self.frontier_cells = None
         self.door_x.clear()
+        self.episode_demo.clear()
+        self.demo_clears.clear()
 
         # Record video periodically, on a background thread so training never
         # blocks. The thread gets a CPU copy of the model: no GPU access, and

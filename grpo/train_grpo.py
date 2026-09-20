@@ -737,7 +737,8 @@ def main():
     # at the first obstacle). No exploration noise beyond the policy's own
     # sampling; the tiny restart prob only switches the env's archiving on
     # (dead rollouts are masked, so its resets are never trained on).
-    ec.update(dict(self_restart_prob=1e-6 if a.grow_archive else 0.0, explore_eps=0.0,
+    # GRPO's prompts are its own start distribution: no route starts
+    ec.update(dict(self_restart_prob=1e-6 if a.grow_archive else 0.0, explore_eps=0.0, demo_start_prob=0.0,
                    explore_episode_prob=0.0, archive_path=run_archive_copy(a.archive, run_dir) if a.grow_archive else None,
                    sticky_actions=0.0, n_threads=a.n_threads, dense_infos=True, seed=a.seed, **knobs))
     N = a.group * a.groups

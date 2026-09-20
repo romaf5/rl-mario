@@ -14,6 +14,8 @@ Properties:
     and credit no cell; tau* moves back demo_step at a 20% band success rate
     (13/64) and not below (12/64); a route start that plays the rest of the
     route warps and counts as a band success;
+  * the observer logs the route-start share, their clear rate and the
+    curriculum state (route length, tau*, band success);
 """
 import os, sys, tempfile
 import numpy as np, yaml
@@ -185,6 +187,25 @@ check('suffix: from route state %d the rest of the route warps (%s)' % (tau, res
       res is not None and res[0] >= 4700 and res[1] == 1 and res[2] and res[3] == tau)
 check('suffix: the clear is a band success (%s)' % R['band'], (tau >= R['tau_star'] + 16) or R['band'][-1:] == [True])
 env.close()
+
+# ---------------------------------------------------------------- observer
+import callbacks
+class _W:
+    def __init__(self): self.s = {}
+    def add_scalar(self, k, v, e): self.s[k] = v
+ob = callbacks.MarioObserver(video_freq=0)
+ob.writer = _W(); ob.algo = None
+ob.game_scores = type('G', (), {'current_size': 0})()
+base = dict(max_x_pos=100, game_progress=13, start_stage='4-2', door=False, self_restart=False)
+for j in range(8):
+    ob._process_single_info(dict(base, demo_start=j < 4, demo_tau=500 if j < 4 else -1, stages_cleared=int(j == 0),
+                                 demo_len=600, demo_tau_star=480, demo_rate=0.25))
+ob.after_print_stats(0, 1, 0.0)
+S = ob.writer.s
+check('observer: demo share, clear rate of route starts and the curriculum state (%s)'
+      % {k: v for k, v in S.items() if 'demo' in k},
+      S.get('mario/demo_share') == 0.5 and S.get('mario/clear_demo/4-2') == 0.25 and S.get('mario/demo_len') == 600
+      and S.get('mario/demo_tau') == 480 and S.get('mario/demo_frontier_success') == 0.25)
 
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)
