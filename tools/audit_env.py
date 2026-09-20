@@ -24,7 +24,9 @@ Reference rules (the design in mario_rewards.py / mario_native_vecenv.py):
     trained levels (end_on_stage_exit), unpaid cutoff, zombie, wrap
   * time_outs (value bootstrap): exactly the plain unpaid cutoffs
   * labels: an episode is a door episode iff it starts from the level's door
-    state, a restart iff it starts from an archive state; with
+    state, a restart iff it starts from an archive state, a route start
+    (backward curriculum) iff it loads the route's state tau, replayed here
+    independently, with tau in [tau*, tau*+W]; the route itself clears; with
     life_loss_reset every life is a fresh draw (no continuation lives)
   * the policy's actions reach the game unchanged; frame stacks shift by one
     frame per step and restart fresh at every episode boundary
@@ -88,6 +90,10 @@ def record(cfg, args):
         env.cell_tries = {c: e[4] for c, e in A.items() if len(e) > 4}
         env.explore_wins = {c: e[5] for c, e in A.items() if len(e) > 5 and e[5]}
         print(f'[audit] archive {len(A)} cells (read-only copy)', flush=True)
+    if getattr(args, 'route', None):
+        # a curriculum route injected before the first reset (a fresh run has
+        # none for its first minutes): route starts get audited too
+        assert env.set_route(np.load(args.route).astype(np.int8).tobytes()), 'the --route actions do not clear'
     obs = env.reset(); nt = env.n_train
     model = vms = None
     if args.checkpoint:
@@ -112,6 +118,8 @@ def record(cfg, args):
         R['rew'].append(r.copy()); R['done'].append(d.copy())
         R['tout'].append(np.asarray(inf.time_outs, dtype=bool).copy())
         R['door1'].append(env.is_door[:nt].copy()); R['restart1'].append(env.was_restart[:nt].copy())
+        R['demo1'].append(env.demo_tau[:nt].copy())
+        R['tau_star'].append(env.route['tau_star'] if env.route is not None else -1)
         sig = env.last_signals
         R['hold'].append(sig.hold[:nt].copy()); R['xeff'].append(sig.x[:nt].astype(np.int32))
         R['frame'].append(np.asarray(sig.frame)[:nt].copy()); R['page_reset'].append(sig.page_reset[:nt].copy())
@@ -125,6 +133,8 @@ def record(cfg, args):
         if s % 500 == 0:
             print(f'[audit] step {s}/{args.steps} {time.time() - t0:.0f}s archive {len(env.archive)}', flush=True)
     D = {k: np.array(v) for k, v in R.items()}
+    D['route_actions'] = (np.frombuffer(env.route['actions'], np.int8).copy() if env.route is not None
+                          else np.zeros(0, np.int8))
     # archive: every key must be the cell of its own states, and only trained levels are saved
     bad_keys, checked = [], 0
     train = set(ec.get('random_stages') or [])
@@ -165,7 +175,9 @@ def check(cfg, D, vms, arch):
     PRE, POST = D['pre'].tolist(), D['post'].tolist()
     S, N = D['rew'].shape
     L = {k: D[k].tolist() for k in ('xeff', 'hold', 'frame', 'rew', 'done', 'tout', 'unpaid', 'door0', 'door1',
-                                     'restart1', 'entered', 'page_reset', 'act', 'env_act', 'stack_ok', 'fresh_ok')}
+                                     'restart1', 'entered', 'page_reset', 'act', 'env_act', 'stack_ok', 'fresh_ok',
+                                     'demo1')}
+    TS = D['tau_star'].tolist()
     T = {t: D['t_' + t].tolist() for t in TERMS}
     door_env = MarioNativeVecEnv('door', 1, random_stages=list(ec.get('random_stages') or ['1-1']),
                                  full_game=True, n_threads=1)
@@ -175,12 +187,37 @@ def check(cfg, D, vms, arch):
         door_env.lib.benv_obs(door_env.env, 0, door_env.obs_u8[0].ctypes.data, door_env.ram[0].ctypes.data)
         doors.add(tuple(int(v) for v in door_env.ram[0, ADDR]))
     door_env.close()
+    # the curriculum route, replayed independently from the door (raw batch
+    # steps): route starts must load exactly these states, and it must clear
+    route_ram, W = [], int(ec.get('demo_window', 32))
+    A_ = {a: k for k, a in enumerate(ADDR)}
+    if len(D['route_actions']):
+        from mario_native_vecenv import _ACTION_BYTES
+        renv = MarioNativeVecEnv('route', 1, random_stages=list(ec['random_stages']), full_game=True, n_threads=1)
+        renv.load_state(0, renv.states[ec['random_stages'][0]])
+        renv.lib.benv_obs(renv.env, 0, renv.obs_u8[0].ctypes.data, renv.ram[0].ctypes.data)
+        route_ram.append(tuple(int(v) for v in renv.ram[0, ADDR]))
+        ab = np.zeros(1, np.int32)
+        for a in D['route_actions']:
+            ab[0] = _ACTION_BYTES[int(a)]
+            renv.lib.benv_step(renv.env, ab.ctypes.data, renv.obs_u8.ctypes.data, renv.ram.ctypes.data)
+            route_ram.append(tuple(int(v) for v in renv.ram[0, ADDR]))
+        renv.close()
+        g = [min(max(r[A_[0x75F]] * 4 + r[A_[0x75C]], 0), 31) for r in (route_ram[0], route_ram[-1])]
+        if not (g[0] < g[1] <= g[0] + 15 and (ROUTE is None or g[1] in ROUTE)):
+            viol_route = [(0, 0, g)]
+        else:
+            viol_route = []
+    else:
+        viol_route = []
 
     f = lambda r, a: r[A[a]]
     xof = lambda r: f(r, 0x6D) * 256 + f(r, 0x86)
     gpof = lambda r: min(max(f(r, 0x75F) * 4 + f(r, 0x75C), 0), 31)
     frameof = lambda r: (((gpof(r) * 65536 + f(r, 0x760) * 256 + f(r, 0x74F)) * 8 + f(r, 0x74E)) * 2 + f(r, 0x704))
     viol = collections.defaultdict(list)
+    if viol_route:
+        viol['route_does_not_clear'] = viol_route
     bad = lambda k, s, i, d='': viol[k].append((s, i, d))
     eps = []
     for i in range(N):
@@ -265,7 +302,19 @@ def check(cfg, D, vms, arch):
             if done:
                 r0 = POST[s][i]
                 cont = POST[s][i] == PRE[s][i]           # no state was loaded: the next life continues
-                ref = 'continuation' if cont else ('door' if tuple(r0) in doors else 'restart')
+                tau = L['demo1'][s][i]
+                if cont:
+                    ref = 'continuation'
+                elif tuple(r0) in doors:
+                    ref = 'door'
+                elif tau >= 1:
+                    ref = 'demo'
+                    if not (tau < len(route_ram) and tuple(r0) == route_ram[tau]):
+                        bad('demo_start_not_route_state', s, i, tau)
+                else:
+                    ref = 'restart'
+                if tau >= 0 and not (TS[s] <= tau <= TS[s] + W):
+                    bad('demo_tau_outside_window', s, i, (tau, TS[s]))
                 if LLR and cont:
                     bad('life_continued_despite_life_loss_reset', s, i)
                 exp_door, exp_restart = ref == 'door', ref == 'restart'
@@ -331,6 +380,7 @@ def main():
     ap.add_argument('--device', default='mps')
     ap.add_argument('--check-cells', type=int, default=500, help='re-key the last N archive cells (0 = all)')
     ap.add_argument('--save', default=None, help='also save the recording (npz) for offline inspection')
+    ap.add_argument('--route', default=None, help='action file (npy) from the door injected as the curriculum route')
     args = ap.parse_args()
     cfg = yaml.safe_load(open(args.config))
     D, vms, arch = record(cfg, args)
