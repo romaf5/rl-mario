@@ -389,3 +389,16 @@ episode mix (door vs restart), `mario/clear_restart/4-2`, `mario/clear_door/4-2`
   clear (`mario/clear_door/4-2` > 0); 8 h (22:17) sampled `eval/level_clear/4-2` > 0. Miss at 2 h -> check the critic
   on pre-warp states (does the value reach the warp's return under the 20-sd clamp?) and the frontier spread before any
   config change.
+- 4 h (18:17): MISS -- `mario/clear_door/4-2` 0, 13/13 sampled evals clear 0 (timeouts 69-81% at the level end),
+  `mario/clear_restart/4-2` ~3.5% at 1-2 h, 0.4-0.8% over epochs 2000-2500. 2 h read: frontier spread fixed (top cell
+  6.5% of tries, median 10), restart clears flat.
+- Funnel at epoch 2500 (`tools/audit_env.py --checkpoint ep_2500 --archive <copy> --steps 6000 --save`, the exact
+  training mix, 768k steps, 1127 episodes, 0 violations):
+  - door episodes: 0 of 446 reached the warp area; median max x 3538, 73% time out there. They are 73% of all steps,
+    and 53% of ALL steps sit at x >= 3000 (value 0.06, return 0.29) waiting for the 500-step unpaid cutoff.
+  - restarts (60% of episodes, 27% of steps, 87% of main-area restarts die): 16 of 627 main-area restarts entered the
+    warp area, ALL through the vine (last main x 1036, top of the screen) and all from starts at x 1024-1279
+    (16/110); 0 of 302 from x 512-1023. No coin-cache pipe entry in this run. Of the 16: 1 warp, 7 wrong pipe, 8 time-out.
+  - restarts inside the warp area: 7/39 warp (18%), 9 wrong pipe, 9 time-out, 14 death.
+  - critic: calibrated on average (x < 1000: value 20.0 vs realised 20.8), 0 targets above the 20-sd ceiling, max value
+    31.9 -- but within 100 steps of a real warp it predicts 0.7 against a realised 41.8 (9 warps in 768k steps).
