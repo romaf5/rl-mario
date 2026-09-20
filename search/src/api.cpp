@@ -7,8 +7,10 @@
 #include <vector>
 #include "core/pool.h"
 #include "emu/emu.h"
+#include "emu/obs.h"
 #include "explore/explore.h"
 #include "optimize/beam.h"
+#include "mcts/mcts.h"
 
 using namespace ss;
 
@@ -19,10 +21,20 @@ struct ss_ctx {
     std::vector<Emu*> emus;
 };
 
+struct ss_mcts {
+    Forest forest;
+    ss_mcts(ss_ctx* c, int n, const MctsParams& p) : forest(*c->pool, c->emus, n, p) {}
+};
+
 static int copy_out(const std::vector<uint8_t>& a, uint8_t* out, int max_out) {
     if ((int)a.size() > max_out) return -2;
     if (!a.empty()) memcpy(out, a.data(), a.size());
     return (int)a.size();
+}
+
+static void trace_row(const uint8_t* r, int32_t* t) {
+    t[0] = mario_x(r); t[1] = mario_y(r); t[2] = level_gp(r); t[3] = r[0x760]; t[4] = r[0x74F];
+    t[5] = r[0x74E]; t[6] = r[0x0E]; t[7] = r[0x770]; t[8] = camera_x(r); t[9] = lives(r);
 }
 
 extern "C" {
@@ -58,12 +70,34 @@ int ss_replay(ss_ctx* c, const uint8_t* start, const uint8_t* actions, int n, in
     for (int i = 0; i < n; i++) {
         if (actions[i] >= kNumActions) return -1;
         e.step(actions[i]);
-        if (trace) {
-            const uint8_t* r = e.ram();
-            int32_t* t = trace + (size_t)i * SS_TRACE;
-            t[0] = mario_x(r); t[1] = mario_y(r); t[2] = level_gp(r); t[3] = r[0x760]; t[4] = r[0x74F];
-            t[5] = r[0x74E]; t[6] = r[0x0E]; t[7] = r[0x770]; t[8] = camera_x(r); t[9] = lives(r);
-        }
+        if (trace) trace_row(e.ram(), trace + (size_t)i * SS_TRACE);
+    }
+    if (end_state) e.save_full(end_state);
+    return n;
+}
+
+int ss_frames(ss_ctx* c, const uint8_t* state, int n, int buttons, uint8_t* end_state) {
+    Emu& e = *c->emus[0];
+    e.load_full(state);
+    for (int i = 0; i < n; i++) e.frame((uint8_t)buttons);
+    if (end_state) e.save_full(end_state);
+    return n;
+}
+
+int ss_obs(ss_ctx* c, const uint8_t* state, uint8_t* obs_out) {
+    c->emus[0]->load_full(state);
+    c->emus[0]->obs_now(obs_out);
+    return kObsSize;
+}
+
+int ss_replay_obs(ss_ctx* c, const uint8_t* start, const uint8_t* actions, int n, uint8_t* obs_out,
+                  int32_t* trace, uint8_t* end_state) {
+    Emu& e = *c->emus[0];
+    e.load_full(start);
+    for (int i = 0; i < n; i++) {
+        if (actions[i] >= kNumActions) return -1;
+        e.step_obs(actions[i], obs_out + (size_t)i * kObsSize);
+        if (trace) trace_row(e.ram(), trace + (size_t)i * SS_TRACE);
     }
     if (end_state) e.save_full(end_state);
     return n;
@@ -135,11 +169,11 @@ int ss_explore(ss_ctx* c, const uint8_t* start, const int32_t* route, int n_rout
 
 int ss_optimize(ss_ctx* c, const uint8_t* start, const int32_t* route, int n_route, const uint8_t* ref,
                 int n_ref, int beam, int per_cell, int max_depth, int verbose, uint8_t* out, int max_out,
-                ss_stats* st) {
+                ss_stats* st, const uint8_t* ref_start) {
     OptimizeParams p;
     p.beam = beam; p.per_cell = per_cell; p.max_depth = max_depth; p.verbose = verbose;
     const OptimizeResult r = optimize(*c->pool, c->emus, start, std::vector<int>(route, route + n_route),
-                                      std::vector<uint8_t>(ref, ref + n_ref), p);
+                                      std::vector<uint8_t>(ref, ref + n_ref), p, ref_start);
     const int n = copy_out(r.actions, out, max_out);
     if (st) {
         st->frames = (int64_t)r.actions.size() * kFrameSkip; st->emu_frames = r.emu_frames;
@@ -148,5 +182,41 @@ int ss_optimize(ss_ctx* c, const uint8_t* start, const int32_t* route, int n_rou
     }
     return n;
 }
+
+ss_mcts* ss_mcts_create(ss_ctx* c, int n_trees, const ss_mcts_params* p) {
+    MctsParams q;
+    if (p) { q.c_puct = p->c_puct; q.fpu = p->fpu; q.scale = p->scale; q.v_death = p->v_death; q.max_nodes = p->max_nodes; }
+    return n_trees > 0 ? new ss_mcts(c, n_trees, q) : nullptr;
+}
+
+void ss_mcts_destroy(ss_mcts* m) { delete m; }
+
+int ss_mcts_reset(ss_mcts* m, int t, const uint8_t* state, const int32_t* route, int n_route) {
+    if (t < 0 || t >= m->forest.size()) return -1;
+    return m->forest.reset(t, state, std::vector<int>(route, route + n_route)) ? 0 : -1;
+}
+
+int ss_mcts_select(ss_mcts* m, const int32_t* trees, int n_trees, int per_tree, int max_leaves, int32_t* leaves,
+                   uint8_t* stacks) {
+    return m->forest.select(trees, n_trees, per_tree, max_leaves, reinterpret_cast<MctsLeaf*>(leaves), stacks);
+}
+
+void ss_mcts_backup(ss_mcts* m, int n, const int32_t* leaves, const float* priors, const float* values) {
+    m->forest.backup(n, reinterpret_cast<const MctsLeaf*>(leaves), priors, values);
+}
+
+int ss_mcts_root(ss_mcts* m, int t, int32_t* visits, float* best, float* root_b) {
+    return m->forest.root_stats(t, visits, best, root_b);
+}
+
+void ss_mcts_noise(ss_mcts* m, int t, const float* noise, float frac) { m->forest.root_noise(t, noise, frac); }
+int ss_mcts_commit(ss_mcts* m, int t, int action) {
+    return action < 0 || action >= kNumActions ? -1 : m->forest.commit(t, action);
+}
+void ss_mcts_forced(ss_mcts* m, const int32_t* trees, int n, int32_t* out) { m->forest.forced(trees, n, out); }
+void ss_mcts_state(ss_mcts* m, int t, uint8_t* full, uint8_t* ram, uint8_t* stack) {
+    m->forest.root_state(t, full, ram, stack);
+}
+int ss_mcts_nodes(ss_mcts* m, int t) { return m->forest.nodes(t); }
 
 }  // extern "C"

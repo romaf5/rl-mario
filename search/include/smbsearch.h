@@ -36,9 +36,35 @@ SS_API int ss_selftest(ss_ctx* ctx, const uint8_t* start, int steps, uint64_t se
 SS_API int ss_explore(ss_ctx* ctx, const uint8_t* start, const int32_t* route, int n_route,
                       double budget_s, double settle_s, int max_walk, uint64_t seed, int verbose,
                       uint8_t* out, int max_out, ss_stats* st);
+/* ref_start: NULL, or the state the reference was found from (another start of this level) */
 SS_API int ss_optimize(ss_ctx* ctx, const uint8_t* start, const int32_t* route, int n_route,
                        const uint8_t* ref, int n_ref, int beam, int per_cell, int max_depth,
-                       int verbose, uint8_t* out, int max_out, ss_stats* st);
+                       int verbose, uint8_t* out, int max_out, ss_stats* st, const uint8_t* ref_start);
+/* the net's frames: 84x84 grayscale, status bar cropped, max of each step's last 2 frames */
+#define SS_OBS 84
+SS_API int ss_frames(ss_ctx* ctx, const uint8_t* state, int n, int buttons, uint8_t* end_state);
+SS_API int ss_obs(ss_ctx* ctx, const uint8_t* state, uint8_t* obs_out /* 84*84: the current frame */);
+SS_API int ss_replay_obs(ss_ctx* ctx, const uint8_t* start, const uint8_t* actions, int n,
+                         uint8_t* obs_out /* n*84*84 */, int32_t* trace, uint8_t* end_state);
+
+/* MCTS forest (search/src/mcts): n trees, each one game. A wave selects new leaves in
+ * the listed trees, emulates and renders them on the pool; the caller's net scores
+ * them (priors as probabilities, values in frames to the segment goal) and backs up.
+ * Leaves are (tree, node) int32 pairs; stacks are 4 x 84 x 84 uint8, oldest first. */
+typedef struct ss_mcts ss_mcts;
+typedef struct { float c_puct, fpu, scale, v_death; int32_t max_nodes; } ss_mcts_params;
+SS_API ss_mcts* ss_mcts_create(ss_ctx* ctx, int n_trees, const ss_mcts_params* p);
+SS_API void ss_mcts_destroy(ss_mcts* m);
+SS_API int ss_mcts_reset(ss_mcts* m, int tree, const uint8_t* state, const int32_t* route, int n_route);
+SS_API int ss_mcts_select(ss_mcts* m, const int32_t* trees, int n_trees, int per_tree, int max_leaves,
+                          int32_t* leaves, uint8_t* stacks);
+SS_API void ss_mcts_backup(ss_mcts* m, int n, const int32_t* leaves, const float* priors, const float* values);
+SS_API int ss_mcts_root(ss_mcts* m, int tree, int32_t* visits, float* best, float* root_b);
+SS_API void ss_mcts_noise(ss_mcts* m, int tree, const float* noise, float frac);
+SS_API int ss_mcts_commit(ss_mcts* m, int tree, int action);   /* new root: 0 running, 1 goal, 2 dead */
+SS_API void ss_mcts_forced(ss_mcts* m, const int32_t* trees, int n, int32_t* out);
+SS_API void ss_mcts_state(ss_mcts* m, int tree, uint8_t* full, uint8_t* ram, uint8_t* stack);
+SS_API int ss_mcts_nodes(ss_mcts* m, int tree);
 #ifdef __cplusplus
 }
 #endif

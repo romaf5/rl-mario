@@ -2,6 +2,9 @@
 // time to the goal along the reference, progress.h; then x speed) are expanded by all 12 actions,
 // deduplicated by exact state, spread by at most per_cell per coarse cell. The
 // reference's own node is always kept, so the result is never slower than it.
+// ref_start (optional): the reference was found from another state of this level
+// (e.g. without the start delay); its checkpoints are replayed from there, and no
+// reference node is kept.
 #pragma once
 #include <cstdint>
 #include <vector>
@@ -26,6 +29,6 @@ struct OptimizeResult {
 
 OptimizeResult optimize(Pool& pool, std::vector<Emu*>& emus, const uint8_t* start_full,
                         const std::vector<int>& route, const std::vector<uint8_t>& ref,
-                        const OptimizeParams& p);
+                        const OptimizeParams& p, const uint8_t* ref_start_full = nullptr);
 
 }  // namespace ss

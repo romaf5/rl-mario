@@ -26,6 +26,9 @@ public:
     void save(uint8_t* compact) const;
     void frame(uint8_t buttons);
     void step(int action);          // kFrameSkip frames holding the action
+    // step + its 84x84 frame: max of the step's last two frames (the net's input)
+    void step_obs(int action, uint8_t* obs84);
+    void obs_now(uint8_t* obs84) const;   // the current frame only
     const uint8_t* ram() const;
     bool jammed() const;
 private:

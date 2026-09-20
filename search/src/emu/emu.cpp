@@ -2,6 +2,7 @@
 // its extern "C" symbols exist once; LTO inlines across the Emu boundary).
 #include "emu.h"
 #include <cstring>
+#include "obs.h"
 #include "../../../native/smbcore.cpp"
 
 namespace ss {
@@ -50,6 +51,29 @@ void Emu::step(int action) {
     Core* c = static_cast<Core*>(core_);
     const uint8_t b = kActionButtons[action];
     for (int k = 0; k < kFrameSkip; k++) smb_frame(c, b);
+}
+
+namespace {
+const ObsResizer kResize;
+}
+
+void Emu::step_obs(int action, uint8_t* obs84) {
+    Core* c = static_cast<Core*>(core_);
+    const uint8_t b = kActionButtons[action];
+    thread_local uint8_t fa[kScrW * kScrH], fb[kScrW * kScrH];
+    for (int k = 0; k < kFrameSkip; k++) {
+        smb_frame(c, b);
+        if (k == kFrameSkip - 2) render_gray(*c, fa);
+        if (k == kFrameSkip - 1) render_gray(*c, fb);
+    }
+    for (int p = 0; p < kScrW * kScrH; p++) fa[p] = fa[p] > fb[p] ? fa[p] : fb[p];
+    kResize(fa, obs84);
+}
+
+void Emu::obs_now(uint8_t* obs84) const {
+    thread_local uint8_t f[kScrW * kScrH];
+    render_gray(*static_cast<Core*>(core_), f);
+    kResize(f, obs84);
 }
 
 const uint8_t* Emu::ram() const { return static_cast<const Core*>(core_)->ram; }

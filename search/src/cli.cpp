@@ -69,7 +69,7 @@ int main(int argc, char** argv) {
         ss_ctx* c = ss_create(rom.data(), (int)rom.size(), argc > 8 ? atoi(argv[8]) : 0);
         std::vector<uint8_t> ref = slurp(argv[5]);
         const int n = ss_optimize(c, state.data(), route.data(), (int)route.size(), ref.data(), (int)ref.size(),
-                                  argc > 7 ? atoi(argv[7]) : 20000, 16, 6000, 1, out.data(), (int)out.size(), &st);
+                                  argc > 7 ? atoi(argv[7]) : 20000, 16, 6000, 1, out.data(), (int)out.size(), &st, nullptr);
         printf("optimize: found %d, %d actions (reference %zu), %.1f s\n", st.found, n, ref.size(), st.seconds);
         if (n > 0) dump(argv[6], out, n);
         ss_destroy(c);

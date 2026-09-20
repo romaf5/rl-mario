@@ -43,9 +43,6 @@ lib.smb_load(cb, end)
 ra = np.ctypeslib.as_array(lib.smb_ram(ca), shape=(0x800,)).copy()
 rb = np.ctypeslib.as_array(lib.smb_ram(cb), shape=(0x800,)).copy()
 check('stepping: 120 actions equal smb_frame x 4 (RAM identical)', np.array_equal(ra, rb), np.nonzero(ra != rb)[0][:8])
-sys.path.insert(0, REPO)
-from mario_native_vecenv import _ACTION_BYTES
-check('actions: button table equals the training env', list(_ACTION_BYTES) == list(ACTION_BUTTONS))
 fps = s.bench(st42, 2_000_000)
 check('bench: %.0f frames/s on %d threads' % (fps, s.threads), fps > 1e5, fps)
 

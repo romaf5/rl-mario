@@ -4,7 +4,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 CXX=${CXX:-g++}
-SRCS="emu/emu route/route explore/explore optimize/beam api"
+SRCS="emu/emu route/route explore/explore optimize/beam mcts/mcts api"
 FLAGS="-std=c++17 -O3 -march=native -mtune=native -flto=auto -fno-plt -fomit-frame-pointer \
   -fvisibility=hidden -fPIC -DNDEBUG -Wall -Wno-invalid-offsetof -Wno-unused-function -pthread"
 OBJ=build/obj

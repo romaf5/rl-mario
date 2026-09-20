@@ -13,7 +13,7 @@ namespace ss {
 
 OptimizeResult optimize(Pool& pool, std::vector<Emu*>& emus, const uint8_t* start_full,
                         const std::vector<int>& route, const std::vector<uint8_t>& ref,
-                        const OptimizeParams& p) {
+                        const OptimizeParams& p, const uint8_t* ref_start_full) {
     using clk = std::chrono::steady_clock;
     const auto t0 = clk::now();
     auto elapsed = [&] { return std::chrono::duration<double>(clk::now() - t0).count(); };
@@ -27,6 +27,7 @@ OptimizeResult optimize(Pool& pool, std::vector<Emu*>& emus, const uint8_t* star
     e0.save(s0.data());
 
     // the reference path: progress checkpoints; ref_len = its steps before the goal step
+    if (ref_start_full) e0.load_full(ref_start_full);
     RefProgress rp;
     rp.add(e0.ram(), 0);
     int ref_len = 0;
@@ -45,7 +46,7 @@ OptimizeResult optimize(Pool& pool, std::vector<Emu*>& emus, const uint8_t* star
     std::vector<uint8_t> cur(s0), nxt;
     std::vector<int32_t> cur_k{t0v};
     std::vector<int64_t> cur_d{d0};
-    int ref_node = ref_len > 0 ? 0 : -1;                 // the reference's node in cur
+    int ref_node = ref_len > 0 && !ref_start_full ? 0 : -1;   // the reference's node in cur
     std::vector<std::vector<uint32_t>> par;              // par[d-1][j]: parent of node j at depth d
     std::vector<std::vector<uint8_t>> act;
     std::vector<uint8_t> chs, ok;

@@ -29,6 +29,7 @@ ACTIONS = ['NOOP', 'right', 'right+A', 'right+B', 'right+A+B', 'A', 'left', 'lef
 ACTION_BUTTONS = [0x00, 0x80, 0x81, 0x82, 0x83, 0x01, 0x40, 0x41, 0x42, 0x43, 0x20, 0x10]
 TRACE_FIELDS = ('x', 'y', 'level', 'area', 'sub', 'atype', 'engine', 'mode', 'camera', 'lives')
 FRAME_SKIP = 4
+OBS = 84          # the net's frame: 84x84 grayscale
 FPS = 50.007      # the ROM is Super Mario Bros. (Europe): a PAL game, 50 frames per second
 
 
@@ -81,7 +82,11 @@ class Search:
         L.ss_explore.restype = I
         L.ss_explore.argtypes = [P, ctypes.c_char_p, P, I, D, D, I, U64, I, P, I, ctypes.POINTER(_Stats)]
         L.ss_optimize.restype = I
-        L.ss_optimize.argtypes = [P, ctypes.c_char_p, P, I, P, I, I, I, I, I, P, I, ctypes.POINTER(_Stats)]
+        L.ss_optimize.argtypes = [P, ctypes.c_char_p, P, I, P, I, I, I, I, I, P, I, ctypes.POINTER(_Stats),
+                                  ctypes.c_char_p]
+        L.ss_frames.restype = I; L.ss_frames.argtypes = [P, ctypes.c_char_p, I, I, P]
+        L.ss_obs.restype = I; L.ss_obs.argtypes = [P, ctypes.c_char_p, P]
+        L.ss_replay_obs.restype = I; L.ss_replay_obs.argtypes = [P, ctypes.c_char_p, P, I, P, P, P]
         rom_bytes = open(rom, 'rb').read()
         self._ctx = L.ss_create(rom_bytes, len(rom_bytes), int(threads or os.cpu_count()))
         if not self._ctx:
@@ -154,13 +159,138 @@ class Search:
                                  int(max_walk), int(seed), int(verbose), out.ctypes.data, len(out), ctypes.byref(st))
         return self._result(out, n, st)
 
-    def optimize(self, state, route, reference, beam=20000, per_cell=16, max_depth=6000, verbose=0):
-        """Beam A* over time along the reference's waypoints (never slower than the reference)."""
+    def optimize(self, state, route, reference, beam=20000, per_cell=16, max_depth=6000, verbose=0, ref_start=None):
+        """Beam A* over time along the reference's waypoints (never slower than the reference).
+        ref_start: the state the reference was found from, when it is not `state` (e.g. no start delay)."""
         r, rp, rn = self._route(route)
         ref = np.ascontiguousarray(reference, dtype=np.uint8)
         out = np.zeros(self.MAX_ACTIONS, dtype=np.uint8)
         st = _Stats()
         n = self._lib.ss_optimize(self._ctx, self._state(state), rp, rn, ref.ctypes.data, len(ref), int(beam),
                                   int(per_cell), int(max_depth), int(verbose), out.ctypes.data, len(out),
-                                  ctypes.byref(st))
+                                  ctypes.byref(st), None if ref_start is None else self._state(ref_start))
         return self._result(out, n, st)
+
+    def frames(self, state, n, buttons=0):
+        """n raw frames holding buttons (a start delay: NOOP frames). Returns the end state."""
+        end = ctypes.create_string_buffer(self.state_size)
+        self._lib.ss_frames(self._ctx, self._state(state), int(n), int(buttons), end)
+        return end.raw
+
+    def obs(self, state):
+        """The net's view of the current frame: (84, 84) uint8."""
+        out = np.zeros((OBS, OBS), dtype=np.uint8)
+        self._lib.ss_obs(self._ctx, self._state(state), out.ctypes.data)
+        return out
+
+    def replay_obs(self, state, actions):
+        """replay() plus each step's 84x84 frame: (obs (n, 84, 84) uint8, trace, end state)."""
+        a = np.ascontiguousarray(actions, dtype=np.uint8)
+        obs = np.zeros((len(a), OBS, OBS), dtype=np.uint8)
+        tr = np.zeros((len(a), len(TRACE_FIELDS)), dtype=np.int32)
+        end = ctypes.create_string_buffer(self.state_size)
+        n = self._lib.ss_replay_obs(self._ctx, self._state(state), a.ctypes.data, len(a), obs.ctypes.data,
+                                    tr.ctypes.data, end)
+        if n < 0:
+            raise ValueError('bad action index')
+        return obs, tr, end.raw
+
+
+class _MctsParams(ctypes.Structure):
+    _fields_ = [('c_puct', ctypes.c_float), ('fpu', ctypes.c_float), ('scale', ctypes.c_float),
+                ('v_death', ctypes.c_float), ('max_nodes', ctypes.c_int32)]
+
+
+class Forest:
+    """MCTS trees on the real game (search/src/mcts), one game per tree; the net lives in the caller.
+
+        f = Forest(search, n_trees=1)
+        f.reset(0, state, ROUTE)
+        n = f.select([0], per_tree=256)        # leaves f.leaves[:n], net inputs f.stacks[:n] (n, 4, 84, 84)
+        f.backup(n, priors, values)            # priors (n, 12) probabilities, values (n,) frames to go
+        visits, best, root_b, root_n = f.root(0)
+        term = f.commit(0, action)             # 0 running, 1 goal (next route level), 2 dead
+
+    stacks: optional (max_leaves, 4, 84, 84) uint8 buffer to fill (e.g. pinned memory for the GPU).
+    """
+    RUNNING, GOAL, DEAD = 0, 1, 2
+
+    def __init__(self, search, n_trees, c_puct=1.5, fpu=0.5, scale=32.0, v_death=4096.0, max_nodes=1 << 16,
+                 max_leaves=2048, stacks=None):
+        self.s = search
+        L = self._lib = search._lib
+        P, I, F = ctypes.c_void_p, ctypes.c_int, ctypes.c_float
+        L.ss_mcts_create.restype = P; L.ss_mcts_create.argtypes = [P, I, ctypes.POINTER(_MctsParams)]
+        L.ss_mcts_destroy.argtypes = [P]
+        L.ss_mcts_reset.restype = I; L.ss_mcts_reset.argtypes = [P, I, ctypes.c_char_p, P, I]
+        L.ss_mcts_select.restype = I; L.ss_mcts_select.argtypes = [P, P, I, I, I, P, P]
+        L.ss_mcts_backup.argtypes = [P, I, P, P, P]
+        L.ss_mcts_root.restype = I; L.ss_mcts_root.argtypes = [P, I, P, P, P]
+        L.ss_mcts_noise.argtypes = [P, I, P, F]
+        L.ss_mcts_commit.restype = I; L.ss_mcts_commit.argtypes = [P, I, I]
+        L.ss_mcts_forced.argtypes = [P, P, I, P]
+        L.ss_mcts_state.argtypes = [P, I, P, P, P]
+        L.ss_mcts_nodes.restype = I; L.ss_mcts_nodes.argtypes = [P, I]
+        self.params = _MctsParams(c_puct, fpu, scale, v_death, max_nodes)
+        self.v_death = v_death
+        self.n_trees = n_trees
+        self._m = L.ss_mcts_create(search._ctx, n_trees, ctypes.byref(self.params))
+        self.max_leaves = max_leaves
+        self.stacks = np.zeros((max_leaves, 4, OBS, OBS), np.uint8) if stacks is None else stacks
+        assert self.stacks.shape == (max_leaves, 4, OBS, OBS) and self.stacks.dtype == np.uint8
+        assert self.stacks.flags['C_CONTIGUOUS']
+        self.leaves = np.zeros((max_leaves, 2), np.int32)
+
+    def close(self):
+        if getattr(self, '_m', None):
+            self._lib.ss_mcts_destroy(self._m)
+            self._m = None
+
+    def __del__(self):
+        self.close()
+
+    def reset(self, tree, state, route):
+        r = np.array([gp(l) for l in route], dtype=np.int32)
+        return self._lib.ss_mcts_reset(self._m, tree, self.s._state(state), r.ctypes.data, len(r)) == 0
+
+    def select(self, trees, per_tree):
+        t = np.ascontiguousarray(trees, dtype=np.int32)
+        return self._lib.ss_mcts_select(self._m, t.ctypes.data, len(t), int(per_tree), self.max_leaves,
+                                        self.leaves.ctypes.data, self.stacks.ctypes.data)
+
+    def backup(self, n, priors, values):
+        p = np.ascontiguousarray(priors, dtype=np.float32)
+        v = np.ascontiguousarray(values, dtype=np.float32)
+        assert p.shape == (n, 12) and v.shape == (n,)
+        self._lib.ss_mcts_backup(self._m, n, self.leaves.ctypes.data, p.ctypes.data, v.ctypes.data)
+
+    def root(self, tree):
+        visits = np.zeros(12, np.int32)
+        best = np.zeros(12, np.float32)
+        rb = ctypes.c_float()
+        n = self._lib.ss_mcts_root(self._m, tree, visits.ctypes.data, best.ctypes.data, ctypes.byref(rb))
+        return visits, best, rb.value, n
+
+    def noise(self, tree, noise, frac):
+        z = np.ascontiguousarray(noise, dtype=np.float32)
+        self._lib.ss_mcts_noise(self._m, tree, z.ctypes.data, float(frac))
+
+    def commit(self, tree, action):
+        return self._lib.ss_mcts_commit(self._m, tree, int(action))
+
+    def forced(self, trees):
+        t = np.ascontiguousarray(trees, dtype=np.int32)
+        out = np.zeros(len(t), np.int32)
+        self._lib.ss_mcts_forced(self._m, t.ctypes.data, len(t), out.ctypes.data)
+        return out.astype(bool)
+
+    def state(self, tree):
+        """(full state bytes, ram (2048,), root stack (4, 84, 84))"""
+        full = ctypes.create_string_buffer(self.s.state_size)
+        ram = np.zeros(0x800, np.uint8)
+        stack = np.zeros((4, OBS, OBS), np.uint8)
+        self._lib.ss_mcts_state(self._m, tree, full, ram.ctypes.data, stack.ctypes.data)
+        return full.raw, ram, stack
+
+    def nodes(self, tree):
+        return self._lib.ss_mcts_nodes(self._m, tree)
