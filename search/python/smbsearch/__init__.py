@@ -29,6 +29,7 @@ ACTIONS = ['NOOP', 'right', 'right+A', 'right+B', 'right+A+B', 'A', 'left', 'lef
 ACTION_BUTTONS = [0x00, 0x80, 0x81, 0x82, 0x83, 0x01, 0x40, 0x41, 0x42, 0x43, 0x20, 0x10]
 TRACE_FIELDS = ('x', 'y', 'level', 'area', 'sub', 'atype', 'engine', 'mode', 'camera', 'lives')
 FRAME_SKIP = 4
+FPS = 50.007      # the ROM is Super Mario Bros. (Europe): a PAL game, 50 frames per second
 
 
 def gp(level):

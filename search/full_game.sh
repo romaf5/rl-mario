@@ -5,7 +5,7 @@
 #   search/full_game.sh [OUT_DIR] [THREADS]
 #
 # OUT_DIR (default search/out/e2e) gets route.npz, stats.json, solve.log,
-# demo.mp4 (60 fps, HUD with level splits) and demo.gif. ~30-60 min on 64 threads.
+# demo.mp4 (50 fps: the game is PAL; 4x, HUD with level splits) and demo.gif. ~30-60 min on 64 threads.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 OUT=${1:-search/out/e2e}

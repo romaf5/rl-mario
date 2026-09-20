@@ -47,6 +47,10 @@ Long jobs: launch detached (`setsid nohup ... &`), with `PYTHONUNBUFFERED=1` and
 
 ## Semantics that matter
 
+- The ROM is Super Mario Bros. (Europe), a PAL game: 50.007 fps (`smbsearch.FPS`), frame
+  rule 18 frames, timer tick 20. Compare times only with PAL runs (HappyLee's PAL TAS,
+  tasvideos 6622M, syncs in stable-retro with its inputs shifted 3 frames earlier), never
+  with the NTSC 4:54 records.
 - The search plays the real game: no training hacks, 4 frames per decision, the 12
   COMPLEX_MOVEMENT actions. States across the API are full native savestates (45,568 B);
   inside, compact states (4.6 KB: the core minus its ROM copies).

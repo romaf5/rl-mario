@@ -9,7 +9,7 @@ in-control frame of the next level). Writes route.npz and stats.json.
 import argparse, json, os, sys, time
 import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'python'))
-from smbsearch import Search, load_state, ROUTE, gp, level_name
+from smbsearch import Search, load_state, ROUTE, gp, level_name, FPS
 
 
 def main():
@@ -66,7 +66,7 @@ def main():
     stats['total_steps'] = int(len(rec['actions'])); stats['total_frames'] = int(len(rec['actions'])) * 4
     json.dump(stats, open(os.path.join(a.out, 'stats.json'), 'w'), indent=1, default=float)
     print('[solve] total %d steps = %d frames (%.2f s)' % (stats['total_steps'], stats['total_frames'],
-                                                         stats['total_frames'] / 60.0988))
+                                                         stats['total_frames'] / FPS))
 
 
 if __name__ == '__main__':

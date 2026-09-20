@@ -1,28 +1,42 @@
 # Super Mario Bros, solved by search
 
-![1-1 to 8-4, 8x speed](docs/media/full_game_8x.gif)
-
 The whole game, 1-1 to Bowser's axe, found by a C++ search on the real game in 45 minutes on
-one machine: **4:31.7 of game time** (16,328 frames), shown here at 8x speed.
-[Full video, real speed](docs/media/full_game.mp4).
+one machine: **5:26.4** from first control to the axe (16,324 frames; the ROM is the European
+version, a PAL game at 50 fps). [Full video: 4x size, real speed](docs/media/full_game.mp4).
 
-| level | route found → optimised (decisions) | time in level |
-|---|---|---|
-| 1-1 | 522 → 396 | 26.3 s |
-| 1-2 (warp zone → world 4) | 736 → 289 | 26.9 s |
-| 4-1 | 495 → 455 | 33.3 s |
-| 4-2 (vine → warp zone → world 8) | 800 → 359 | 31.7 s |
-| 8-1 | 873 → 625 | 44.8 s |
-| 8-2 | 549 → 450 | 32.4 s |
-| 8-3 | 459 → 441 | 31.8 s |
-| 8-4 (to the axe) | 981 → 632 | 44.5 s |
+| level | route found → optimised (decisions) | search | PAL TAS | gap |
+|---|---|---|---|---|
+| 1-1 | 522 → 396 | 31.7 s | 28.5 s | +3.2 s |
+| 1-2 (warp zone → world 4) | 736 → 289 | 32.4 s | 30.2 s | +2.2 s |
+| 4-1 | 495 → 455 | 40.0 s | 37.2 s | +2.9 s |
+| 4-2 (vine → warp zone → world 8) | 800 → 359 | 38.1 s | 28.0 s | +10.1 s |
+| 8-1 | 873 → 625 | 53.8 s | 50.6 s | +3.2 s |
+| 8-2 | 549 → 450 | 38.9 s | 35.7 s | +3.2 s |
+| 8-3 | 459 → 441 | 38.2 s | 33.1 s | +5.0 s |
+| 8-4 (to the axe) | 981 → 632 | 53.4 s | 48.5 s | +4.9 s |
+| **total** | | **5:26.4** | **4:51.7** | **+34.7 s** |
 
 One decision every 4 frames, from the 12 actions of COMPLEX_MOVEMENT. Times include each
-level's intro screen and end sequence.
+level's intro screen and end sequence. PAL TAS: HappyLee's
+[Super Mario Bros. (Europe) "warps"](https://tasvideos.org/6622M), replayed on this ROM in
+stable-retro and timed the same way. The famous 4:54 records are for the NTSC version
+(60 fps, different timers and physics), so they don't compare.
 
-| 4-2: two hidden blocks, the vine, the warp zone | 8-4: the maze, the water, Bowser |
-|---|---|
-| ![4-2](docs/media/4-2_vine_warp.gif) | ![8-4](docs/media/8-4_finish.gif) |
+Where the 34.7 s go:
+
+| | search | TAS | gap |
+|---|---|---|---|
+| level ends (flag slide, castle walk, score count, fireworks) | 59.7 s | 43.0 s | +16.7 s |
+| running | 204.4 s | 193.1 s | +11.3 s |
+| pipes, the vine, level entrances | 38.1 s | 31.3 s | +6.8 s |
+
+**4-2: two hidden blocks, the vine, the warp zone** (real speed)
+
+![4-2](docs/media/4-2_vine_warp.gif)
+
+**8-4: the maze, the water, Bowser** (real speed)
+
+![8-4](docs/media/8-4_finish.gif)
 
 ## How it works
 
