@@ -496,7 +496,9 @@ class MarioNativeVecEnv(IVecEnv):
             self.rewards.reset([i], None, hard=True)
             self.ep_steps[i] = 0
             return
-        if (self.sr_prob > 0 and self.archive
+        if self.route is not None and self.rng.random_sample() < self.demo_prob:
+            self._reset_demo(i)
+        elif (self.sr_prob > 0 and self.archive
                 and self.rng.random_sample() < self.sr_prob):
             # soft least-practiced: p(cell) ~ 1/(1+uses). Uniform-ish
             # coverage bridges the door->frontier gap; a hard frontier
@@ -726,6 +728,37 @@ class MarioNativeVecEnv(IVecEnv):
         self.start_stage[i] = cell[0]
         self.was_restart[i] = True
         self.start_cell[i] = cell
+
+    def _reset_demo(self, i):
+        """Route start: a state on the curriculum route in [tau*, tau*+W]. It
+        credits no archive cell; tau 0 is the level's door state (a door
+        episode); every other start is neither door nor restart."""
+        R = self.route
+        hi = min(R['tau_star'] + self.demo_window, R['last'])
+        tau = int(self.rng.randint(R['tau_star'], hi + 1))
+        self.load_state(i, R['states'][tau])
+        self.start_stage[i] = self.stages[0]
+        self.demo_tau[i] = tau
+        self.is_door[i] = tau == 0
+        self.start_prefix[i] = R['actions'][:tau]
+
+    def _demo_outcome(self, tau, success):
+        """A route start ended. Outcomes of starts in the frontier band
+        [tau*, tau*+demo_step) form a sliding window of demo_success_n; at a
+        success rate >= demo_success tau* moves back demo_step (floor 0)."""
+        R = self.route
+        if not (R['tau_star'] <= tau < R['tau_star'] + self.demo_step):
+            return
+        R['band'].append(bool(success))
+        if len(R['band']) > self.demo_success_n:
+            R['band'].pop(0)
+        if len(R['band']) < self.demo_success_n:
+            return
+        R['rate'] = sum(R['band']) / float(self.demo_success_n)
+        if R['rate'] >= self.demo_success and R['tau_star'] > 0:
+            R['tau_star'] = max(0, R['tau_star'] - self.demo_step)
+            R['band'] = []; R['moves'] += 1
+            print(f'[demo] tau* -> {R["tau_star"]} (band success {R["rate"]:.2f})', flush=True)
 
     @staticmethod
     def _in_play_of(pstate, yvp):
@@ -1315,7 +1348,7 @@ class MarioNativeVecEnv(IVecEnv):
             if not done_pre[i] and not self.dense_infos:
                 infos.append({})   # observer only reads infos of done envs
                 continue
-            infos.append({
+            inf = {
                 'x_pos': int(x[i]), 'max_x_pos': int(self.max_x[i]),
                 'game_progress': int(self.progress[i]),
                 'progress_gain': int(self.progress[i]
@@ -1346,7 +1379,15 @@ class MarioNativeVecEnv(IVecEnv):
                 'frontier_cells': n_front,
                 'archive_cells': len(self.archive),
                 'explorer_walks': self.n_walks,
-            })
+            }
+            if self.demo_on:
+                inf['demo_start'] = bool(self.demo_tau[i] >= 0)
+                inf['demo_tau'] = int(self.demo_tau[i])
+                if self.route is not None:
+                    inf['demo_len'] = self.route['last'] + 1
+                    inf['demo_tau_star'] = self.route['tau_star']
+                    inf['demo_rate'] = -1.0 if self.route['rate'] is None else self.route['rate']
+            infos.append(inf)
 
         done = done_pre
 
@@ -1361,6 +1402,8 @@ class MarioNativeVecEnv(IVecEnv):
         # steps was saved in a doomed spot (e.g. mid enemy contact) - prune
         self.ep_steps += 1
         for i in np.nonzero(done)[0]:
+            if self.demo_tau[i] >= 0 and self.route is not None:
+                self._demo_outcome(int(self.demo_tau[i]), self.cleared[i] > 0)
             cell = self.start_cell[i]
             # a cell evicted or pruned while this episode ran gets nothing:
             # counters written here re-created it (stale wins / early deaths

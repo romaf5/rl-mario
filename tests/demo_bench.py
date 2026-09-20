@@ -9,6 +9,11 @@ Properties:
   * the first on-route clear with a known prefix becomes the route, verified
     by replay; a wrong exit never does; the route and tau* survive a save and
     reload, and a fresh run refuses the route sidecar;
+  * demo_start_prob of the resets start on the route inside [tau*, tau*+W];
+    tau 0 is a door episode, other route starts are neither door nor restart
+    and credit no cell; tau* moves back demo_step at a 20% band success rate
+    (13/64) and not below (12/64); a route start that plays the rest of the
+    route warps and counts as a band success;
 """
 import os, sys, tempfile
 import numpy as np, yaml
@@ -132,6 +137,54 @@ import train
 os.remove(path)
 cfgp = {'params': {'config': {'env_config': {'archive_path': path}}}}
 check('persistence: a fresh run refuses an existing route sidecar', train.fresh_archive_conflict(cfgp, None, False))
+
+# ---------------------------------------------------------------- curriculum draws
+env, obs = make(n=1, self_restart_prob=0.6)
+env.set_route(VINE.tobytes()); R = env.route
+taus = []
+for k in range(2000):
+    env._reset_env(0); taus.append(int(env.demo_tau[0]))
+taus = np.array(taus); on = taus >= 0
+check('draws: %.3f of resets start on the route (0.75)' % on.mean(), abs(on.mean() - 0.75) < 0.04)
+check('draws: every route start is inside [tau*, tau*+W] (%d..%d, tau* %d)' % (taus[on].min(), taus[on].max(), R['tau_star']),
+      taus[on].min() >= R['tau_star'] and taus[on].max() <= min(R['tau_star'] + 32, R['last']))
+env._reset_env(0)
+while env.demo_tau[0] < 0:
+    env._reset_env(0)
+check('draws: a route start is neither door nor restart and credits no cell',
+      not env.is_door[0] and not env.was_restart[0] and env.start_cell[0] is None)
+R['tau_star'] = 0
+while env.demo_tau[0] != 0:
+    env._reset_env(0)
+check('draws: tau 0 is a door episode', env.is_door[0] and not env.was_restart[0])
+env.close()
+
+# ---------------------------------------------------------------- tau* moves at 20%, not below
+env, obs = make(n=1, self_restart_prob=0.6)
+env.set_route(VINE.tobytes()); R = env.route; t0 = R['tau_star']
+for j in range(64):
+    env._demo_outcome(t0, j >= 52)     # 52 failures then 12 successes (the window slides off a failure next)
+check('tau*: 12/64 band successes keep tau* (%d)' % R['tau_star'], R['tau_star'] == t0 and abs(R['rate'] - 12 / 64) < 1e-9)
+env._demo_outcome(t0 + 40, True)       # outside the band: ignored
+check('tau*: outcomes outside the band are ignored', R['tau_star'] == t0)
+env._demo_outcome(t0, True)            # sliding window: 13/64
+check('tau*: 13/64 moves tau* back by demo_step (%d -> %d)' % (t0, R['tau_star']),
+      R['tau_star'] == t0 - 16 and R['band'] == [] and R['moves'] == 1)
+env.close()
+
+# ---------------------------------------------------------------- a route start that plays the rest clears
+env, obs = make(n=1, self_restart_prob=0.6, demo_start_prob=0.999999)
+env.set_route(VINE.tobytes()); R = env.route
+env._reset_env(0); env._fetch_obs(0); env._post_reset_init([0], env.ram)
+tau = int(env.demo_tau[0]); res = None
+for a in VINE[tau:]:
+    obs, r, d, inf = env.step(np.array([a]))
+    if d[0]:
+        res = (float(r[0]), inf[0]['stages_cleared'], inf[0]['demo_start'], inf[0]['demo_tau']); break
+check('suffix: from route state %d the rest of the route warps (%s)' % (tau, res),
+      res is not None and res[0] >= 4700 and res[1] == 1 and res[2] and res[3] == tau)
+check('suffix: the clear is a band success (%s)' % R['band'], (tau >= R['tau_star'] + 16) or R['band'][-1:] == [True])
+env.close()
 
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)
