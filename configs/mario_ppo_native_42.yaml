@@ -1,3 +1,7 @@
+# 4-2 run l (2026-09-19): run k + the backward curriculum (Go-Explore phase 2 on the agent's own route): once a
+# door->warp route is known (the first clear with a recorded action prefix), 75% of resets start on it in
+# [tau*, tau*+32] and tau* steps back 16 when >= 20% of the last 64 band starts warp. Run k at epoch 2500: 0/446
+# door episodes and 0/302 restarts at x 512-1023 reached the warp area; 53% of all steps loitered at the level end.
 # 4-2 run k (2026-09-19): run j's code after the 2026-09-18/19 review (EXPERIMENTS.md); config changes = the fixes only:
 # life_loss_reset (a life loss is a fresh draw: 43% of run j's steps were continued lives, 27% respawned at x 1576 behind
 # the vine / coin-cache pipe, all labelled door), learnability frontier weights (16 never-converted cells took 59% of the
@@ -47,7 +51,7 @@ params:
       activation: elu
       initializer: {name: orthogonal_initializer, gain: 1.41421356237}
   config:
-    name: Mario_PPO42k
+    name: Mario_PPO42l
     env_name: mario_native
     score_to_win: 100000
     normalize_value: true
@@ -138,6 +142,13 @@ params:
       cell_bonus_relative: true
       # novelty for door episodes only: restarts in the warp area farmed the bonus instead of warping
       cell_bonus_door_only: true
+      # backward curriculum (tests/demo_bench.py): share of resets on the route, draw width, band / step size, band
+      # success rate to step back, band window
+      demo_start_prob: 0.75
+      demo_window: 32
+      demo_step: 16
+      demo_success: 0.2
+      demo_success_n: 64
       # 32-px x-bins: at 64 px the ledge under the hidden block (x 1030-1050, y 96) and the platform next to it
       # (x 1055-1070, y 112) were ONE cell, so the ledge -- the only spot a random walk bumps the block from
       # (10% per 150-step walk; 0% from the platform) -- never got its own archive state
@@ -149,7 +160,7 @@ params:
       cell_tiles: true
       cell_max_variants: 8
       frontier_per_level: true
-      archive_path: native/archive_42k.pkl
+      archive_path: native/archive_42l.pkl
       # up to ~16k cells x 4 savestates: persist every 3 min, not every minute
       archive_save_secs: 180
     player: {render: false, games_num: 10, deterministic: true, n_game_life: 3}
