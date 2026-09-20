@@ -402,3 +402,19 @@ episode mix (door vs restart), `mario/clear_restart/4-2`, `mario/clear_door/4-2`
   - restarts inside the warp area: 7/39 warp (18%), 9 wrong pipe, 9 time-out, 14 death.
   - critic: calibrated on average (x < 1000: value 20.0 vs realised 20.8), 0 targets above the 20-sd ceiling, max value
     31.9 -- but within 100 steps of a real warp it predicts 0.7 against a realised 41.8 (9 warps in 768k steps).
+- Stopped at epoch 4374 (22:02, 7 h 45 min; user decision: switch to the backward curriculum). Run dir and archive:
+  runs_archive/Mario_PPO42k_19-14-17-38.
+
+## 2026-09-19 22:05 — Mario_PPO42l: backward curriculum on the agent's own route (Go-Explore phase 2)
+- Design `docs/superpowers/specs/2026-09-19-backward-curriculum-design.md`, plan `docs/superpowers/plans/2026-09-19-backward-curriculum.md`.
+- One change vs run k: every archived state variant keeps its action prefix from the door; the first on-route clear with a
+  known prefix becomes the route (replay-verified); 75% of resets start on it in [tau*, tau*+32]; tau* starts 16 steps
+  before the last pre-warp state and steps back 16 when >= 20% of the last 64 starts in [tau*, tau*+16) warp.
+- Checks: demo_bench 24/24 (prefixes replay byte-identically, the vine run becomes a 419-action route, 13/64 moves tau*,
+  12/64 does not, a start at 401 that plays the rest warps); all 11 benches 0 FAIL; audit 0 violations with and without an
+  injected route (random policy with the vine route: tau* 401 -> 385 within 1500 steps).
+- Launched 22:05 on GPU 1 (`CUDA_VISIBLE_DEVICES=1`), `--video-freq 200`, ~2,100 fps. Log `logs/train_ppo_42l_0919-2205.log`.
+- PREDICTION: 30 min (22:35) route exists (`mario/demo_len` > 0) and tau* >= 100 steps back from the warp;
+  2 h (00:05) tau* before the vine (main underground); 4 h (02:05) tau* = 0 and `mario/clear_door/4-2` > 0;
+  8 h (06:05) sampled `eval/level_clear/4-2` > 0. Miss at 2 h -> read `mario/demo_frontier_success` at the stuck tau*
+  and replay the route states there before any change.
