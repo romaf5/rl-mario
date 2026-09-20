@@ -418,3 +418,6 @@ episode mix (door vs restart), `mario/clear_restart/4-2`, `mario/clear_door/4-2`
   2 h (00:05) tau* before the vine (main underground); 4 h (02:05) tau* = 0 and `mario/clear_door/4-2` > 0;
   8 h (06:05) sampled `eval/level_clear/4-2` > 0. Miss at 2 h -> read `mario/demo_frontier_success` at the stuck tau*
   and replay the route states there before any change.
+- Stopped at epoch 592 (23:16, 71 min; user decision: focus on the C++ route search). tau* 1460 -> 1172 in 71 min: the
+  first 192 steps back in ~15 min, stuck ~20 min at 1268 (Mario right of pipe 8 must walk left and press DOWN; band
+  success 0.2-0.4% -> recovered), then 6 more moves. No door-side clear. runs_archive/Mario_PPO42l_19-22-05-15.
