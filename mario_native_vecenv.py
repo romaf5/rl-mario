@@ -441,6 +441,11 @@ class MarioNativeVecEnv(IVecEnv):
             # rl_games never closes its vec env: without this the archive
             # grown since the last throttled save was lost on every exit
             atexit.register(self._save_archive)
+        side = (archive_path or '') + '.demo.npz'
+        if self.demo_on and archive_path and os.path.exists(side):
+            z = np.load(side)
+            if self.set_route(z['actions'].tobytes()):
+                self.route['tau_star'] = min(int(z['tau_star']), self.route['last'])
         self._rgb4 = None      # (4,224,240,3) capture buffer when recording
         self._raw_steps = False  # hack-free stepping (video clips, win searches)
 
@@ -617,6 +622,55 @@ class MarioNativeVecEnv(IVecEnv):
         if p is None or k > ACT_LOG_MAX:
             return None
         return p + self.act_log[i, :k].tobytes()
+
+    def _replay(self, actions):
+        """Replay `actions` from the trained level's door on a private 1-core
+        env with the training stepping. Returns the savestate before the first
+        action and after each one, their levels, and the final RAM."""
+        e1 = self.lib.benv_create(self._rom, len(self._rom), 1, 1, int(self.single_stage))
+        try:
+            if self.skip != 4:
+                self.lib.benv_set_skip(e1, self.skip)
+            buf = ctypes.create_string_buffer(self.state_size)
+            a = np.zeros(1, np.int32); o = np.zeros((1, 84, 84), np.uint8)
+            r = np.zeros((1, 0x800), np.uint8)
+            self.lib.benv_load(e1, 0, self.states[self.stages[0]])
+            self.lib.benv_obs(e1, 0, o.ctypes.data, r.ctypes.data)
+            gp = lambda: min(max(int(r[0, 0x75F]) * 4 + int(r[0, 0x75C]), 0), 31)
+
+            def snap():
+                self.lib.benv_save(e1, 0, buf)
+                return bytes(buf.raw)
+            states, gps = [snap()], [gp()]
+            for x in np.frombuffer(actions, np.int8):
+                a[0] = _ACTION_BYTES[int(x)]
+                self.lib.benv_step(e1, a.ctypes.data, o.ctypes.data, r.ctypes.data)
+                states.append(snap()); gps.append(gp())
+            return states, gps, r[0].copy()
+        finally:
+            self.lib.benv_destroy(e1)
+
+    def set_route(self, actions, ram_check=None):
+        """Make `actions` (applied actions from the trained level's door) the
+        curriculum route if its replay ends in an on-route level advance (and,
+        with ram_check, in exactly that RAM). Start states are the replay's
+        states that are still in the start level; tau* starts demo_step
+        before the last one. Returns True if accepted."""
+        actions = actions if isinstance(actions, bytes) else np.asarray(actions, np.int8).tobytes()
+        states, gps, ram = self._replay(actions)
+        g0, g1 = gps[0], gps[-1]
+        ok = g0 < g1 <= g0 + 15 and (self.route_gps is None or g1 in set(self.route_gps.tolist()))
+        if ok and ram_check is not None and not np.array_equal(ram, ram_check):
+            print('[demo] WARNING: route replay diverged from the live env; rejected', flush=True)
+            ok = False
+        if not ok:
+            return False
+        last = max(t for t, g in enumerate(gps) if g == g0)
+        self.route = dict(actions=actions, states=states[:last + 1], last=last,
+                          tau_star=max(0, last - self.demo_step), band=[], rate=None, moves=0)
+        print(f'[demo] route: {len(actions)} actions, {last + 1} start states, '
+              f'tau* {self.route["tau_star"]}', flush=True)
+        return True
 
     def _won(self, cell):
         """A cell proven to convert: a policy restart or an explorer walk from
@@ -1296,6 +1350,13 @@ class MarioNativeVecEnv(IVecEnv):
 
         done = done_pre
 
+        # the first on-route clear whose prefix is known becomes the route
+        if self.demo_on and self.route is None and good.any():
+            for i in np.nonzero(good)[0]:
+                pre = self._episode_prefix(i)
+                if pre is not None and self.set_route(pre, ram_check=self.ram[i]):
+                    break
+
         # archive hygiene: a cell whose restarts mostly die within a few
         # steps was saved in a doomed spot (e.g. mid enemy contact) - prune
         self.ep_steps += 1
@@ -1457,6 +1518,12 @@ class MarioNativeVecEnv(IVecEnv):
             with open(tmp, 'wb') as f:
                 pickle.dump(self.archive, f)
             os.replace(tmp, self.archive_path)
+            if self.route is not None:
+                dtmp = self.archive_path + '.demo.tmp'
+                with open(dtmp, 'wb') as f:
+                    np.savez(f, actions=np.frombuffer(self.route['actions'], np.int8),
+                             tau_star=self.route['tau_star'], level=self.stages[0])
+                os.replace(dtmp, self.archive_path + '.demo.npz')
             self._archive_saved_at = time.time()
 
     def close(self):

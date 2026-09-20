@@ -6,6 +6,9 @@ Properties:
     door, and replaying that prefix from the door reproduces the saved state
     byte for byte (door episodes, restarts, explorer walks; through reservoir
     rotation); archives without prefixes still load;
+  * the first on-route clear with a known prefix becomes the route, verified
+    by replay; a wrong exit never does; the route and tau* survive a save and
+    reload, and a fresh run refuses the route sidecar;
 """
 import os, sys, tempfile
 import numpy as np, yaml
@@ -88,6 +91,47 @@ env.lib.benv_save(env.env, 0, env._sbuf)
 old = [[bytes(env._sbuf.raw)], 0, 400, 0, 0, 0, 0, 0]
 check('old entry: no [8] -> prefixes None, padded and aligned', env._prefixes(old) == [None] and len(old) == 9)
 env.close()
+
+# ---------------------------------------------------------------- the first clear becomes the route
+env, obs = make(n=1, self_restart_prob=1e-6)
+k_done = None
+for k, a in enumerate(VINE):
+    obs, r, d, inf = env.step(np.array([a]))
+    if d[0]:
+        k_done = k; break
+R = env.route
+check('route: the vine run from the door becomes the route (%s actions, done at step %s)'
+      % (None if R is None else len(R['actions']), k_done),
+      R is not None and R['actions'] == VINE[:k_done + 1].tobytes())
+check('route: start states stop before the level change (last %s, %d states, gp of last = 4-2)'
+      % (None if R is None else R['last'], 0 if R is None else len(R['states'])),
+      R is not None and len(R['states']) == R['last'] + 1 and R['last'] <= k_done - 1)
+check('route: tau* starts demo_step before the last start state (%s)' % (None if R is None else R['tau_star']),
+      R is not None and R['tau_star'] == R['last'] - 16)
+check('route: state 0 is the door state', R is not None and R['states'][0] == env.states['4-2'])
+env.close()
+env, obs = make(n=1, self_restart_prob=1e-6)
+flag = np.load(os.path.join(ROOT, 'tests', 'data', 'exit_flag_4-2.npy')).astype(np.int8)
+check('route: a wrong exit (flag into 4-3) is rejected', not env.set_route(flag.tobytes()) and env.route is None)
+check('route: set_route accepts the vine run', env.set_route(VINE.tobytes()) and env.route is not None)
+env.close()
+
+# ---------------------------------------------------------------- persistence
+path = os.path.join(tempfile.mkdtemp(), 'archive.pkl')
+env, obs = make(n=1, self_restart_prob=1e-6, archive_path=path)
+for s in range(30):
+    env.step(np.array([3]))
+env.set_route(VINE.tobytes()); env.route['tau_star'] = 123
+env.close()
+env, obs = make(n=1, self_restart_prob=1e-6, archive_path=path)
+check('persistence: route and tau* reload from the sidecar (tau* %s)' % (env.route and env.route['tau_star']),
+      env.route is not None and env.route['tau_star'] == 123 and env.route['actions'] == VINE.tobytes())
+check('persistence: archive entries keep their prefixes', all(len(e) == 9 for e in env.archive.values()))
+env.close()
+import train
+os.remove(path)
+cfgp = {'params': {'config': {'env_config': {'archive_path': path}}}}
+check('persistence: a fresh run refuses an existing route sidecar', train.fresh_archive_conflict(cfgp, None, False))
 
 print('\n%d/%d checks passed' % (sum(OK), len(OK)))
 sys.exit(0 if all(OK) else 1)

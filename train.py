@@ -46,8 +46,10 @@ def fresh_archive_conflict(config, checkpoint, resume_archive):
     previous run's cells, wins and tries."""
     import os
     path = (config['params']['config'].get('env_config') or {}).get('archive_path')
-    if path and os.path.exists(path) and not checkpoint and not resume_archive:
-        return (f'{path} exists: a fresh run would continue that archive. Move it '
+    # the route sidecar of the backward curriculum (<archive>.demo.npz) too
+    found = [p for p in (path, (path or '') + '.demo.npz') if path and os.path.exists(p)]
+    if found and not checkpoint and not resume_archive:
+        return (f'{found[0]} exists: a fresh run would continue that archive. Move it '
                 f'next to its run (runs_archive/<run>/), rename archive_path, or '
                 f'pass --resume-archive to continue it on purpose')
     return None
