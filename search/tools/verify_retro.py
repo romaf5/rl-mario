@@ -54,6 +54,11 @@ class _Native:
         self.lib.benv_frames(self.env, 0, 1, int(buttons))
 
 
+def retro_state_of(start):
+    """stable-retro savestate that supplies CPU/mapper registers for a native start"""
+    return 'FullGame' if start == 'FullGame' else 'Level%s' % start
+
+
 def verify(start_state, actions, on_frame=None, retro_state='Level1-1'):
     import stable_retro as retro
     from mario_env import _register_integration
@@ -72,6 +77,7 @@ def verify(start_state, actions, on_frame=None, retro_state='Level1-1'):
         o = _chunk(st, tag, len(b)); st[o:o + len(b)] = b
     renv.em.set_state(bytes(st))
     f = 0
+    rr = np.frombuffer(renv.get_ram(), dtype=np.uint8)[:0x800]
     for a in np.asarray(actions, dtype=np.uint8):
         b = ACTION_BUTTONS[int(a)]
         for _ in range(4):
@@ -93,7 +99,7 @@ def verify(start_state, actions, on_frame=None, retro_state='Level1-1'):
 
 if __name__ == '__main__':
     z = np.load(sys.argv[1])
-    res = verify(load_state(str(z['start'])), z['actions'])
+    res = verify(load_state(str(z['start'])), z['actions'], retro_state=retro_state_of(str(z['start'])))
     print('[verify] %s: %d frames, %s%s' % ('PASS' if res['ok'] else 'FAIL', res['frames'],
                                             res.get('end_level', ''), ' ' + ' '.join(res['mismatch'])))
     sys.exit(0 if res['ok'] else 1)

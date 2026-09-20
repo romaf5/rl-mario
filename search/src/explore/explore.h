@@ -1,6 +1,7 @@
 // Go-Explore phase 1 in C++: an archive of cells (cell_key), each holding its
-// fastest state and the actions to it; workers pick cells (1/sqrt(1 + picks)),
-// random-walk from them and merge new or faster cells. Returns the fastest path
+// fastest state and the actions to it; workers pick fresh cells first (fewer
+// than fresh_uses walks, uniformly), else by 1/(1 + picks), random-walk from
+// them and merge new or faster cells. Returns the fastest path
 // into the segment goal found within the budget.
 #pragma once
 #include <cstdint>
@@ -16,6 +17,9 @@ struct ExploreParams {
     int max_walk = 300;                     // steps per random walk
     uint64_t seed = 0;
     int64_t max_cells = 2000000;
+    int fresh_uses = 60;                    // walks every new cell gets before old ones are walked again
+    int max_variants = 8;                   // tile-signature variants per spot (spot_key)
+    int verbose = 0;                        // 1: progress every 15 s on stderr
 };
 
 struct ExploreResult {

@@ -1,5 +1,5 @@
-// Beam A* over time: depth d holds nodes after 4d frames; the B best (px left
-// along the reference's waypoints, then x speed) are expanded by all 12 actions,
+// Beam A* over time: depth d holds nodes after 4d frames; the B best (estimated
+// time to the goal along the reference, progress.h; then x speed) are expanded by all 12 actions,
 // deduplicated by exact state, spread by at most per_cell per coarse cell. The
 // reference's own node is always kept, so the result is never slower than it.
 #pragma once

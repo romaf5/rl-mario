@@ -78,7 +78,7 @@ class Search:
         L.ss_bench.restype = D; L.ss_bench.argtypes = [P, ctypes.c_char_p, ctypes.c_int64]
         L.ss_selftest.restype = I; L.ss_selftest.argtypes = [P, ctypes.c_char_p, I, U64]
         L.ss_explore.restype = I
-        L.ss_explore.argtypes = [P, ctypes.c_char_p, P, I, D, D, I, U64, P, I, ctypes.POINTER(_Stats)]
+        L.ss_explore.argtypes = [P, ctypes.c_char_p, P, I, D, D, I, U64, I, P, I, ctypes.POINTER(_Stats)]
         L.ss_optimize.restype = I
         L.ss_optimize.argtypes = [P, ctypes.c_char_p, P, I, P, I, I, I, I, I, P, I, ctypes.POINTER(_Stats)]
         rom_bytes = open(rom, 'rb').read()
@@ -144,13 +144,13 @@ class Search:
         stats = {k: getattr(st, k) for k, _ in _Stats._fields_}
         return Result(actions=out[:max(n, 0)].copy(), found=bool(st.found), frames=int(st.frames), stats=stats)
 
-    def explore(self, state, route, budget_s=120.0, settle_s=30.0, max_walk=300, seed=0):
+    def explore(self, state, route, budget_s=120.0, settle_s=30.0, max_walk=300, seed=0, verbose=0):
         """Go-Explore discovery of the segment starting at state (to the next route level)."""
         r, rp, rn = self._route(route)
         out = np.zeros(self.MAX_ACTIONS, dtype=np.uint8)
         st = _Stats()
         n = self._lib.ss_explore(self._ctx, self._state(state), rp, rn, float(budget_s), float(settle_s),
-                                 int(max_walk), int(seed), out.ctypes.data, len(out), ctypes.byref(st))
+                                 int(max_walk), int(seed), int(verbose), out.ctypes.data, len(out), ctypes.byref(st))
         return self._result(out, n, st)
 
     def optimize(self, state, route, reference, beam=20000, per_cell=16, max_depth=6000, verbose=0):

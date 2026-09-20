@@ -37,6 +37,17 @@ inline uint64_t cell_key(const uint8_t* r) {
     return mix64(k ^ (hash_bytes(g, sizeof g) * 0x9E3779B97F4A7C15ULL)) | 1;
 }
 
+// the cell key without the tile signature: tile variants of one spot are
+// capped (coins and broken bricks change the tiles: uncapped, 4-2 grew 31k
+// cells in 15 s and no new cell got its walks)
+inline uint64_t spot_key(const uint8_t* r) {
+    uint64_t k = frame_id(r);
+    k = k * 1024 + (uint64_t)(mario_x(r) / 32);
+    k = k * 32 + (uint64_t)(r[0x3B8] / 16);
+    k = k * 1024 + (uint64_t)(camera_x(r) / 64);
+    return mix64(k) | 1;
+}
+
 // all game-state RAM: temps, frame counter, stack, OAM buffer, score, coins and
 // timer digits excluded
 inline uint64_t exact_key(const uint8_t* r) {

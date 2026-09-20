@@ -34,7 +34,7 @@ SS_API int ss_settle(ss_ctx* ctx, const uint8_t* state, int max_steps, uint8_t* 
 SS_API double ss_bench(ss_ctx* ctx, const uint8_t* start, int64_t frames);
 SS_API int ss_selftest(ss_ctx* ctx, const uint8_t* start, int steps, uint64_t seed);
 SS_API int ss_explore(ss_ctx* ctx, const uint8_t* start, const int32_t* route, int n_route,
-                      double budget_s, double settle_s, int max_walk, uint64_t seed,
+                      double budget_s, double settle_s, int max_walk, uint64_t seed, int verbose,
                       uint8_t* out, int max_out, ss_stats* st);
 SS_API int ss_optimize(ss_ctx* ctx, const uint8_t* start, const int32_t* route, int n_route,
                        const uint8_t* ref, int n_ref, int beam, int per_cell, int max_depth,

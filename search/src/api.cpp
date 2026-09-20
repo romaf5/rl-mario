@@ -120,9 +120,9 @@ int ss_selftest(ss_ctx* c, const uint8_t* start, int steps, uint64_t seed) {
 }
 
 int ss_explore(ss_ctx* c, const uint8_t* start, const int32_t* route, int n_route, double budget_s,
-               double settle_s, int max_walk, uint64_t seed, uint8_t* out, int max_out, ss_stats* st) {
+               double settle_s, int max_walk, uint64_t seed, int verbose, uint8_t* out, int max_out, ss_stats* st) {
     ExploreParams p;
-    p.budget_s = budget_s; p.settle_s = settle_s; p.max_walk = max_walk; p.seed = seed;
+    p.budget_s = budget_s; p.settle_s = settle_s; p.max_walk = max_walk; p.seed = seed; p.verbose = verbose;
     const ExploreResult r = explore(*c->pool, c->emus, start, std::vector<int>(route, route + n_route), p);
     const int n = copy_out(r.actions, out, max_out);
     if (st) {

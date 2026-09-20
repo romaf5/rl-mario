@@ -37,10 +37,11 @@ def main():
     for k in range(a.segments):
         lvl = s.level(state)
         t0 = time.time()
-        ref = s.explore(state, route, budget_s=a.explore_budget, settle_s=a.explore_settle, seed=a.seed + k)
+        ref = s.explore(state, route, budget_s=a.explore_budget, settle_s=a.explore_settle, seed=a.seed + k, verbose=1)
         t1 = time.time()
         if not ref.found:
-            print('[solve] %s: explore found no exit in %.0f s' % (lvl, t1 - t0)); break
+            print('[solve] %s: explore found no exit in %.0f s (%d cells, %d walks)'
+                  % (lvl, t1 - t0, ref.stats['cells'], ref.stats['walks'])); break
         print('[solve] %s: reference %d steps (%d cells, %d walks, %.0f s)'
               % (lvl, len(ref.actions), ref.stats['cells'], ref.stats['walks'], t1 - t0), flush=True)
         opt = s.optimize(state, route, ref.actions, beam=a.beam, per_cell=a.per_cell, verbose=1)

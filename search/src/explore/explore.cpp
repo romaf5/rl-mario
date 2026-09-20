@@ -2,6 +2,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -41,13 +42,16 @@ ExploreResult explore(Pool& pool, std::vector<Emu*>& emus, const uint8_t* start_
     std::shared_mutex mu;                               // guards cells + index
     std::deque<Cell> cells;
     std::unordered_map<uint64_t, uint32_t> index;
+    std::unordered_map<uint64_t, int> spots;            // tile variants per spot
     {
         std::vector<uint8_t> s0(CS);
         e0.save(s0.data());
         cells.emplace_back(std::move(s0), std::vector<uint8_t>());
         const uint64_t k0 = cell_key(e0.ram());
-        if (k0) index.emplace(k0, 0u);
+        if (k0) { index.emplace(k0, 0u); spots[spot_key(e0.ram())] = 1; }
     }
+    std::mutex pick_mu;                                 // guards fresh; taken before mu
+    std::vector<uint32_t> fresh{0};                     // cells with < fresh_uses walks
     std::mutex gmu;                                     // guards the goal path
     std::vector<uint8_t> best;
     bool found = false;
@@ -58,25 +62,32 @@ ExploreResult explore(Pool& pool, std::vector<Emu*>& emus, const uint8_t* start_
         Emu& e = *emus[w];
         std::mt19937_64 rng(p.seed * 0x9E3779B97F4A7C15ULL + (uint64_t)wi + 1);
         std::vector<uint8_t> buf(CS), acts;
-        struct Cand { std::vector<uint8_t> state, actions; };
+        struct Cand { std::vector<uint8_t> state, actions; uint64_t spot; };
         std::unordered_map<uint64_t, Cand> local;
         int64_t fr = 0, nw = 0;
+        double next_log = 15;
         for (;;) {
             const double t = elapsed();
             {
                 std::lock_guard<std::mutex> g(gmu);
                 if (t > p.budget_s || (found && t > found_at + p.settle_s)) break;
             }
-            {
+            {   // fresh cells first: a link found by 10% of walks is found with ~99% at 60
+                std::lock_guard<std::mutex> pl(pick_mu);
                 std::shared_lock<std::shared_mutex> l(mu);
-                const size_t n = cells.size();
                 size_t ci;
-                for (;;) {
-                    ci = (size_t)(rng() % n);
-                    const double a = 1.0 / std::sqrt(1.0 + cells[ci].picks.load(std::memory_order_relaxed));
-                    if ((double)(rng() >> 11) * 0x1.0p-53 < a) break;
+                if (!fresh.empty()) {
+                    const size_t j = (size_t)(rng() % fresh.size());
+                    ci = fresh[j];
+                    if ((int)cells[ci].picks.fetch_add(1) + 1 >= p.fresh_uses) { fresh[j] = fresh.back(); fresh.pop_back(); }
+                } else {
+                    const size_t n = cells.size();
+                    for (;;) {
+                        ci = (size_t)(rng() % n);
+                        if ((double)(rng() >> 11) * 0x1.0p-53 < 1.0 / (1.0 + cells[ci].picks.load())) break;
+                    }
+                    cells[ci].picks.fetch_add(1);
                 }
-                cells[ci].picks.fetch_add(1, std::memory_order_relaxed);
                 memcpy(buf.data(), cells[ci].state.data(), CS);
                 acts = cells[ci].actions;
             }
@@ -115,16 +126,22 @@ ExploreResult explore(Pool& pool, std::vector<Emu*>& emus, const uint8_t* start_
                     c.state.resize(CS);
                     e.save(c.state.data());
                     c.actions = acts;
+                    c.spot = spot_key(r);
                     local.emplace(k, std::move(c));
                 }
             }
             if (!local.empty()) {
+                std::lock_guard<std::mutex> pl(pick_mu);
                 std::unique_lock<std::shared_mutex> l(mu);
                 for (auto& kv : local) {
                     auto g = index.find(kv.first);
                     if (g == index.end()) {
+                        int& nv = spots[kv.second.spot];
+                        if (nv >= p.max_variants) continue;
+                        nv++;
                         if ((int64_t)cells.size() < p.max_cells) {
                             index.emplace(kv.first, (uint32_t)cells.size());
+                            fresh.push_back((uint32_t)cells.size());
                             cells.emplace_back(std::move(kv.second.state), std::move(kv.second.actions));
                         }
                     } else if (cells[g->second].actions.size() > kv.second.actions.size()) {
@@ -134,6 +151,13 @@ ExploreResult explore(Pool& pool, std::vector<Emu*>& emus, const uint8_t* start_
                 }
             }
             nw++;
+            if (p.verbose && w == 0 && t >= next_log) {
+                next_log = t + 15;
+                std::lock_guard<std::mutex> pl(pick_mu);
+                std::shared_lock<std::shared_mutex> l(mu);
+                fprintf(stderr, "[explore] %.0f s: %zu cells in %zu spots (%zu fresh), ~%lld walks, goal %s\n", t,
+                        cells.size(), spots.size(), fresh.size(), (long long)(nw * pool.size()), found ? "found" : "not yet");
+            }
         }
         frames += fr;
         walks += nw;

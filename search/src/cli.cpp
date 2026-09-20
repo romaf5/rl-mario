@@ -57,7 +57,7 @@ int main(int argc, char** argv) {
     ss_stats st{};
     if (cmd == "explore" && argc >= 7) {
         ss_ctx* c = ss_create(rom.data(), (int)rom.size(), argc > 7 ? atoi(argv[7]) : 0);
-        const int n = ss_explore(c, state.data(), route.data(), (int)route.size(), atof(argv[5]), 10.0, 300, 1,
+        const int n = ss_explore(c, state.data(), route.data(), (int)route.size(), atof(argv[5]), 10.0, 300, 1, 1,
                                  out.data(), (int)out.size(), &st);
         printf("explore: found %d, %d actions, %lld cells, %lld walks, %.1f s\n", st.found, n,
                (long long)st.cells, (long long)st.walks, st.seconds);

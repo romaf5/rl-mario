@@ -1,11 +1,13 @@
 #include "beam.h"
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
 #include <unordered_map>
 #include <unordered_set>
 #include "../core/keys.h"
+#include "progress.h"
 
 namespace ss {
 
@@ -24,37 +26,30 @@ OptimizeResult optimize(Pool& pool, std::vector<Emu*>& emus, const uint8_t* star
     std::vector<uint8_t> s0(CS);
     e0.save(s0.data());
 
-    // the reference path -> waypoints; ref_len = its steps before the goal step
-    std::vector<uint32_t> ff;
-    std::vector<int> xs;
-    std::vector<uint8_t> ctl;
-    auto rec = [&](const uint8_t* r) { ff.push_back(frame_id(r)); xs.push_back(mario_x(r)); ctl.push_back(in_control(r)); };
-    rec(e0.ram());
+    // the reference path: progress checkpoints; ref_len = its steps before the goal step
+    RefProgress rp;
+    rp.add(e0.ram(), 0);
     int ref_len = 0;
     for (size_t d = 0; d < ref.size(); d++) {
         e0.step(ref[d]);
         if (seg.classify(e0.ram()) != Outcome::Running) break;
-        rec(e0.ram());
+        rp.add(e0.ram(), (int)d + 1);
         ref_len = (int)d + 1;
     }
-    const Waypoints wp = waypoints_from_trace(ff, xs, ctl);
-    auto rank_of = [&](uint32_t f, int x, bool c, bool ex, int k, int64_t pd, int* ko, int64_t* d) {
-        if (wp.empty()) { *ko = 0; *d = px_units(100000 - x); return true; }     // no reference: go right
-        return wp.rank(f, x, c, ex, k, pd, ko, d);
-    };
-    int k0 = 0;
+    e0.load(s0.data());
+    int t0v = 0;
     int64_t d0 = 0;
-    if (!rank_of(ff[0], xs[0], true, false, 0, (int64_t)1 << 40, &k0, &d0)) d0 = (int64_t)1 << 40;
+    rp.rank(e0.ram(), 0, (int64_t)1 << 40, &t0v, &d0);
 
     const int B = std::max(1, p.beam);
     std::vector<uint8_t> cur(s0), nxt;
-    std::vector<uint16_t> cur_k{(uint16_t)k0};
+    std::vector<int32_t> cur_k{t0v};
     std::vector<int64_t> cur_d{d0};
     int ref_node = ref_len > 0 ? 0 : -1;                 // the reference's node in cur
     std::vector<std::vector<uint32_t>> par;              // par[d-1][j]: parent of node j at depth d
     std::vector<std::vector<uint8_t>> act;
     std::vector<uint8_t> chs, ok;
-    std::vector<uint16_t> ch_k;
+    std::vector<int32_t> ch_k;
     std::vector<int64_t> ch_d;
     std::vector<int8_t> spd;
     std::vector<uint64_t> ek, cek;
@@ -78,9 +73,8 @@ OptimizeResult optimize(Pool& pool, std::vector<Emu*>& emus, const uint8_t* star
                 if (o == Outcome::Goal) { ok[c] = 2; continue; }
                 int k;
                 int64_t d;
-                const bool ex = !in_control(r) && r[0x0E] >= 1 && r[0x0E] <= 5;
-                if (!rank_of(frame_id(r), mario_x(r), in_control(r), ex, cur_k[i], cur_d[i], &k, &d)) continue;
-                ok[c] = 1; ch_k[c] = (uint16_t)k; ch_d[c] = d; spd[c] = (int8_t)r[0x57];
+                rp.rank(r, cur_k[i], cur_d[i], &k, &d);
+                ok[c] = 1; ch_k[c] = k; ch_d[c] = d; spd[c] = (int8_t)r[0x57];
                 ek[c] = exact_key(r); cek[c] = coarse_key(r);
                 e.save(chs.data() + c * CS);
             }
@@ -131,7 +125,7 @@ OptimizeResult optimize(Pool& pool, std::vector<Emu*>& emus, const uint8_t* star
 
         const int ns = (int)sel.size();
         nxt.resize((size_t)ns * CS);
-        std::vector<uint16_t> nk(ns);
+        std::vector<int32_t> nk(ns);
         std::vector<int64_t> nd(ns);
         std::vector<uint32_t> pp(ns);
         std::vector<uint8_t> pa(ns);
@@ -155,9 +149,9 @@ OptimizeResult optimize(Pool& pool, std::vector<Emu*>& emus, const uint8_t* star
                     r[0x0E], mario_x(r), mario_y(r), level_gp(r), r[0x760], r[0x74F], r[0x770], game_timer(r), nneg);
         }
         if (p.verbose && depth % 25 == 0)
-            fprintf(stderr, "[beam] depth %d (%d frames): %d nodes of %zu, best %.0f frames left, waypoint %d/%zu, %.0f frames/s\n",
+            fprintf(stderr, "[beam] depth %d (%d frames): %d nodes of %zu, best %.0f frames left, reference step %d/%d, %.0f frames/s\n",
                     depth, depth * kFrameSkip, ns, order.size(), *std::min_element(cur_d.begin(), cur_d.end()) / 16.0,
-                    (int)*std::max_element(cur_k.begin(), cur_k.end()), wp.frame.size(), emu / elapsed());
+                    (int)*std::max_element(cur_k.begin(), cur_k.end()), ref_len, emu / elapsed());
     }
     res.emu_frames = emu;
     res.nodes = kept;
