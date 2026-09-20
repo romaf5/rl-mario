@@ -21,7 +21,7 @@ import numpy as np
 import stable_retro as retro
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-INTEGRATION_PATH = os.path.join(HERE, 'retro_integration')
+INTEGRATION_PATH = HERE
 GAME = 'SuperMarioBros-Nes-v0'
 STATE_DIR = os.path.join(INTEGRATION_PATH, GAME)
 

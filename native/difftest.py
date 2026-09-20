@@ -33,9 +33,8 @@ def native_ram():
 
 
 # retro reference
-from mario_env import RetroMarioEnv, _register_integration  # noqa: E402
 import stable_retro as retro  # noqa: E402
-_register_integration()
+retro.data.Integrations.add_custom_path(os.path.join(HERE, '..', 'retro_integration'))
 renv = retro.make('SuperMarioBros-Nes-v0', state=retro.State.NONE,
                   inttype=retro.data.Integrations.CUSTOM_ONLY,
                   use_restricted_actions=retro.Actions.ALL,

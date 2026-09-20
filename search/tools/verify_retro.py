@@ -10,7 +10,6 @@ import numpy as np
 SEARCH = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(SEARCH, 'python'))
 from smbsearch import ACTION_BUTTONS, REPO, ROM, load_state, level_name
-sys.path.insert(0, REPO)
 
 GAME = np.ones(0x800, dtype=bool)
 GAME[0x100:0x300] = False            # stack page + OAM shadow (as native/deep_difftest.py)
@@ -34,13 +33,17 @@ def _chunk(st, tag, size):
 class _Native:
     """the native core on the hack-free path, frame by frame (native/libbatchenv.so)"""
     def __init__(self, state):
-        from mario_native_vecenv import _Lib
-        self.lib = _Lib()
+        L = self.lib = ctypes.CDLL(os.path.join(REPO, 'native', 'libbatchenv.so'))
+        P, I = ctypes.c_void_p, ctypes.c_int
+        L.benv_create.restype = P; L.benv_create.argtypes = [ctypes.c_char_p, I, I, I, I]
+        L.benv_destroy.argtypes = [P]
+        L.benv_load.argtypes = [P, I, ctypes.c_char_p]
+        L.benv_ram.restype = ctypes.POINTER(ctypes.c_uint8); L.benv_ram.argtypes = [P, I]
+        L.benv_get_ppu.argtypes = [P, I] + [ctypes.c_char_p] * 3
+        L.benv_frames.argtypes = [P, I, I, I]
         rom = open(ROM, 'rb').read()
-        self.env = self.lib.benv_create(rom, len(rom), 1, 1, 0)
-        self.lib.benv_load(self.env, 0, state)
-        self.lib.benv_get_ppu.argtypes = [ctypes.c_void_p, ctypes.c_int] + [ctypes.c_char_p] * 3
-        self.lib.benv_frames.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int]
+        self.env = L.benv_create(rom, len(rom), 1, 1, 0)
+        L.benv_load(self.env, 0, state)
 
     def ram(self):
         return np.ctypeslib.as_array(self.lib.benv_ram(self.env, 0), shape=(0x800,))
@@ -53,6 +56,9 @@ class _Native:
     def frame(self, buttons):
         self.lib.benv_frames(self.env, 0, 1, int(buttons))
 
+    def close(self):
+        self.lib.benv_destroy(self.env)
+
 
 def retro_state_of(start):
     """stable-retro savestate that supplies CPU/mapper registers for a native start"""
@@ -61,8 +67,7 @@ def retro_state_of(start):
 
 def verify(start_state, actions, on_frame=None, retro_state='Level1-1'):
     import stable_retro as retro
-    from mario_env import _register_integration
-    _register_integration()
+    retro.data.Integrations.add_custom_path(os.path.join(REPO, 'retro_integration'))
     nat = _Native(start_state)
     renv = retro.make('SuperMarioBros-Nes-v0', state=retro_state, inttype=retro.data.Integrations.CUSTOM_ONLY,
                       use_restricted_actions=retro.Actions.ALL, render_mode='rgb_array')

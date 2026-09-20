@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# One-shot setup of the training environment (Apple Silicon Mac; works on Linux too):
-#   venv_retro + Python deps, the SMB ROM (from the gym-super-mario-bros wheel, SHA-1 checked
-#   against rom.sha), and the native core build (native/build.sh).
-#   PYTHON=/path/to/python3.11 ./setup_mac.sh     # to pick the interpreter
+# One-shot setup (Linux or Apple Silicon Mac): venv_retro + Python deps, the SMB ROM
+# (from the gym-super-mario-bros wheel, SHA-1 checked against rom.sha), the native
+# core (native/build.sh) and the search engine (search/build.sh).
+#   PYTHON=/path/to/python3.12 ./setup.sh     # to pick the interpreter
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -34,4 +34,5 @@ EOF
 fi
 
 native/build.sh
+search/build.sh
 echo "[setup] done: source venv_retro/bin/activate"

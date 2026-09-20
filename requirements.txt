@@ -1,14 +1,9 @@
-# Native training stack (Linux GPU box and Apple Silicon Mac); setup_mac.sh installs these,
-# fetches the ROM and builds native/ (native/build.sh)
-torch
-rl-games>=1.6.1
-stable-retro>=0.9.2
-gymnasium
+# smbsearch tools (the engine itself is C++: search/build.sh) and SMBZero
 numpy
-opencv-python
-tensorboard
-tensorboardX
-PyYAML
+stable-retro>=1.0       # the reference emulator: every route is verified against it
+gymnasium               # stable-retro's API
 Pillow
 imageio
 imageio-ffmpeg
+torch                   # SMBZero policy / value network
+tensorboard             # SMBZero training curves
