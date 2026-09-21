@@ -9,7 +9,8 @@
 // adds 4 * depth + v to each node on its path; b(n) = that sum / n. (A min backup
 // was tried first: over noisy net values the minimum is optimistic and the most
 // explored subtree looked best -- the agent stalled in 1-1.)
-// q(c) = clamp(1 - (b(c) - best sibling) / scale).
+// q(c) = clamp(1 - (b(c) - best sibling) / scale). With exact leaf values (the route)
+// min_backup keeps b(n) = 4 + min over children instead: the best line found.
 //
 // Leaf values: value_mix * net + (1 - value_mix) * route, where route is the frames to
 // go along the level's route (the beam's progress rank, optimize/progress.h, carried
@@ -34,9 +35,10 @@ struct MctsParams {
     float v_death = 4096.0f;       // frames to go of a dead end (the top of the net's value range)
     int max_nodes = 1 << 16;       // per tree
     float value_mix = 1.0f;        // leaf value: this x net + (1 - this) x route (1 without a route)
+    int min_backup = 0;            // 1: b(n) = 4 + min over children (the best line; for exact values)
 };
 
-enum : uint8_t { kRunning = 0, kGoal = 1, kDead = 2 };
+enum : uint8_t { kRunning = 0, kGoal = 1, kDead = 2, kDup = 3 };   // kDup: same state as a sibling
 constexpr int kStack = 4;          // frames per net input
 
 struct MctsNode {
@@ -53,6 +55,7 @@ struct MctsNode {
     uint8_t inflight;              // waiting for the net this wave
     int32_t tau;                   // route progress: the latest reference step matched
     int64_t rank;                  // route progress: frames to go x 16 (progress.h units)
+    uint64_t key;                  // exact state key (sibling duplicates)
 };
 
 struct MctsTree {
@@ -89,6 +92,10 @@ public:
     // the root's input does nothing now: every (action, NOOP) reaches one exact state
     void forced(const int32_t* trees, int n, int32_t* out);
     void root_state(int t, uint8_t* full, uint8_t* ram, uint8_t* stack) const;
+    // survival check before a commit: for each candidate root action, is there a button
+    // that, held from the child state for `horizon` steps, does not die (or reaches the
+    // goal)? out[i] = 1: that action survives; 0: every constant continuation dies
+    void safe(int t, const int32_t* actions, int n, int horizon, int32_t* out);
     int nodes(int t) const { return (int)(trees_[t].nodes.size() - trees_[t].free_ids.size()); }
     const MctsParams& params() const { return p_; }
     // the route for a level: the reference actions from their start state (full)
@@ -100,6 +107,7 @@ private:
     int32_t alloc(MctsTree& T);
     void stack_of(const MctsTree& T, int32_t node, uint8_t* out) const;
     void add_path(MctsTree& T, int32_t leaf, float v, bool pending);
+    void refresh_min(MctsTree& T, int32_t x);
     void gc(MctsTree& T);
     void route_root(MctsTree& T);
     Pool& pool_;

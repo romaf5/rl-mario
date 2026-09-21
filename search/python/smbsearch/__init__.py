@@ -222,7 +222,8 @@ class Search:
 
 class _MctsParams(ctypes.Structure):
     _fields_ = [('c_puct', ctypes.c_float), ('fpu', ctypes.c_float), ('scale', ctypes.c_float),
-                ('v_death', ctypes.c_float), ('max_nodes', ctypes.c_int32), ('value_mix', ctypes.c_float)]
+                ('v_death', ctypes.c_float), ('max_nodes', ctypes.c_int32), ('value_mix', ctypes.c_float),
+                ('min_backup', ctypes.c_int32)]
 
 
 class Forest:
@@ -240,7 +241,7 @@ class Forest:
     RUNNING, GOAL, DEAD = 0, 1, 2
 
     def __init__(self, search, n_trees, c_puct=1.5, fpu=0.5, scale=32.0, v_death=4096.0, max_nodes=1 << 16,
-                 max_leaves=2048, stacks=None, value_mix=1.0):
+                 max_leaves=2048, stacks=None, value_mix=1.0, min_backup=False):
         self.s = search
         L = self._lib = search._lib
         P, I, F = ctypes.c_void_p, ctypes.c_int, ctypes.c_float
@@ -257,7 +258,8 @@ class Forest:
         L.ss_mcts_nodes.restype = I; L.ss_mcts_nodes.argtypes = [P, I]
         L.ss_mcts_set_route.argtypes = [P, I, ctypes.c_char_p, P, I]
         L.ss_mcts_set_value_mix.argtypes = [P, F]
-        self.params = _MctsParams(c_puct, fpu, scale, v_death, max_nodes, value_mix)
+        L.ss_mcts_safe.argtypes = [P, I, P, I, I, P]
+        self.params = _MctsParams(c_puct, fpu, scale, v_death, max_nodes, value_mix, int(min_backup))
         self.v_death = v_death
         self.n_trees = n_trees
         self._m = L.ss_mcts_create(search._ctx, n_trees, ctypes.byref(self.params))
@@ -325,6 +327,13 @@ class Forest:
         """Leaf values for the level also use frames to go along this route (its actions from start)."""
         a = np.ascontiguousarray(actions, dtype=np.uint8)
         self._lib.ss_mcts_set_route(self._m, gp(level), self.s._state(start), a.ctypes.data, len(a))
+
+    def safe(self, tree, actions, horizon=24):
+        """Per candidate root action: does some button held for `horizon` steps after it survive?"""
+        a = np.ascontiguousarray(actions, dtype=np.int32)
+        out = np.zeros(len(a), np.int32)
+        self._lib.ss_mcts_safe(self._m, tree, a.ctypes.data, len(a), int(horizon), out.ctypes.data)
+        return out.astype(bool)
 
     def set_value_mix(self, mix):
         """Leaf value = mix x net + (1 - mix) x route (where a route is set)."""

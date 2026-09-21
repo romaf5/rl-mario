@@ -24,11 +24,15 @@ from .train import Replay, train
 
 def label(s, ep, seg, beam, horizon, max_labels):
     """The local teacher on (at most max_labels, evenly spaced) recorded states of an
-    episode -> a DAgger episode (policy and value targets only where labelled)."""
+    episode -> a DAgger episode (policy and value targets only where labelled) plus,
+    per labelled state, the teacher's whole path from it as a teacher episode: every
+    state on the path with its action and frames to go (the sequences a prior needs:
+    back off, run up, jump)."""
     n = len(ep['policy'])
     pol = np.zeros((n, 12), np.float32)
     val = np.full(n, np.nan, np.float32)
     unlabelled = np.ones(n, bool)
+    paths = []
     k = len(ep['label_idx'])
     pick = np.unique(np.linspace(0, k - 1, min(k, max_labels)).round().astype(int)) if k else []
     for j in pick:
@@ -36,7 +40,12 @@ def label(s, ep, seg, beam, horizon, max_labels):
         a, est, _ = s.lookahead(st.tobytes(), ROUTE, seg['opt'], ref_start=seg['start'], beam=beam, horizon=horizon)
         if len(a):
             pol[i, a[0]] = 1; val[i] = est; unlabelled[i] = False
-    return episode(ep['frames'], pol, val, unlabelled, level=str(ep['level']), source='dagger')
+            obs, _, _ = s.replay_obs(st.tobytes(), a)
+            m = len(a)
+            pp = np.zeros((m, 12), np.float32); pp[np.arange(m), a] = 1
+            paths.append(episode(np.concatenate([ep['frames'][i:i + 1], obs]), pp, est - 4.0 * np.arange(m),
+                                 s.forced_along(st.tobytes(), a), level=str(ep['level']), source='teacher'))
+    return episode(ep['frames'], pol, val, unlabelled, level=str(ep['level']), source='dagger'), paths
 
 
 def main():
@@ -63,6 +72,7 @@ def main():
     ap.add_argument('--eval-sims', type=int, default=400)
     ap.add_argument('--eval-level', default=None, help='evaluate one level instead of the full game')
     ap.add_argument('--value-mix', type=float, default=0.0, help='leaf value: this x net + (1 - this) x route')
+    ap.add_argument('--min-backup', action='store_true', help='b = 4 + min over children (exact route values)')
     ap.add_argument('--seed', type=int, default=0)
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -85,7 +95,7 @@ def main():
         routes.setdefault(str(z['level']), []).append((z['start_state'].tobytes(), z['policy'].argmax(1).astype(np.uint8)))
     ev = Evaluator(net, max_leaves=a.trees * a.per_tree)
     player = Player(s, ev, a.trees, per_tree=a.per_tree, max_nodes=1 << 15, routes=route_values(segs),
-                    value_mix=a.value_mix)
+                    value_mix=a.value_mix, min_backup=a.min_backup)
     rng = np.random.default_rng(a.seed)
     opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=1e-4)
     t_end = time.time() + a.hours * 3600
@@ -117,10 +127,13 @@ def main():
                     frames_won.setdefault(l, []).append(g.frames())
             for k, ep in enumerate(g.episodes):
                 tag = 'it%04d_%s_d%02d_%d' % (it, l, d, k)
-                dag = label(s, ep, segs[l], a.label_beam, a.label_horizon, a.max_labels)
+                dag, paths = label(s, ep, segs[l], a.label_beam, a.label_horizon, a.max_labels)
                 n_lab += int((~dag['forced']).sum())
                 rep.add(dag, keep=True)
                 save_episode(os.path.join(DATA, 'dagger', '%s_%s.npz' % (name, tag)), dag)
+                for q, pe in enumerate(paths):                 # the teacher's paths from those states
+                    rep.add(pe, keep=True)
+                    save_episode(os.path.join(DATA, 'dagger', '%s_%s_path%02d.npz' % (name, tag, q)), pe)
                 if g.won and t < 0:                        # AlphaZero targets from levels that worked
                     sp = {k2: v for k2, v in ep.items() if k2 not in ('label_idx', 'label_states')}
                     rep.add(sp)
@@ -140,7 +153,7 @@ def main():
             save(net, os.path.join(a.out, 'net_it%04d.pt' % it), it=it)
             summary, res = run_eval(net, [int(x) for x in a.eval_delays.split(',')], sims=a.eval_sims,
                                     parallel=len(a.eval_delays.split(',')), s=s, level=a.eval_level, log=lambda m: None,
-                                    value_mix=a.value_mix)
+                                    value_mix=a.value_mix, min_backup=a.min_backup)
             log('[loop] eval it %d (%s): won %d/%d, mean %.1f s (%s)' % (
                 it, a.eval_level or 'full game', summary['won'], summary['games'], summary['mean_seconds_won'] or 0,
                 ' '.join('d%d:%s' % (r['delay'], ('%.1fs' % r['seconds']) if r['won'] else r['reason']) for r in res)))

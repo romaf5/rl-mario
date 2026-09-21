@@ -60,12 +60,14 @@ class Player:
         g._seg = None
 
     def play(self, games, sims=None, budget_s=None, noise=0.0, alpha=0.3, max_decisions=20000,
-             segment_limit=None, rng=None, log=None, label_every=0):
+             segment_limit=None, rng=None, log=None, label_every=0, safe_horizon=24):
         """Play the games to the end (axe, death or max_decisions). sims: simulations per
         searched decision; budget_s: wall-clock seconds per searched decision (live play).
         segment_limit: stop each game after this many finished segments (per-level play).
         label_every: keep the full state of every k-th searched decision (for the local teacher).
-        max_decisions: an int, or a list (one per game)."""
+        max_decisions: an int, or a list (one per game).
+        safe_horizon: before a commit, the chosen action must have a surviving continuation
+        (some button held this many steps); else the next most visited (0: off)."""
         assert len(games) <= self.n and (sims or budget_s)
         rng = rng or np.random.default_rng()
         for t, g in enumerate(games):
@@ -103,8 +105,14 @@ class Player:
                     visits, best, rb, _ = self.f.root(t)
                     tot = visits.sum()
                     pol = visits / tot if tot else np.full(12, 1 / 12, np.float32)
-                    a = int(np.lexsort((np.where(best < 0, 1e9, best), -visits))[0])
-                    g.decision_s.append(dt)
+                    order = np.lexsort((np.where(best < 0, 1e9, best), -visits))
+                    a = int(order[0])
+                    if safe_horizon and not self.f.safe(t, [a], safe_horizon)[0]:
+                        cand = [int(x) for x in order[1:4] if visits[x] > 0]
+                        ok = self.f.safe(t, cand, safe_horizon) if cand else []
+                        a = next((c for c, o in zip(cand, ok) if o), a)
+                        g.unsafe = getattr(g, 'unsafe', 0) + 1
+                    g.decision_s.append(time.perf_counter() - t0 if budget_s else dt)
                 seg = g._seg
                 if label_every and not fz and (len(g.decision_s) - 1) % label_every == 0:
                     seg['label_idx'].append(len(seg['policy'])); seg['label_states'].append(self.f.state(t)[0])

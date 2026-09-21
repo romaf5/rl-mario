@@ -226,7 +226,7 @@ ss_mcts* ss_mcts_create(ss_ctx* c, int n_trees, const ss_mcts_params* p) {
     MctsParams q;
     if (p) {
         q.c_puct = p->c_puct; q.fpu = p->fpu; q.scale = p->scale; q.v_death = p->v_death;
-        q.max_nodes = p->max_nodes; q.value_mix = p->value_mix;
+        q.max_nodes = p->max_nodes; q.value_mix = p->value_mix; q.min_backup = p->min_backup;
     }
     return n_trees > 0 ? new ss_mcts(c, n_trees, q) : nullptr;
 }
@@ -264,5 +264,8 @@ void ss_mcts_set_route(ss_mcts* m, int level_gp, const uint8_t* start, const uin
     m->forest.set_route(level_gp, start, actions, n);
 }
 void ss_mcts_set_value_mix(ss_mcts* m, float mix) { m->forest.set_value_mix(mix); }
+void ss_mcts_safe(ss_mcts* m, int t, const int32_t* actions, int n, int horizon, int32_t* out) {
+    m->forest.safe(t, actions, n, horizon, out);
+}
 
 }  // extern "C"

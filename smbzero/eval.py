@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(REPO, 'search', 'tools'))
 
 
 def run(net, delays, sims=None, budget_ms=None, parallel=1, per_tree=None, level=None, verify=False, out=None,
-        log=print, s=None, c_puct=1.5, value_mix=0.0):
+        log=print, s=None, c_puct=1.5, value_mix=0.0, min_backup=False):
     s = s or Search(threads=THREADS)
     segs = {g['level']: g for g in e2e_segments(s)}
     if level:
@@ -32,7 +32,8 @@ def run(net, delays, sims=None, budget_ms=None, parallel=1, per_tree=None, level
     per_tree = per_tree or (256 if budget_ms else 128)
     n_par = 1 if budget_ms else parallel
     ev = Evaluator(net, max_leaves=max(per_tree * n_par, 256))
-    player = Player(s, ev, n_par, per_tree=per_tree, c_puct=c_puct, routes=route_values(segs), value_mix=value_mix)
+    player = Player(s, ev, n_par, per_tree=per_tree, c_puct=c_puct, routes=route_values(segs), value_mix=value_mix,
+                    min_backup=min_backup)
     results = []
     for i in range(0, len(delays), n_par):
         chunk = delays[i:i + n_par]
@@ -74,6 +75,7 @@ def main():
     ap.add_argument('--per-tree', type=int)
     ap.add_argument('--c-puct', type=float, default=1.5)
     ap.add_argument('--value-mix', type=float, default=0.0, help='leaf value: this x net + (1 - this) x route')
+    ap.add_argument('--min-backup', action='store_true', help='b = 4 + min over children (exact route values)')
     ap.add_argument('--level')
     ap.add_argument('--verify', action='store_true')
     ap.add_argument('--out')
@@ -85,7 +87,8 @@ def main():
     logf = open(os.path.join(out, 'eval.log'), 'a')
     log = lambda m: (print(m, flush=True), logf.write(m + '\n'), logf.flush())
     summary, results = run(net, delays, sims=a.sims, budget_ms=a.budget_ms, parallel=a.parallel, per_tree=a.per_tree,
-                           level=a.level, verify=a.verify, out=out, log=log, c_puct=a.c_puct, value_mix=a.value_mix)
+                           level=a.level, verify=a.verify, out=out, log=log, c_puct=a.c_puct, value_mix=a.value_mix,
+                           min_backup=a.min_backup)
     log('[eval] summary %s' % json.dumps(summary))
     json.dump(dict(summary=summary, results=results), open(os.path.join(out, 'eval.json'), 'w'), indent=1)
 

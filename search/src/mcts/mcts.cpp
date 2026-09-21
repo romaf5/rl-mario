@@ -12,7 +12,7 @@ void init_node(MctsNode& n, int32_t parent, uint8_t action) {
     n.parent = parent;
     for (int a = 0; a < kNumActions; a++) { n.child[a] = -1; n.prior[a] = 1.0f / kNumActions; }
     n.n = 0; n.pending = 0; n.w = 0; n.b = 0; n.action = action;
-    n.term = kRunning; n.evaluated = 0; n.inflight = 0; n.tau = 0; n.rank = 0;
+    n.term = kRunning; n.evaluated = 0; n.inflight = 0; n.tau = 0; n.rank = 0; n.key = 0;
 }
 
 uint8_t term_of(Outcome o) { return o == Outcome::Goal ? kGoal : o == Outcome::Dead ? kDead : kRunning; }
@@ -106,9 +106,19 @@ void Forest::add_path(MctsTree& T, int32_t leaf, float v, bool pending) {
         MctsNode& N = T.nodes[x];
         if (pending && x != leaf) N.pending--;
         N.w += g; N.n++;
-        N.b = (float)(N.w / N.n);
+        if (p_.min_backup && x != leaf) refresh_min(T, x);
+        else if (!p_.min_backup) N.b = (float)(N.w / N.n);
+        else if (N.n == 1) N.b = v;                       // a new leaf: its value
         g += kFrameSkip;
     }
+}
+
+void Forest::refresh_min(MctsTree& T, int32_t x) {
+    MctsNode& N = T.nodes[x];
+    float best = 1e30f;
+    for (int32_t c : N.child)
+        if (c >= 0 && T.nodes[c].evaluated && T.nodes[c].term != kDup) best = std::min(best, T.nodes[c].b);
+    if (best < 1e30f) N.b = std::min(p_.v_death, kFrameSkip + best);
 }
 
 int Forest::select(const int32_t* trees, int n_trees, int per_tree, int max_leaves, MctsLeaf* leaves,
@@ -138,7 +148,7 @@ int Forest::select(const int32_t* trees, int n_trees, int per_tree, int max_leav
                 float bstar = 1e30f;
                 for (int a = 0; a < kNumActions; a++) {
                     const int32_t c = N.child[a];
-                    if (c >= 0 && T.nodes[c].evaluated) bstar = std::min(bstar, T.nodes[c].b);
+                    if (c >= 0 && T.nodes[c].evaluated && T.nodes[c].term != kDup) bstar = std::min(bstar, T.nodes[c].b);
                 }
                 const float sq = std::sqrt((float)(N.n + N.pending + 1));
                 int best = -1;
@@ -151,7 +161,7 @@ int Forest::select(const int32_t* trees, int n_trees, int per_tree, int max_leav
                         q = p_.fpu;
                     } else {
                         const MctsNode& C = T.nodes[c];
-                        if (!C.evaluated) continue;
+                        if (!C.evaluated || C.term == kDup) continue;
                         q = C.term == kDead ? 0.f : std::min(1.f, std::max(0.f, 1.f - (C.b - bstar) / p_.scale));
                         nc = C.n + C.pending;
                         if (C.pending) q *= (float)C.n / (float)nc;   // in-flight visits count as q = 0
@@ -171,7 +181,7 @@ int Forest::select(const int32_t* trees, int n_trees, int per_tree, int max_leav
                     leaf = id;
                     break;
                 }
-                if (T.nodes[c].term != kRunning) { leaf = c; terminal = true; break; }
+                if (T.nodes[c].term == kGoal || T.nodes[c].term == kDead) { leaf = c; terminal = true; break; }
                 x = c;
             }
             if (leaf < 0) continue;
@@ -195,6 +205,7 @@ int Forest::select(const int32_t* trees, int n_trees, int per_tree, int max_leav
         e.step_obs(C.action, &T.frames[(size_t)J.node * kObsSize]);
         e.save(&T.states[(size_t)J.node * cs_]);
         C.term = term_of(T.seg.classify(e.ram()));
+        C.key = exact_key(e.ram());
         if (T.rp) {
             const MctsNode& P = T.nodes[C.parent];
             T.rp->rank(e.ram(), P.tau, P.rank, &C.tau, &C.rank);
@@ -205,6 +216,20 @@ int Forest::select(const int32_t* trees, int n_trees, int per_tree, int max_leav
     for (const Job& J : jobs) {
         MctsTree& T = trees_[J.t];
         MctsNode& C = T.nodes[J.node];
+        if (J.emulate && C.term == kRunning) {
+            const MctsNode& P = T.nodes[C.parent];
+            bool dup = false;
+            for (int a = 0; a < kNumActions && !dup; a++) {
+                const int32_t o = P.child[a];
+                dup = o >= 0 && o != J.node && T.nodes[o].term != kDup && T.nodes[o].key == C.key &&
+                      (T.nodes[o].evaluated || T.nodes[o].inflight);
+            }
+            if (dup) {                                    // same state as a sibling: never again
+                C.term = kDup; C.evaluated = 1; C.inflight = 0;
+                for (int32_t x = C.parent; x >= 0; x = T.nodes[x].parent) T.nodes[x].pending--;
+                continue;
+            }
+        }
         if (C.term == kRunning) { leaves[n_out++] = {J.t, J.node}; continue; }
         C.evaluated = 1; C.inflight = 0;                  // a new terminal: back it up now
         add_path(T, J.node, C.term == kGoal ? 0.f : p_.v_death, true);
@@ -278,8 +303,12 @@ int Forest::commit(int t, int action) {
         e.save(&T.states[(size_t)c * cs_]);
         MctsNode& C = T.nodes[c];
         C.term = term_of(T.seg.classify(e.ram()));
+        C.key = exact_key(e.ram());
         if (T.rp) T.rp->rank(e.ram(), T.nodes[T.root].tau, T.nodes[T.root].rank, &C.tau, &C.rank);
         if (C.term != kRunning) { C.evaluated = 1; C.b = C.term == kGoal ? 0.f : p_.v_death; C.w = C.b; C.n = 1; }
+    }
+    if (T.nodes[c].term == kDup) {                        // a duplicate is a real state: a fresh root
+        T.nodes[c].term = kRunning; T.nodes[c].evaluated = 0; T.nodes[c].n = 0; T.nodes[c].w = 0;
     }
     memmove(T.hist[1], T.hist[0], (size_t)(kStack - 2) * kObsSize);
     memcpy(T.hist[0], &T.frames[(size_t)T.root * kObsSize], kObsSize);
@@ -303,6 +332,27 @@ void Forest::forced(const int32_t* trees, int n, int32_t* out) {
         out[i] = 1;
         for (int a = 1; a < kNumActions; a++)
             if (key[(size_t)i * kNumActions + a] != key[(size_t)i * kNumActions]) { out[i] = 0; break; }
+    }
+}
+
+void Forest::safe(int t, const int32_t* actions, int n, int horizon, int32_t* out) {
+    const MctsTree& T = trees_[t];
+    std::vector<uint8_t> alive((size_t)n * kNumActions, 0);
+    pool_.parallel_for((int64_t)n * kNumActions, [&](int64_t j, int w) {
+        Emu& e = *emus_[w];
+        e.load(&T.states[(size_t)T.root * cs_]);
+        e.step(actions[j / kNumActions]);
+        Outcome o = T.seg.classify(e.ram());
+        const int hold = (int)(j % kNumActions);
+        for (int k = 0; k < horizon && o == Outcome::Running; k++) {
+            e.step(hold);
+            o = T.seg.classify(e.ram());
+        }
+        alive[j] = o != Outcome::Dead;
+    }, 1);
+    for (int i = 0; i < n; i++) {
+        out[i] = 0;
+        for (int a = 0; a < kNumActions; a++) out[i] |= alive[(size_t)i * kNumActions + a];
     }
 }
 
