@@ -76,3 +76,16 @@ frame by frame. Time = first control -> axe, delay included.
 3. Live play per level entry state + delays: clears.
 4. Full game, 61 delays: 61/61 clears (the must).
 5. Self-play iterations for speed: mean game time down toward 4:51.7.
+
+## Roadmap (user, 2026-09-21): pass a stage, then automate the next part
+
+1. Win the game live: full game from 1-1, 80 ms / ~1000 simulations per decision, 61/61 start
+   delays to the axe, each replayed in stable-retro.
+2. Learned value: `smbzero/value_test.py` >= 90% on every level, then value_mix 0 -> 0.5 -> 1
+   with clear rates holding, then outcome-only value targets: play needs no route.
+3. World model (MuZero): learned dynamics (frames -> latent -> next latent per action) trained on
+   the agent's own games; the MCTS searches the model; clears at similar rates with no
+   emulator at play time.
+4. Speed: mean full-game time below the search's 5:26.4, toward the PAL TAS 4:51.7.
+
+Zero human knowledge throughout: no hints (a route-action prior was rejected).
