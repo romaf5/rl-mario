@@ -22,12 +22,13 @@ from .play import Game, Player
 from .train import Replay, train
 
 
-def label(s, ep, seg, beam, horizon, max_labels):
+def label(s, ep, seg, beam, horizon, max_labels, strong_last=0, strong_beam=1000, strong_horizon=80):
     """The local teacher on (at most max_labels, evenly spaced) recorded states of an
     episode -> a DAgger episode (policy and value targets only where labelled) plus,
     per labelled state, the teacher's whole path from it as a teacher episode: every
     state on the path with its action and frames to go (the sequences a prior needs:
-    back off, run up, jump)."""
+    back off, run up, jump). The last `strong_last` states (where a failed game stalled or
+    died) get a stronger teacher: puzzle steps like 8-4's hidden block need it."""
     n = len(ep['policy'])
     pol = np.zeros((n, 12), np.float32)
     val = np.full(n, np.nan, np.float32)
@@ -35,9 +36,11 @@ def label(s, ep, seg, beam, horizon, max_labels):
     paths = []
     k = len(ep['label_idx'])
     pick = np.unique(np.linspace(0, k - 1, min(k, max_labels)).round().astype(int)) if k else []
-    for j in pick:
+    for q, j in enumerate(pick):
         i, st = ep['label_idx'][j], ep['label_states'][j]
-        a, est, _ = s.lookahead(st.tobytes(), ROUTE, seg['opt'], ref_start=seg['start'], beam=beam, horizon=horizon)
+        strong = q >= len(pick) - strong_last
+        a, est, _ = s.lookahead(st.tobytes(), ROUTE, seg['opt'], ref_start=seg['start'],
+                                beam=strong_beam if strong else beam, horizon=strong_horizon if strong else horizon)
         if len(a):
             pol[i, a[0]] = 1; val[i] = est; unlabelled[i] = False
             obs, _, _ = s.replay_obs(st.tobytes(), a)
@@ -65,6 +68,7 @@ def main():
     ap.add_argument('--label-beam', type=int, default=100)
     ap.add_argument('--label-horizon', type=int, default=30)
     ap.add_argument('--max-labels', type=int, default=40, help='per segment')
+    ap.add_argument('--strong-last', type=int, default=4, help='failed whole levels: strong-teacher labels at the end')
     ap.add_argument('--train-steps', type=int, default=1500)
     ap.add_argument('--lr', type=float, default=1e-4)
     ap.add_argument('--eval-every', type=int, default=5)
@@ -73,6 +77,7 @@ def main():
     ap.add_argument('--eval-level', default=None, help='evaluate one level instead of the full game')
     ap.add_argument('--value-mix', type=float, default=0.0, help='leaf value: this x net + (1 - this) x route')
     ap.add_argument('--min-backup', action='store_true', help='b = 4 + min over children (exact route values)')
+    ap.add_argument('--visits-all', action='store_true', help='visit-count targets from every game, not only won levels')
     ap.add_argument('--seed', type=int, default=0)
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -127,14 +132,15 @@ def main():
                     frames_won.setdefault(l, []).append(g.frames())
             for k, ep in enumerate(g.episodes):
                 tag = 'it%04d_%s_d%02d_%d' % (it, l, d, k)
-                dag, paths = label(s, ep, segs[l], a.label_beam, a.label_horizon, a.max_labels)
+                dag, paths = label(s, ep, segs[l], a.label_beam, a.label_horizon, a.max_labels,
+                                   strong_last=a.strong_last if (t < 0 and not g.won) else 0)
                 n_lab += int((~dag['forced']).sum())
                 rep.add(dag, keep=True)
                 save_episode(os.path.join(DATA, 'dagger', '%s_%s.npz' % (name, tag)), dag)
                 for q, pe in enumerate(paths):                 # the teacher's paths from those states
                     rep.add(pe, keep=True)
                     save_episode(os.path.join(DATA, 'dagger', '%s_%s_path%02d.npz' % (name, tag, q)), pe)
-                if g.won and t < 0:                        # AlphaZero targets from levels that worked
+                if (g.won and t < 0) or a.visits_all:      # AlphaZero targets: the search's visit counts
                     sp = {k2: v for k2, v in ep.items() if k2 not in ('label_idx', 'label_states')}
                     rep.add(sp)
                     save_episode(os.path.join(DATA, 'selfplay', name, tag + '.npz'), sp)

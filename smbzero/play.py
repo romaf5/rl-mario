@@ -110,7 +110,12 @@ class Player:
                     if safe_horizon and not self.f.safe(t, [a], safe_horizon)[0]:
                         cand = [int(x) for x in order[1:4] if visits[x] > 0]
                         ok = self.f.safe(t, cand, safe_horizon) if cand else []
-                        a = next((c for c, o in zip(cand, ok) if o), a)
+                        pick = next((c for c, o in zip(cand, ok) if o), None)
+                        if pick is None:                    # none of the favourites: any action that survives
+                            rest = [int(x) for x in order[4:]] + [int(x) for x in order[1:4] if visits[x] == 0]
+                            ok = self.f.safe(t, rest, safe_horizon)
+                            pick = next((c for c, o in zip(rest, ok) if o), a)
+                        a = pick
                         g.unsafe = getattr(g, 'unsafe', 0) + 1
                     g.decision_s.append(time.perf_counter() - t0 if budget_s else dt)
                 seg = g._seg
