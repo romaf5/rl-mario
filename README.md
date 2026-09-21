@@ -84,7 +84,8 @@ beam, the MCTS's own visit counts): no human knowledge, no demonstrations.
 
 | video (real speed, replayed in stable-retro) | |
 |---|---|
-| [1-1 to 8-1](docs/media/smbzero_full_game.mp4) | 1-1, 1-2, 4-1, 4-2 in 143.4 s (the search: 142.1 s), then stuck in 8-1 |
+| [**1-1 to the axe**](docs/media/smbzero_win.mp4) | **the whole game in 5:37.0** (the search: 5:26.4); a self-play game, 2000 simulations per move |
+| [1-1 to 8-1](docs/media/smbzero_full_game.mp4) | at the live budget (1000 simulations): 1-1 to 4-2 in 143.4 s, then stuck in 8-1 |
 | [8-4 to the axe](docs/media/smbzero_8-4.mp4) | its first clear of Bowser's castle (4000 simulations per move) |
 
 Does the net matter? The same MCTS (1000 simulations per move, 4 start delays per level),

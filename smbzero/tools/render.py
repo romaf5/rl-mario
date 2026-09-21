@@ -27,7 +27,7 @@ def main():
         i = int(np.argmax(tr[:, 2] == gp(a.until_level)))
         acts = acts[:i + a.after]
     w = imageio.get_writer(a.out, fps=FPS, codec='libx264', quality=None, macro_block_size=1,
-                           ffmpeg_params=['-preset', 'veryslow', '-tune', 'animation', '-crf', '18', '-threads', '4',
+                           ffmpeg_params=['-preset', 'veryslow', '-tune', 'animation', '-crf', '18', '-threads', '2',
                                           '-movflags', '+faststart'])
     _, splits = frames_of(start, acts, a.title, 'FullGame', 4, w.append_data, lead)
     w.close()
