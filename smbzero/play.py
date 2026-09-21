@@ -63,7 +63,8 @@ class Player:
              segment_limit=None, rng=None, log=None, label_every=0, safe_horizon=24):
         """Play the games to the end (axe, death or max_decisions). sims: simulations per
         searched decision; budget_s: wall-clock seconds per searched decision (live play).
-        segment_limit: stop each game after this many finished segments (per-level play).
+        segment_limit: stop each game after this many finished segments (per-level play); an int,
+        None (the whole game), or a list (one per game).
         label_every: keep the full state of every k-th searched decision (for the local teacher).
         max_decisions: an int, or a list (one per game).
         safe_horizon: before a commit, the chosen action must have a surviving continuation
@@ -130,7 +131,8 @@ class Player:
                     state, ram, _ = self.f.state(t)
                     if ram[0x770] == 2:
                         g.done, g.won, g.reason = True, True, 'axe'
-                    elif segment_limit and len(g.episodes) >= segment_limit:
+                    elif (segment_limit[t] if isinstance(segment_limit, (list, tuple)) else segment_limit) and \
+                            len(g.episodes) >= (segment_limit[t] if isinstance(segment_limit, (list, tuple)) else segment_limit):
                         g.done, g.won, g.reason = True, True, 'segment'
                     else:
                         self._new_segment(t, g, state)

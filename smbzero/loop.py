@@ -15,7 +15,8 @@ the frames they actually took. Every --eval-every iterations: full games from 1-
 import argparse, glob, json, os, time
 import numpy as np
 import torch
-from .common import (DATA, MAX_DELAY, ROUTE, THREADS, Search, e2e_segments, episode, route_values, save_episode)
+from .common import (DATA, MAX_DELAY, ROUTE, THREADS, Search, e2e_segments, episode, load_state, route_values,
+                     save_episode)
 from .eval import run as run_eval
 from .net import Evaluator, load, save
 from .play import Game, Player
@@ -64,6 +65,7 @@ def main():
     ap.add_argument('--cap', type=float, default=2.5, help='decisions per full level: this x the teacher route')
     ap.add_argument('--full', type=float, default=0.25, help='share of games that play a whole level')
     ap.add_argument('--rollout', type=int, default=80, help='decisions of a game started on a teacher route')
+    ap.add_argument('--full-game', type=int, default=0, help='games per iteration that play from 1-1 (+ delay) to the end')
     ap.add_argument('--label-every', type=int, default=6)
     ap.add_argument('--label-beam', type=int, default=100)
     ap.add_argument('--label-horizon', type=int, default=30)
@@ -109,9 +111,14 @@ def main():
         it += 1
         t0 = time.time()
         lv = rng.choice(levels, a.trees)
-        games, caps = [], []
+        games, caps, limits = [], [], []
         for i, l in enumerate(lv):
-            if i < round(a.full * a.trees):                # the whole level from its entry
+            if i < a.full_game:                            # the whole game from 1-1: real arrivals
+                d = int(rng.integers(0, MAX_DELAY + 1))
+                games.append(Game(s.frames(load_state('FullGame'), d), tag=('game', d, -2)))
+                caps.append(int(a.cap * sum(len(g['opt']) for g in segs.values())) + 2000)
+                continue
+            if i < a.full_game + round(a.full * a.trees):  # the whole level from its entry
                 d = int(rng.integers(0, MAX_DELAY + 1))
                 games.append(Game(s.frames(segs[l]['start'], d), tag=(l, d, -1)))
                 caps.append(int(a.cap * len(segs[l]['opt'])))
@@ -120,20 +127,26 @@ def main():
                 t = int(rng.integers(0, len(acts)))
                 games.append(Game(s.replay(st, acts[:t])[1], tag=(l, t, t)))
                 caps.append(a.rollout)
-        player.play(games, sims=a.sims, noise=a.noise, segment_limit=1, rng=rng, max_decisions=caps,
-                    label_every=a.label_every)
+        player.play(games, sims=a.sims, noise=a.noise, segment_limit=[None if g.tag[2] == -2 else 1 for g in games],
+                    rng=rng, max_decisions=caps, label_every=a.label_every)
         t1 = time.time()
         per, n_lab, frames_won = {}, 0, {}
+        full_games = []
         for g in games:
             l, d, t = g.tag
+            if t == -2:
+                full_games.append('d%d: %s (%d levels)' % (d, 'WON %.1fs' % ((d + g.frames()) / 50.007) if g.won else g.reason,
+                                                           len(g.episodes)))
             if t < 0:                                      # whole-level games measure the agent
                 per.setdefault(l, []).append(g.won)
                 if g.won:
                     frames_won.setdefault(l, []).append(g.frames())
             for k, ep in enumerate(g.episodes):
-                tag = 'it%04d_%s_d%02d_%d' % (it, l, d, k)
-                dag, paths = label(s, ep, segs[l], a.label_beam, a.label_horizon, a.max_labels,
-                                   strong_last=a.strong_last if (t < 0 and not g.won) else 0)
+                el = str(ep['level'])                          # a full game has one episode per level
+                tag = 'it%04d_%s_d%02d_%d' % (it, el, d, k)
+                last = k == len(g.episodes) - 1
+                dag, paths = label(s, ep, segs[el], a.label_beam, a.label_horizon, a.max_labels,
+                                   strong_last=a.strong_last if (t < 0 and not g.won and last) else 0)
                 n_lab += int((~dag['forced']).sum())
                 rep.add(dag, keep=True)
                 save_episode(os.path.join(DATA, 'dagger', '%s_%s.npz' % (name, tag)), dag)
@@ -147,6 +160,8 @@ def main():
         t2 = time.time()
         opt, hist = train(net, rep, a.train_steps, batch=512, log=lambda m: None, seed=it, opt=opt)
         t3 = time.time()
+        if full_games:
+            log('[loop] it %d: full games %s' % (it, '; '.join(full_games)))
         log('[loop] it %d: whole levels won %d/%d (%s); play %.0f s, %d labels in %.0f s, train %.0f s '
             '(policy %.3f value %.3f acc %.2f mae %.0f f); replay %d' % (
                 it, sum(sum(v) for v in per.values()), sum(len(v) for v in per.values()),
