@@ -137,6 +137,9 @@ def main():
             if t == -2:
                 full_games.append('d%d: %s (%d levels)' % (d, 'WON %.1fs' % ((d + g.frames()) / 50.007) if g.won else g.reason,
                                                            len(g.episodes)))
+                os.makedirs(os.path.join(a.out, 'games'), exist_ok=True)     # replayable: verify / render
+                np.savez(os.path.join(a.out, 'games', 'it%04d_d%02d%s.npz' % (it, d, '_won' if g.won else '')),
+                         start='FullGame', lead_frames=d, actions=np.array(g.actions, np.uint8))
             if t < 0:                                      # whole-level games measure the agent
                 per.setdefault(l, []).append(g.won)
                 if g.won:
