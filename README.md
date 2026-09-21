@@ -87,11 +87,14 @@ beam, the MCTS's own visit counts): no human knowledge, no demonstrations.
 | [1-1 to 8-1](docs/media/smbzero_full_game.mp4) | 1-1, 1-2, 4-1, 4-2 in 143.4 s (the search: 142.1 s), then stuck in 8-1 |
 | [8-4 to the axe](docs/media/smbzero_8-4.mp4) | its first clear of Bowser's castle (4000 simulations per move) |
 
-Clears per level at the live budget (1000 simulations, 4 start delays):
+Does the net matter? The same MCTS (1000 simulations per move, 4 start delays per level),
+only the prior changes ([data](docs/smbzero_ablation.json)):
 
-| 1-1 | 1-2 | 4-1 | 4-2 | 8-1 | 8-2 | 8-3 | 8-4 |
-|---|---|---|---|---|---|---|---|
-| 4/4 | 3/4 | 4/4 | 4/4 | 0/4 | 2/4 | 3/4 | 0/4 |
+| | 1-1 | 1-2 | 4-1 | 4-2 | 8-1 | 8-2 | 8-3 | 8-4 | total |
+|---|---|---|---|---|---|---|---|---|---|
+| net prior + MCTS | 4/4 | 4/4 | 4/4 | 4/4 | 4/4 | 3/4 | 4/4 | 1/4 | **28/32** |
+| uniform prior + MCTS | 0/4 | 0/4 | 3/4 | 0/4 | 0/4 | 2/4 | 3/4 | 0/4 | 8/32 |
+| net alone (no search) | 0/4 | 0/4 | 0/4 | 0/4 | 0/4 | 0/4 | 0/4 | 0/4 | 0/32 |
 
 Still borrowed from the search: the MCTS scores its leaves by progress along the search's
 route (the net's own value cannot yet rank nearby states from a cropped screen). Next: a

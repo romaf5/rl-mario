@@ -1,0 +1,626 @@
+{
+ "A net prior + MCTS 1-1": [
+  [
+   5,
+   true,
+   "segment",
+   31.7
+  ],
+  [
+   20,
+   true,
+   "segment",
+   32.1
+  ],
+  [
+   35,
+   true,
+   "segment",
+   32.5
+  ],
+  [
+   50,
+   true,
+   "segment",
+   32.4
+  ]
+ ],
+ "A net prior + MCTS 1-2": [
+  [
+   5,
+   true,
+   "segment",
+   22.2
+  ],
+  [
+   20,
+   true,
+   "segment",
+   24.2
+  ],
+  [
+   35,
+   true,
+   "segment",
+   23.8
+  ],
+  [
+   50,
+   true,
+   "segment",
+   25.1
+  ]
+ ],
+ "A net prior + MCTS 4-1": [
+  [
+   5,
+   true,
+   "segment",
+   36.7
+  ],
+  [
+   20,
+   true,
+   "segment",
+   37.1
+  ],
+  [
+   35,
+   true,
+   "segment",
+   37.1
+  ],
+  [
+   50,
+   true,
+   "segment",
+   37.5
+  ]
+ ],
+ "A net prior + MCTS 4-2": [
+  [
+   5,
+   true,
+   "segment",
+   29.0
+  ],
+  [
+   20,
+   true,
+   "segment",
+   29.0
+  ],
+  [
+   35,
+   true,
+   "segment",
+   29.3
+  ],
+  [
+   50,
+   true,
+   "segment",
+   29.4
+  ]
+ ],
+ "A net prior + MCTS 8-1": [
+  [
+   5,
+   true,
+   "segment",
+   63.3
+  ],
+  [
+   20,
+   true,
+   "segment",
+   69.8
+  ],
+  [
+   35,
+   true,
+   "segment",
+   65.8
+  ],
+  [
+   50,
+   true,
+   "segment",
+   69.1
+  ]
+ ],
+ "A net prior + MCTS 8-2": [
+  [
+   5,
+   true,
+   "segment",
+   40.7
+  ],
+  [
+   20,
+   false,
+   "too long",
+   90.4
+  ],
+  [
+   35,
+   true,
+   "segment",
+   38.5
+  ],
+  [
+   50,
+   true,
+   "segment",
+   40.4
+  ]
+ ],
+ "A net prior + MCTS 8-3": [
+  [
+   5,
+   true,
+   "segment",
+   39.9
+  ],
+  [
+   20,
+   true,
+   "segment",
+   34.9
+  ],
+  [
+   35,
+   true,
+   "segment",
+   35.3
+  ],
+  [
+   50,
+   true,
+   "segment",
+   38.8
+  ]
+ ],
+ "A net prior + MCTS 8-4": [
+  [
+   5,
+   false,
+   "too long",
+   126.5
+  ],
+  [
+   20,
+   false,
+   "too long",
+   126.8
+  ],
+  [
+   35,
+   true,
+   "axe",
+   50.1
+  ],
+  [
+   50,
+   false,
+   "dead at 8-4",
+   62.7
+  ]
+ ],
+ "B uniform prior + MCTS 1-1": [
+  [
+   5,
+   false,
+   "too long",
+   79.3
+  ],
+  [
+   20,
+   false,
+   "too long",
+   79.6
+  ],
+  [
+   35,
+   false,
+   "too long",
+   79.9
+  ],
+  [
+   50,
+   false,
+   "too long",
+   80.2
+  ]
+ ],
+ "B uniform prior + MCTS 1-2": [
+  [
+   5,
+   false,
+   "too long",
+   57.9
+  ],
+  [
+   20,
+   false,
+   "too long",
+   58.2
+  ],
+  [
+   35,
+   false,
+   "too long",
+   58.5
+  ],
+  [
+   50,
+   false,
+   "dead at 1-2",
+   30.8
+  ]
+ ],
+ "B uniform prior + MCTS 4-1": [
+  [
+   5,
+   true,
+   "segment",
+   52.9
+  ],
+  [
+   20,
+   true,
+   "segment",
+   91.1
+  ],
+  [
+   35,
+   false,
+   "dead at 4-1",
+   28.3
+  ],
+  [
+   50,
+   true,
+   "segment",
+   91.5
+  ]
+ ],
+ "B uniform prior + MCTS 4-2": [
+  [
+   5,
+   false,
+   "too long",
+   71.8
+  ],
+  [
+   20,
+   false,
+   "too long",
+   72.1
+  ],
+  [
+   35,
+   false,
+   "too long",
+   72.4
+  ],
+  [
+   50,
+   false,
+   "too long",
+   72.7
+  ]
+ ],
+ "B uniform prior + MCTS 8-1": [
+  [
+   5,
+   false,
+   "dead at 8-1",
+   115.0
+  ],
+  [
+   20,
+   false,
+   "dead at 8-1",
+   120.6
+  ],
+  [
+   35,
+   false,
+   "dead at 8-1",
+   120.8
+  ],
+  [
+   50,
+   false,
+   "dead at 8-1",
+   120.8
+  ]
+ ],
+ "B uniform prior + MCTS 8-2": [
+  [
+   5,
+   true,
+   "segment",
+   80.6
+  ],
+  [
+   20,
+   false,
+   "dead at 8-2",
+   24.5
+  ],
+  [
+   35,
+   true,
+   "segment",
+   64.1
+  ],
+  [
+   50,
+   false,
+   "too long",
+   91.0
+  ]
+ ],
+ "B uniform prior + MCTS 8-3": [
+  [
+   5,
+   true,
+   "segment",
+   50.7
+  ],
+  [
+   20,
+   true,
+   "segment",
+   42.8
+  ],
+  [
+   35,
+   false,
+   "dead at 8-3",
+   27.9
+  ],
+  [
+   50,
+   true,
+   "segment",
+   51.8
+  ]
+ ],
+ "B uniform prior + MCTS 8-4": [
+  [
+   5,
+   false,
+   "too long",
+   126.5
+  ],
+  [
+   20,
+   false,
+   "too long",
+   126.8
+  ],
+  [
+   35,
+   false,
+   "too long",
+   127.1
+  ],
+  [
+   50,
+   false,
+   "dead at 8-4",
+   122.3
+  ]
+ ],
+ "C net alone 1-1": [
+  [
+   5,
+   false,
+   "too long",
+   79.3
+  ],
+  [
+   20,
+   false,
+   "too long",
+   79.6
+  ],
+  [
+   35,
+   false,
+   "too long",
+   79.9
+  ],
+  [
+   50,
+   false,
+   "too long",
+   80.2
+  ]
+ ],
+ "C net alone 1-2": [
+  [
+   5,
+   false,
+   "too long",
+   57.9
+  ],
+  [
+   20,
+   false,
+   "too long",
+   58.2
+  ],
+  [
+   35,
+   false,
+   "too long",
+   58.5
+  ],
+  [
+   50,
+   false,
+   "too long",
+   58.8
+  ]
+ ],
+ "C net alone 4-1": [
+  [
+   5,
+   false,
+   "dead at 4-1",
+   17.5
+  ],
+  [
+   20,
+   false,
+   "dead at 4-1",
+   17.8
+  ],
+  [
+   35,
+   false,
+   "dead at 4-1",
+   18.1
+  ],
+  [
+   50,
+   false,
+   "dead at 4-1",
+   13.7
+  ]
+ ],
+ "C net alone 4-2": [
+  [
+   5,
+   false,
+   "dead at 4-2",
+   3.1
+  ],
+  [
+   20,
+   false,
+   "dead at 4-2",
+   2.9
+  ],
+  [
+   35,
+   false,
+   "dead at 4-2",
+   3.1
+  ],
+  [
+   50,
+   false,
+   "dead at 4-2",
+   3.4
+  ]
+ ],
+ "C net alone 8-1": [
+  [
+   5,
+   false,
+   "dead at 8-1",
+   116.3
+  ],
+  [
+   20,
+   false,
+   "dead at 8-1",
+   116.4
+  ],
+  [
+   35,
+   false,
+   "dead at 8-1",
+   2.3
+  ],
+  [
+   50,
+   false,
+   "dead at 8-1",
+   116.3
+  ]
+ ],
+ "C net alone 8-2": [
+  [
+   5,
+   false,
+   "dead at 8-2",
+   17.4
+  ],
+  [
+   20,
+   false,
+   "dead at 8-2",
+   1.9
+  ],
+  [
+   35,
+   false,
+   "dead at 8-2",
+   2.2
+  ],
+  [
+   50,
+   false,
+   "dead at 8-2",
+   2.5
+  ]
+ ],
+ "C net alone 8-3": [
+  [
+   5,
+   false,
+   "dead at 8-3",
+   32.3
+  ],
+  [
+   20,
+   false,
+   "dead at 8-3",
+   20.7
+  ],
+  [
+   35,
+   false,
+   "dead at 8-3",
+   12.6
+  ],
+  [
+   50,
+   false,
+   "dead at 8-3",
+   16.0
+  ]
+ ],
+ "C net alone 8-4": [
+  [
+   5,
+   false,
+   "dead at 8-4",
+   1.6
+  ],
+  [
+   20,
+   false,
+   "dead at 8-4",
+   1.9
+  ],
+  [
+   35,
+   false,
+   "dead at 8-4",
+   2.2
+  ],
+  [
+   50,
+   false,
+   "dead at 8-4",
+   2.5
+  ]
+ ]
+}
