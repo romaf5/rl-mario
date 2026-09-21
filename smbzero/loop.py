@@ -15,8 +15,8 @@ the frames they actually took. Every --eval-every iterations: full games from 1-
 import argparse, glob, json, os, time
 import numpy as np
 import torch
-from .common import (DATA, MAX_DELAY, ROUTE, THREADS, Search, e2e_segments, episode, load_state, route_values,
-                     save_episode)
+from .common import (DATA, MAX_DELAY, ROUTE, THREADS, Search, e2e_segments, episode, level_name, load_state,
+                     route_values, save_episode)
 from .eval import run as run_eval
 from .net import Evaluator, load, save
 from .play import Game, Player
@@ -52,6 +52,24 @@ def label(s, ep, seg, beam, horizon, max_labels, strong_last=0, strong_beam=1000
     return episode(ep['frames'], pol, val, unlabelled, level=str(ep['level']), source='dagger'), paths
 
 
+def arrivals(s, patterns):
+    """{level: [state]}: the states full games (eval / self-play route files) arrived in at
+    each level's first frame -- the starts a full game really meets, which differ from the
+    search route's entry (timing, RNG) and made full games fail where level games clear."""
+    pool = {}
+    for p in sorted(f for pat in patterns for f in glob.glob(pat)):
+        z = np.load(p)
+        if str(z['start']) != 'FullGame':
+            continue
+        st = s.frames(load_state('FullGame'), int(z['lead_frames']))
+        tr, _ = s.replay(st, z['actions'])
+        lv = tr[:, 2]
+        for i in range(1, len(lv)):
+            if lv[i] != lv[i - 1] and 0 <= lv[i] < 32:
+                pool.setdefault(level_name(int(lv[i])), []).append(s.replay(st, z['actions'][:i + 1])[1])
+    return pool
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--init', required=True)
@@ -66,6 +84,9 @@ def main():
     ap.add_argument('--full', type=float, default=0.25, help='share of games that play a whole level')
     ap.add_argument('--rollout', type=int, default=80, help='decisions of a game started on a teacher route')
     ap.add_argument('--full-game', type=int, default=0, help='games per iteration that play from 1-1 (+ delay) to the end')
+    ap.add_argument('--arrivals', default='', help='globs of full-game route files: whole-level games also start '
+                                                  'where those games arrived (comma separated; + this run\'s games)')
+    ap.add_argument('--arrival-share', type=float, default=0.5, help='share of whole-level games started from arrivals')
     ap.add_argument('--label-every', type=int, default=6)
     ap.add_argument('--label-beam', type=int, default=100)
     ap.add_argument('--label-horizon', type=int, default=30)
@@ -107,9 +128,11 @@ def main():
     opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=1e-4)
     t_end = time.time() + a.hours * 3600
     it = 0
+    pats = [x for x in a.arrivals.split(',') if x] + [os.path.join(a.out, 'games', '*.npz')]
     while time.time() < t_end:
         it += 1
         t0 = time.time()
+        pool = arrivals(s, pats) if a.arrivals else {}
         lv = rng.choice(levels, a.trees)
         games, caps, limits = [], [], []
         for i, l in enumerate(lv):
@@ -118,9 +141,13 @@ def main():
                 games.append(Game(s.frames(load_state('FullGame'), d), tag=('game', d, -2)))
                 caps.append(int(a.cap * sum(len(g['opt']) for g in segs.values())) + 2000)
                 continue
-            if i < a.full_game + round(a.full * a.trees):  # the whole level from its entry
-                d = int(rng.integers(0, MAX_DELAY + 1))
-                games.append(Game(s.frames(segs[l]['start'], d), tag=(l, d, -1)))
+            if i < a.full_game + round(a.full * a.trees):  # the whole level: from a full game's arrival or the entry
+                if pool.get(l) and rng.random() < a.arrival_share:
+                    st = pool[l][rng.integers(len(pool[l]))]
+                    games.append(Game(st, tag=(l, 99, -1)))
+                else:
+                    d = int(rng.integers(0, MAX_DELAY + 1))
+                    games.append(Game(s.frames(segs[l]['start'], d), tag=(l, d, -1)))
                 caps.append(int(a.cap * len(segs[l]['opt'])))
             else:                                          # from a teacher route state
                 st, acts = routes[l][rng.integers(len(routes[l]))]
@@ -165,6 +192,8 @@ def main():
         t3 = time.time()
         if full_games:
             log('[loop] it %d: full games %s' % (it, '; '.join(full_games)))
+        if pool:
+            log('[loop] it %d: arrival starts: %s' % (it, ' '.join('%s %d' % (k, len(v)) for k, v in sorted(pool.items()))))
         log('[loop] it %d: whole levels won %d/%d (%s); play %.0f s, %d labels in %.0f s, train %.0f s '
             '(policy %.3f value %.3f acc %.2f mae %.0f f); replay %d' % (
                 it, sum(sum(v) for v in per.values()), sum(len(v) for v in per.values()),
