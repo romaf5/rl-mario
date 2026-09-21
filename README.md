@@ -73,11 +73,29 @@ Python API and engine layout: [search/README.md](search/README.md).
 | `search/` | the search engine (C++), its Python interface, tools and checks |
 | `native/` | the NES core, a batched renderer, level states, lockstep tests vs stable-retro |
 | `retro_integration/` | stable-retro integration for Super Mario Bros (used for verification) |
+| `smbzero/` | SMBZero: teacher data, the net, MCTS play, the DAgger / self-play loop, evaluation |
 
-## Next: SMBZero
+## SMBZero (in progress)
 
-A policy network trained from the search (expert iteration: the search teaches the network,
-the network guides the search), meant to play on its own even when the game's timing differs
-from run to run (random delays at the start shift enemies and the RNG).
+A network plays the game live: 84x84 frames in, a prior over the 12 actions out, guiding
+AlphaZero-style MCTS that looks ahead on the emulator (one decision per 4 frames, 80 ms of
+wall clock). It learns from the search above (teacher routes, DAgger labels by a local
+beam, the MCTS's own visit counts): no human knowledge, no demonstrations.
+
+| video (real speed, replayed in stable-retro) | |
+|---|---|
+| [1-1 to 8-1](docs/media/smbzero_full_game.mp4) | 1-1, 1-2, 4-1, 4-2 in 143.4 s (the search: 142.1 s), then stuck in 8-1 |
+| [8-4 to the axe](docs/media/smbzero_8-4.mp4) | its first clear of Bowser's castle (4000 simulations per move) |
+
+Clears per level at the live budget (1000 simulations, 4 start delays):
+
+| 1-1 | 1-2 | 4-1 | 4-2 | 8-1 | 8-2 | 8-3 | 8-4 |
+|---|---|---|---|---|---|---|---|
+| 4/4 | 3/4 | 4/4 | 4/4 | 0/4 | 2/4 | 3/4 | 0/4 |
+
+Still borrowed from the search: the MCTS scores its leaves by progress along the search's
+route (the net's own value cannot yet rank nearby states from a cropped screen). Next: a
+learned value that can, then the full game from 1-1 at every start delay.
+Code: `smbzero/`, the MCTS in `search/src/mcts/`.
 
 The earlier reinforcement-learning attempts (PPO, GRPO, curricula) are in git tag `pre-cleanup`.
