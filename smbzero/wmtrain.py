@@ -25,9 +25,11 @@ class Trajectories:
             offs, foffs = z['offs'], z['foffs']
             for i in range(len(offs) - 1):
                 n = offs[i + 1] - offs[i]
-                for t in range(n - unroll + 1):
-                    starts.append((fo + foffs[i] + t, ao + offs[i] + t, foffs[i]))   # frame idx, step idx, traj start
-                    lvl.append(z['meta'][i, 0])
+                for t in range(n):        # every position, not only those a whole unroll fits in:
+                    starts.append((fo + foffs[i] + t, ao + offs[i] + t,      # a trajectory stops at its
+                                   fo + foffs[i], ao + offs[i] + n - 1,      # death, so windows that must
+                                   fo + foffs[i + 1] - 1))                   # fit whole would only ever
+                    lvl.append(z['meta'][i, 0])                              # show it at the last step
             fo += len(z['frames']); ao += len(z['acts'])
         self.frames = torch.from_numpy(np.concatenate(F_))
         self.acts = torch.from_numpy(np.concatenate(A).astype(np.int64))
@@ -41,17 +43,21 @@ class Trajectories:
         return len(self.starts)
 
     def batch(self, rows, device):
-        """-> obs (B,4,84,84), actions (B,K), events (B,K,3)"""
-        fi, ai, t0 = self.starts[rows, 0], self.starts[rows, 1], self.starts[rows, 2]
-        stack = np.clip(fi[:, None] + np.arange(-3, 1)[None], t0[:, None], None)      # pad at the trajectory start
-        obs = self.frames[torch.from_numpy(stack.reshape(-1))].view(len(rows), 4, 84, 84)
+        """-> obs (B,4,84,84), actions (B,K), events (B,K,3), the frames each step really led to.
+        Past the end of a trajectory everything is held at its last step: the end absorbs, so a
+        death is a death at every depth after it."""
+        fi, ai = self.starts[rows, 0], self.starts[rows, 1]
+        f0, aend, fend = self.starts[rows, 2], self.starts[rows, 3], self.starts[rows, 4]
         K = self.unroll
-        step = torch.from_numpy(ai[:, None] + np.arange(K)[None])
-        acts = self.acts[step]
-        out, forced = self.out[step], self.forced[step]
+        stack = np.clip(fi[:, None] + np.arange(-3, 1)[None], f0[:, None], None)      # pad at the start
+        obs = self.frames[torch.from_numpy(stack.reshape(-1))].view(len(rows), 4, 84, 84)
+        step = np.minimum(ai[:, None] + np.arange(K)[None], aend[:, None])
+        stp = torch.from_numpy(step)
+        acts = self.acts[stp]
+        out, forced = self.out[stp], self.forced[stp]
         ev = torch.stack([(out == 1).float(), (out == 2).float(), forced], -1)
-        tgt_stack = np.clip((fi[:, None] + np.arange(1, K + 1)[None])[:, :, None] + np.arange(-3, 1)[None, None],
-                            t0[:, None, None], None)
+        nxt = np.minimum(fi[:, None] + np.arange(1, K + 1)[None], fend[:, None])
+        tgt_stack = np.clip(nxt[:, :, None] + np.arange(-3, 1)[None, None], f0[:, None, None], None)
         tgt_obs = self.frames[torch.from_numpy(tgt_stack.reshape(-1))].view(len(rows) * K, 4, 84, 84)
         return (obs.to(device), acts.to(device), ev.to(device), tgt_obs.to(device))
 

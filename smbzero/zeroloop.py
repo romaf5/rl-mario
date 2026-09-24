@@ -31,15 +31,20 @@ class Buffer:
     def add_policy(self, stack, visits):
         self.pol_x.append(stack); self.pol_y.append(visits)
 
+    HOPELESS = 512.0        # frames: past this the search only needs "much worse than the rest"
+
     def add_values(self, root, stacks, depth, b, visits, min_visits=2):
-        """W = b + 4 depth, clamped at 0: no line can beat perfect play from the root, and the
-        clamp keeps the search and its own targets from talking each other into optimism. A
-        node visited once only repeats what the net already said, so it teaches nothing."""
+        """W = b + 4 depth, clamped into [0, HOPELESS]: no line can beat perfect play from the
+        root, and the floor keeps the search and its own targets from talking each other into
+        optimism. A node visited once only repeats what the net already said, so it teaches
+        nothing. Unlike the route's verdict at a leaf, b has death backed up into it -- which is
+        what the value was missing (0.04% of the route-labelled data called a state doomed)."""
         for i in range(len(b)):
             if visits[i] < min_visits:
                 continue
             self.val_leaf.append(stacks[i]); self.val_root.append(root)
-            self.val_d.append(int(depth[i])); self.val_w.append(max(0.0, float(b[i]) + 4.0 * int(depth[i])))
+            self.val_d.append(int(depth[i]))
+            self.val_w.append(min(self.HOPELESS, max(0.0, float(b[i]) + 4.0 * int(depth[i]))))
 
     def trim(self):
         for a in (self.pol_x, self.pol_y):
