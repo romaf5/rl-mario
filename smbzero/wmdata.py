@@ -58,7 +58,7 @@ def main():
     modes = a.modes.split(',')
     rng = np.random.default_rng(a.seed)
     t0, done, files = time.time(), 0, 0
-    frames, acts, outcome, forced, offs, foffs, meta = [], [], [], [], [0], [0], []
+    frames, acts, outcome, forced, prog, offs, foffs, meta = [], [], [], [], [], [0], [0], []
     while done < a.trajectories:
         lvl = levels[int(rng.integers(len(levels)))]
         mode = modes[int(rng.integers(len(modes)))]
@@ -69,6 +69,7 @@ def main():
         action = action[:n]
         obs, _, _ = s.replay_obs(start, action)
         frames.append(np.concatenate([s.obs(start)[None], obs]))     # n + 1 frames
+        prog.append(s.progress_along(start, ROUTE, segs[lvl]['opt'], action, ref_start=segs[lvl]['start']))
         acts.append(action); outcome.append(out); forced.append(s.forced_along(start, action))
         offs.append(offs[-1] + n); foffs.append(foffs[-1] + n + 1)
         meta.append((ROUTE.index(lvl), modes.index(mode)))
@@ -77,10 +78,11 @@ def main():
             np.savez_compressed(os.path.join(a.out, 'traj%04d.npz' % files),
                                 frames=np.concatenate(frames), acts=np.concatenate(acts),
                                 outcome=np.concatenate(outcome), forced=np.concatenate(forced),
+                                prog=np.concatenate(prog),
                                 offs=np.array(offs, np.int64), foffs=np.array(foffs, np.int64),
                                 meta=np.array(meta, np.int32))
             files += 1
-            frames, acts, outcome, forced, offs, foffs, meta = [], [], [], [], [0], [0], []
+            frames, acts, outcome, forced, prog, offs, foffs, meta = [], [], [], [], [], [0], [0], []
             print('[wmdata] %d trajectories, %d shards (%.0f s)' % (done, files, time.time() - t0), flush=True)
     print('[wmdata] done: %d trajectories in %d shards' % (done, files))
 

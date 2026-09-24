@@ -50,6 +50,12 @@ SS_API int ss_lookahead(ss_ctx* ctx, const uint8_t* start, const int32_t* route,
 #define SS_OBS 84
 SS_API int ss_frames(ss_ctx* ctx, const uint8_t* state, int n, int buttons, uint8_t* end_state);
 SS_API int ss_obs(ss_ctx* ctx, const uint8_t* state, uint8_t* obs_out /* 84*84: the current frame */);
+/* per step of a replay: the route's frames to go (the beam's progress rank), from which the
+ * waste of a step follows: r = R(next) - R(now) + 4, never below 0. ref/ref_start: the level's
+ * reference actions and the state they were found from */
+SS_API int ss_progress_along(ss_ctx* ctx, const uint8_t* start, const int32_t* route, int n_route,
+                             const uint8_t* ref, int n_ref, const uint8_t* ref_start,
+                             const uint8_t* actions, int n, float* out);
 /* per step of a replay: the segment outcome (0 running, 1 goal, 2 dead) -- the search's own
  * rule, as the world model's event labels */
 SS_API int ss_classify_along(ss_ctx* ctx, const uint8_t* start, const int32_t* route, int n_route,

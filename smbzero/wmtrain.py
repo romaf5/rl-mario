@@ -57,7 +57,7 @@ class Trajectories:
 
 
 def losses(model, obs, acts, ev, tgt_obs, w_event=1.0, w_cons=1.0):
-    lat, evs, _, _ = model.unroll(obs, acts)
+    lat, evs, _, _, _ = model.unroll(obs, acts)
     K = acts.shape[1]
     e = torch.stack(evs, 1)                                  # (B, K, 3)
     pos = ev.sum((0, 1)).clamp(min=1)
@@ -77,7 +77,7 @@ def gate(model, data, rows, device='cuda', batch=256):
         r = rows[i:i + batch]
         obs, acts, ev, _ = data.batch(r, device)
         with torch.autocast('cuda', dtype=torch.bfloat16):
-            _, evs, _, _ = model.unroll(obs, acts)
+            _, evs, _, _, _ = model.unroll(obs, acts)
         p = (torch.stack(evs, 1).float().sigmoid() > 0.5).cpu().numpy()
         t = ev.cpu().numpy() > 0.5
         tp += (p & t).sum(0); fp += (p & ~t).sum(0); fn += (~p & t).sum(0)

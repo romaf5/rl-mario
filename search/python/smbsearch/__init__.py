@@ -89,6 +89,8 @@ class Search:
         L.ss_replay_obs.restype = I; L.ss_replay_obs.argtypes = [P, ctypes.c_char_p, P, I, P, P, P]
         L.ss_forced_along.restype = I; L.ss_forced_along.argtypes = [P, ctypes.c_char_p, P, I, P]
         L.ss_classify_along.restype = I; L.ss_classify_along.argtypes = [P, ctypes.c_char_p, P, I, P, I, P]
+        L.ss_progress_along.restype = I
+        L.ss_progress_along.argtypes = [P, ctypes.c_char_p, P, I, P, I, ctypes.c_char_p, P, I, P]
         L.ss_lookahead.restype = I
         L.ss_lookahead.argtypes = [P, ctypes.c_char_p, P, I, P, I, ctypes.c_char_p, I, I, I, P, I,
                                    ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int32)]
@@ -198,6 +200,20 @@ class Search:
         """The net's view of the current frame: (84, 84) uint8."""
         out = np.zeros((OBS, OBS), dtype=np.uint8)
         self._lib.ss_obs(self._ctx, self._state(state), out.ctypes.data)
+        return out
+
+    def progress_along(self, state, route, reference, actions, ref_start=None):
+        """The route's frames to go at the start and after each action (n + 1 values).
+        The waste of step k is max(0, R[k+1] - R[k] + 4)."""
+        r, rp, rn = self._route(route)
+        ref = np.ascontiguousarray(reference, dtype=np.uint8)
+        a = np.ascontiguousarray(actions, dtype=np.uint8)
+        out = np.zeros(len(a) + 1, np.float32)
+        n = self._lib.ss_progress_along(self._ctx, self._state(state), rp, rn, ref.ctypes.data, len(ref),
+                                        None if ref_start is None else self._state(ref_start), a.ctypes.data,
+                                        len(a), out.ctypes.data)
+        if n < 0:
+            raise ValueError('bad action index or state off the route')
         return out
 
     def classify_along(self, state, route, actions):

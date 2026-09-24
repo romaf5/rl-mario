@@ -11,6 +11,7 @@
 #include "emu/obs.h"
 #include "explore/explore.h"
 #include "optimize/beam.h"
+#include "optimize/progress.h"
 #include "mcts/mcts.h"
 
 using namespace ss;
@@ -114,6 +115,34 @@ int ss_replay_obs(ss_ctx* c, const uint8_t* start, const uint8_t* actions, int n
     }
     if (end_state) e.save_full(end_state);
     return n;
+}
+
+int ss_progress_along(ss_ctx* c, const uint8_t* start, const int32_t* route, int n_route, const uint8_t* ref,
+                      int n_ref, const uint8_t* ref_start, const uint8_t* actions, int n, float* out) {
+    Emu& e = *c->emus[0];
+    e.load_full(ref_start ? ref_start : start);
+    const Segment seg = Segment::make(std::vector<int>(route, route + n_route), e.ram());
+    if (seg.start_gp < 0) return -1;
+    RefProgress rp;
+    rp.add(e.ram(), 0);
+    for (int i = 0; i < n_ref; i++) {
+        e.step(ref[i]);
+        if (seg.classify(e.ram()) != Outcome::Running) break;
+        rp.add(e.ram(), i + 1);
+    }
+    e.load_full(start);
+    int tau = rp.nearest(e.ram());
+    int64_t rank = 0;
+    rp.rank(e.ram(), tau, (int64_t)1 << 40, &tau, &rank);
+    if (!in_control(e.ram())) rank = (int64_t)(rp.len() - tau) * kStepUnits;
+    out[0] = (float)rank / 16.f;                     // n + 1 values: the start, then each step
+    for (int i = 0; i < n; i++) {
+        if (actions[i] >= kNumActions) return -1;
+        e.step(actions[i]);
+        rp.rank(e.ram(), tau, rank, &tau, &rank);
+        out[i + 1] = (float)rank / 16.f;
+    }
+    return n + 1;
 }
 
 int ss_classify_along(ss_ctx* c, const uint8_t* start, const int32_t* route, int n_route,

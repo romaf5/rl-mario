@@ -1,14 +1,15 @@
 """The world model: what the search will unroll instead of the emulator.
 
-    h(4 frames)          -> latent s0            (representation)
-    g(s, action)         -> s', and the events that end a segment or a line:
-                            goal (the next route level is reached), dead, forced
-                            (the input does nothing now)                (dynamics)
-    f(s)                 -> prior over the 12 actions, and W            (prediction)
+    h(4 frames)          -> latent s0                                  (representation)
+    g(s, action)         -> s', the step's waste r, and the events that end a segment or a
+                            line: goal, dead, forced (the input does nothing now)  (dynamics)
+    f(s)                 -> prior over the 12 actions, and the waste still to come V (prediction)
 
-W is the relative value of smbzero/relvalue.py: frames wasted against perfect play from the
-root of the search. The root is s0, so W(s0) = 0 by definition and every unrolled node is
-scored against it -- which is all PUCT compares.
+Waste, not time to go: r is how many frames this step threw away against perfect play
+(0 on a perfect line, large when the step commits Mario to a pit), and V is how much more
+the position will throw away. A line is scored by the waste it accumulates, sum r + V, which
+is what PUCT already compares -- and unlike "frames to the end of the level", both are local
+quantities a screen actually shows.
 
 Trained on the agent's own trajectories (frames, actions, events): the latent of an unrolled
 step must match the latent of the frames the game really produced (EfficientZero's
@@ -49,13 +50,14 @@ class Dynamics(nn.Module):
         super().__init__()
         self.conv = nn.Conv2d(c + N_ACTIONS, c, 3, padding=1)
         self.r1, self.r2 = _Res(c), _Res(c)
-        self.ev = nn.Sequential(nn.Flatten(), nn.Linear(c * 11 * 11, 256), nn.ReLU(), nn.Linear(256, 3))
+        self.out = nn.Sequential(nn.Flatten(), nn.Linear(c * 11 * 11, 256), nn.ReLU(), nn.Linear(256, 4))
 
     def forward(self, s, a):
-        """(s, action) -> (next latent, event logits: goal, dead, forced)"""
+        """(s, action) -> (next latent, event logits: goal, dead, forced; the step's waste r >= 0)"""
         plane = F.one_hot(a.long(), N_ACTIONS).float()[:, :, None, None].expand(-1, -1, s.shape[2], s.shape[3])
         h = self.r2(self.r1(self.conv(torch.cat([s, plane], 1))))
-        return norm_latent(h), self.ev(h)
+        o = self.out(h)
+        return norm_latent(h), o[:, :3], F.softplus(o[:, 3]) * 4.0
 
 
 class Prediction(nn.Module):
@@ -66,9 +68,9 @@ class Prediction(nn.Module):
         self.w = nn.Linear(hidden, 1)
 
     def forward(self, s):
-        """s -> (policy logits, W in frames)"""
+        """s -> (policy logits, V: the frames this position will still waste, >= 0)"""
         h = F.relu(self.fc(s.flatten(1)))
-        return self.pi(h), self.w(h).squeeze(1) * 16.0
+        return self.pi(h), F.softplus(self.w(h).squeeze(1)) * 16.0
 
 
 class Projector(nn.Module):
@@ -101,22 +103,22 @@ class WorldModel(nn.Module):
         return s, pi, w
 
     def step(self, s, a):
-        s2, ev = self.g(s, a)
-        pi, w = self.f(s2)
-        return s2, ev, pi, w
+        s2, ev, r = self.g(s, a)
+        pi, v = self.f(s2)
+        return s2, ev, r, pi, v
 
     def unroll(self, obs, actions):
-        """obs (B,4,84,84), actions (B,K) -> latents, event logits, policy logits, W per step."""
+        """obs (B,4,84,84), actions (B,K) -> latents, event logits, step waste, policy logits, V."""
         s = self.h(obs)
-        lat, evs, pis, ws = [s], [], [], []
-        pi, w = self.f(s)
-        pis.append(pi); ws.append(w)
+        lat, evs, rs, pis, vs = [s], [], [], [], []
+        pi, v = self.f(s)
+        pis.append(pi); vs.append(v)
         for k in range(actions.shape[1]):
-            s, ev = self.g(s, actions[:, k])
+            s, ev, r = self.g(s, actions[:, k])
             s = scale_grad(s, 0.5)                      # MuZero: halve the gradient along the unroll
-            pi, w = self.f(s)
-            lat.append(s); evs.append(ev); pis.append(pi); ws.append(w)
-        return lat, evs, pis, ws
+            pi, v = self.f(s)
+            lat.append(s); evs.append(ev); rs.append(r); pis.append(pi); vs.append(v)
+        return lat, evs, rs, pis, vs
 
 
 def scale_grad(x, k):
