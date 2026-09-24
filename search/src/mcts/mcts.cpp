@@ -67,6 +67,16 @@ float Forest::route_value(int t, int32_t node) const {
     return std::min(p_.v_death, std::max(0.f, (float)T.nodes[node].rank / 16.f));
 }
 
+void Forest::leaf_info(int n, const MctsLeaf* leaves, float* values, int32_t* depths) const {
+    for (int i = 0; i < n; i++) {
+        const MctsTree& T = trees_[leaves[i].tree];
+        values[i] = route_value(leaves[i].tree, leaves[i].node);
+        int d = 0;
+        for (int32_t x = leaves[i].node; x >= 0 && x != T.root; x = T.nodes[x].parent) d++;
+        depths[i] = d;
+    }
+}
+
 bool Forest::reset(int t, const uint8_t* full, const std::vector<int>& route) {
     MctsTree& T = trees_[t];
     T.nodes.clear(); T.states.clear(); T.frames.clear(); T.free_ids.clear();

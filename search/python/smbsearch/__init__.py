@@ -88,6 +88,7 @@ class Search:
         L.ss_obs.restype = I; L.ss_obs.argtypes = [P, ctypes.c_char_p, P]
         L.ss_replay_obs.restype = I; L.ss_replay_obs.argtypes = [P, ctypes.c_char_p, P, I, P, P, P]
         L.ss_forced_along.restype = I; L.ss_forced_along.argtypes = [P, ctypes.c_char_p, P, I, P]
+        L.ss_classify_along.restype = I; L.ss_classify_along.argtypes = [P, ctypes.c_char_p, P, I, P, I, P]
         L.ss_lookahead.restype = I
         L.ss_lookahead.argtypes = [P, ctypes.c_char_p, P, I, P, I, ctypes.c_char_p, I, I, I, P, I,
                                    ctypes.POINTER(ctypes.c_double), ctypes.POINTER(ctypes.c_int32)]
@@ -199,6 +200,17 @@ class Search:
         self._lib.ss_obs(self._ctx, self._state(state), out.ctypes.data)
         return out
 
+    def classify_along(self, state, route, actions):
+        """Per step: 0 running, 1 goal, 2 dead (the search's rule); stops at the first end.
+        Returns (outcomes[:n_played], n_played)."""
+        r, rp, rn = self._route(route)
+        a = np.ascontiguousarray(actions, dtype=np.uint8)
+        out = np.zeros(len(a), np.uint8)
+        n = self._lib.ss_classify_along(self._ctx, self._state(state), rp, rn, a.ctypes.data, len(a), out.ctypes.data)
+        if n < 0:
+            raise ValueError('bad action index or state off the route')
+        return out[:n], n
+
     def forced_along(self, state, actions):
         """Per step of the replay: True where the input did nothing (all actions reach one state)."""
         a = np.ascontiguousarray(actions, dtype=np.uint8)
@@ -259,6 +271,8 @@ class Forest:
         L.ss_mcts_set_route.argtypes = [P, I, ctypes.c_char_p, P, I]
         L.ss_mcts_set_value_mix.argtypes = [P, F]
         L.ss_mcts_safe.argtypes = [P, I, P, I, I, P]
+        L.ss_mcts_leaf_info.argtypes = [P, I, P, P, P]
+        L.ss_mcts_root_value.restype = F; L.ss_mcts_root_value.argtypes = [P, I]
         self.params = _MctsParams(c_puct, fpu, scale, v_death, max_nodes, value_mix, int(min_backup))
         self.v_death = v_death
         self.n_trees = n_trees
@@ -334,6 +348,16 @@ class Forest:
         out = np.zeros(len(a), np.int32)
         self._lib.ss_mcts_safe(self._m, tree, a.ctypes.data, len(a), int(horizon), out.ctypes.data)
         return out.astype(bool)
+
+    def leaf_info(self, n):
+        """The last select's leaves: (route frames to go (n,), depth from the root (n,))."""
+        v = np.zeros(n, np.float32); d = np.zeros(n, np.int32)
+        self._lib.ss_mcts_leaf_info(self._m, n, self.leaves.ctypes.data, v.ctypes.data, d.ctypes.data)
+        return v, d
+
+    def root_value(self, tree):
+        """The route's frames to go at the tree's root."""
+        return self._lib.ss_mcts_root_value(self._m, tree)
 
     def set_value_mix(self, mix):
         """Leaf value = mix x net + (1 - mix) x route (where a route is set)."""

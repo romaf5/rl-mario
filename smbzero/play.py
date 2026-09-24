@@ -42,7 +42,7 @@ class Player:
     def _new_segment(self, t, g, state):
         assert self.f.reset(t, state, ROUTE), 'state is not on the route'
         _, ram, stack = self.f.state(t)
-        g._seg = dict(level='%d-%d' % (ram[0x75F] + 1, ram[0x75C] + 1), frames=[stack[-1]], policy=[],
+        g._seg = dict(level='%d-%d' % (ram[0x75F] + 1, ram[0x75C] + 1), frames=[stack[-1]], policy=[], acts=[],
                       root_b=[], forced=[], start_state=np.frombuffer(state, np.uint8), label_idx=[], label_states=[])
 
     def _end_segment(self, g, goal):
@@ -52,7 +52,8 @@ class Player:
             rb = np.array(seg['root_b'], np.float32)
             value = 4.0 * (n - np.arange(n)) if goal else np.minimum(rb, V_SCALE)
             ep = episode(np.array(seg['frames']), np.array(seg['policy']), value, np.array(seg['forced']),
-                         level=seg['level'], source='selfplay', goal=goal, start_state=seg['start_state'])
+                         level=seg['level'], source='selfplay', goal=goal, start_state=seg['start_state'],
+                         acts=np.array(seg['acts'], np.uint8))
             ep['label_idx'] = np.array(seg['label_idx'], np.int32)          # states for the local teacher
             ep['label_states'] = (np.stack([np.frombuffer(x, np.uint8) for x in seg['label_states']])
                                   if seg['label_states'] else np.zeros((0, 0), np.uint8))
@@ -60,7 +61,7 @@ class Player:
         g._seg = None
 
     def play(self, games, sims=None, budget_s=None, noise=0.0, alpha=0.3, max_decisions=20000,
-             segment_limit=None, rng=None, log=None, label_every=0, safe_horizon=24):
+             segment_limit=None, rng=None, log=None, label_every=0, safe_horizon=24, on_wave=None):
         """Play the games to the end (axe, death or max_decisions). sims: simulations per
         searched decision; budget_s: wall-clock seconds per searched decision (live play).
         segment_limit: stop each game after this many finished segments (per-level play); an int,
@@ -68,7 +69,9 @@ class Player:
         label_every: keep the full state of every k-th searched decision (for the local teacher).
         max_decisions: an int, or a list (one per game).
         safe_horizon: before a commit, the chosen action must have a surviving continuation
-        (some button held this many steps); else the next most visited (0: off)."""
+        (some button held this many steps); else the next most visited (0: off).
+        on_wave(forest, n, trees, step): called after each wave's net evaluation, while its
+        leaves are still in forest.leaves / forest.stacks (training data for values)."""
         assert len(games) <= self.n and (sims or budget_s)
         rng = rng or np.random.default_rng()
         for t, g in enumerate(games):
@@ -91,6 +94,8 @@ class Player:
                     if n == 0:
                         break
                     pri, val = self.ev(n)
+                    if on_wave is not None:          # the leaves are still in self.f.stacks / leaves
+                        on_wave(self.f, n, todo, step)
                     self.f.backup(n, pri, val)
                     if noise:                           # root noise once the root has its prior
                         for t in todo:
@@ -123,6 +128,7 @@ class Player:
                 if label_every and not fz and (len(g.decision_s) - 1) % label_every == 0:
                     seg['label_idx'].append(len(seg['policy'])); seg['label_states'].append(self.f.state(t)[0])
                 seg['policy'].append(pol.astype(np.float32)); seg['root_b'].append(rb); seg['forced'].append(bool(fz))
+                seg['acts'].append(a)                       # the action actually played (world-model data)
                 g.actions.append(a)
                 term = self.f.commit(t, a)
                 seg['frames'].append(self.f.state(t)[2][-1])

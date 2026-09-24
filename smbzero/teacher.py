@@ -20,7 +20,7 @@ def route_episode(s, start, actions, **meta):
     policy = np.zeros((n, 12), np.float32)
     policy[np.arange(n), actions] = 1
     value = 4.0 * (n - np.arange(n))
-    return episode(frames, policy, value, s.forced_along(start, actions), **meta), tr
+    return episode(frames, policy, value, s.forced_along(start, actions), acts=np.asarray(actions, np.uint8), **meta), tr
 
 
 def main():

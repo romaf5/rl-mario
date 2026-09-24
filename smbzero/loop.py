@@ -48,7 +48,8 @@ def label(s, ep, seg, beam, horizon, max_labels, strong_last=0, strong_beam=1000
             m = len(a)
             pp = np.zeros((m, 12), np.float32); pp[np.arange(m), a] = 1
             paths.append(episode(np.concatenate([ep['frames'][i:i + 1], obs]), pp, est - 4.0 * np.arange(m),
-                                 s.forced_along(st.tobytes(), a), level=str(ep['level']), source='teacher'))
+                                 s.forced_along(st.tobytes(), a), level=str(ep['level']), source='teacher',
+                                 acts=np.asarray(a, np.uint8)))
     return episode(ep['frames'], pol, val, unlabelled, level=str(ep['level']), source='dagger'), paths
 
 

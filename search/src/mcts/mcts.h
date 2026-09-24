@@ -102,6 +102,11 @@ public:
     void set_route(int level_gp, const uint8_t* start_full, const uint8_t* actions, int n);
     void set_value_mix(float mix) { p_.value_mix = mix; }
     float route_value(int t, int32_t node) const;
+    // per leaf: the route's frames to go, and the depth from the root. A relative value
+    // (D = value(leaf) - value(root)) is all the search needs: q compares siblings, so a
+    // constant per tree cancels -- and unlike absolute frames to go, it is on the screen.
+    void leaf_info(int n, const MctsLeaf* leaves, float* values, int32_t* depths) const;
+    float root_value(int t) const { return route_value(t, trees_[t].root); }
 
 private:
     int32_t alloc(MctsTree& T);

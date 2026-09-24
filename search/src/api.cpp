@@ -116,6 +116,22 @@ int ss_replay_obs(ss_ctx* c, const uint8_t* start, const uint8_t* actions, int n
     return n;
 }
 
+int ss_classify_along(ss_ctx* c, const uint8_t* start, const int32_t* route, int n_route,
+                      const uint8_t* actions, int n, uint8_t* out) {
+    Emu& e = *c->emus[0];
+    e.load_full(start);
+    const Segment seg = Segment::make(std::vector<int>(route, route + n_route), e.ram());
+    if (seg.start_gp < 0) return -1;
+    for (int i = 0; i < n; i++) {
+        if (actions[i] >= kNumActions) return -1;
+        e.step(actions[i]);
+        const Outcome o = seg.classify(e.ram());
+        out[i] = o == Outcome::Goal ? 1 : o == Outcome::Dead ? 2 : 0;
+        if (out[i]) return i + 1;                  // the segment ended here
+    }
+    return n;
+}
+
 int ss_forced_along(ss_ctx* c, const uint8_t* start, const uint8_t* actions, int n, uint8_t* out) {
     const size_t CS = compact_state_size();
     std::vector<uint8_t> st((size_t)n * CS);
@@ -264,6 +280,12 @@ void ss_mcts_set_route(ss_mcts* m, int level_gp, const uint8_t* start, const uin
     m->forest.set_route(level_gp, start, actions, n);
 }
 void ss_mcts_set_value_mix(ss_mcts* m, float mix) { m->forest.set_value_mix(mix); }
+void ss_mcts_leaf_info(ss_mcts* m, int n, const int32_t* leaves, float* values, int32_t* depths) {
+    m->forest.leaf_info(n, reinterpret_cast<const MctsLeaf*>(leaves), values, depths);
+}
+
+float ss_mcts_root_value(ss_mcts* m, int t) { return m->forest.root_value(t); }
+
 void ss_mcts_safe(ss_mcts* m, int t, const int32_t* actions, int n, int horizon, int32_t* out) {
     m->forest.safe(t, actions, n, horizon, out);
 }
