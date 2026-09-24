@@ -31,10 +31,15 @@ class Buffer:
     def add_policy(self, stack, visits):
         self.pol_x.append(stack); self.pol_y.append(visits)
 
-    def add_values(self, root, stacks, depth, b):
+    def add_values(self, root, stacks, depth, b, visits, min_visits=2):
+        """W = b + 4 depth, clamped at 0: no line can beat perfect play from the root, and the
+        clamp keeps the search and its own targets from talking each other into optimism. A
+        node visited once only repeats what the net already said, so it teaches nothing."""
         for i in range(len(b)):
+            if visits[i] < min_visits:
+                continue
             self.val_leaf.append(stacks[i]); self.val_root.append(root)
-            self.val_d.append(int(depth[i])); self.val_w.append(float(b[i]) + 4.0 * int(depth[i]))
+            self.val_d.append(int(depth[i])); self.val_w.append(max(0.0, float(b[i]) + 4.0 * int(depth[i])))
 
     def trim(self):
         for a in (self.pol_x, self.pol_y):
@@ -67,7 +72,8 @@ def main():
     ap.add_argument('--sims', type=int, default=600)
     ap.add_argument('--per-tree', type=int, default=64)
     ap.add_argument('--noise', type=float, default=0.25)
-    ap.add_argument('--dump', type=int, default=8, help='value targets kept per decision')
+    ap.add_argument('--dump', type=int, default=16, help='nodes sampled per decision for value targets')
+    ap.add_argument('--min-visits', type=int, default=2, help='a node the search visited only once teaches nothing')
     ap.add_argument('--full-game', type=int, default=2)
     ap.add_argument('--train-steps', type=int, default=1500)
     ap.add_argument('--batch', type=int, default=256)
@@ -111,7 +117,7 @@ def main():
         def after_decision(f, t, step):                    # the tree is whole: take its verdict
             b, dep, vis, st = f.dump(t, a.dump, seed=int(rng.integers(1 << 62)))
             if len(b):
-                buf.add_values(f.state(t)[2], st, dep, b)
+                buf.add_values(f.state(t)[2], st, dep, b, vis, a.min_visits)
 
         player.play(games, sims=a.sims, noise=a.noise, rng=rng, max_decisions=caps,
                     segment_limit=[None if g.tag[0] == 'game' else 1 for g in games],
