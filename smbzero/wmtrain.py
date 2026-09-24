@@ -17,11 +17,12 @@ EVENTS = ('goal', 'dead', 'forced')
 class Trajectories:
     """Shards of smbzero/data/world, with an index of usable unroll starts."""
     def __init__(self, pattern, unroll):
-        F_, A, O, Fo, starts, lvl = [], [], [], [], [], []
+        F_, A, O, Fo, P, starts, lvl = [], [], [], [], [], [], []
         fo = ao = 0
         for p in sorted(glob.glob(pattern)):
             z = np.load(p)
             F_.append(z['frames']); A.append(z['acts']); O.append(z['outcome']); Fo.append(z['forced'])
+            P.append(z['prog'])                      # n + 1 per trajectory: aligned with the frames
             offs, foffs = z['offs'], z['foffs']
             for i in range(len(offs) - 1):
                 n = offs[i + 1] - offs[i]
@@ -35,6 +36,7 @@ class Trajectories:
         self.acts = torch.from_numpy(np.concatenate(A).astype(np.int64))
         self.out = torch.from_numpy(np.concatenate(O).astype(np.int64))
         self.forced = torch.from_numpy(np.concatenate(Fo).astype(np.float32))
+        self.prog = torch.from_numpy(np.concatenate(P).astype(np.float32))
         self.starts = np.array(starts, np.int64)
         self.level = np.array(lvl, np.int32)
         self.unroll = unroll
@@ -56,21 +58,28 @@ class Trajectories:
         acts = self.acts[stp]
         out, forced = self.out[stp], self.forced[stp]
         ev = torch.stack([(out == 1).float(), (out == 2).float(), forced], -1)
+        now = np.minimum(fi[:, None] + np.arange(K)[None], fend[:, None])
         nxt = np.minimum(fi[:, None] + np.arange(1, K + 1)[None], fend[:, None])
+        r = (self.prog[torch.from_numpy(nxt)] - self.prog[torch.from_numpy(now)] + 4.0).clamp(min=0)
+        valid = torch.from_numpy((ai[:, None] + np.arange(K)[None] <= aend[:, None]).astype(np.float32))
         tgt_stack = np.clip(nxt[:, :, None] + np.arange(-3, 1)[None, None], f0[:, None, None], None)
         tgt_obs = self.frames[torch.from_numpy(tgt_stack.reshape(-1))].view(len(rows) * K, 4, 84, 84)
-        return (obs.to(device), acts.to(device), ev.to(device), tgt_obs.to(device))
+        return (obs.to(device), acts.to(device), ev.to(device), tgt_obs.to(device),
+                r.to(device), valid.to(device))
 
 
-def losses(model, obs, acts, ev, tgt_obs, w_event=1.0, w_cons=1.0):
-    lat, evs, _, _, _ = model.unroll(obs, acts)
-    K = acts.shape[1]
+def losses(model, obs, acts, ev, tgt_obs, r, valid, w_event=1.0, w_cons=1.0, w_waste=1.0):
+    lat, evs, rs, _, _ = model.unroll(obs, acts)
     e = torch.stack(evs, 1)                                  # (B, K, 3)
     pos = ev.sum((0, 1)).clamp(min=1)
     weight = (ev.numel() / 3 / pos).clamp(max=50)            # events are rare: weight them up
     le = F.binary_cross_entropy_with_logits(e, ev, pos_weight=weight)
     lc = consistency(model, torch.cat(lat[1:], 0), tgt_obs)
-    return w_event * le + w_cons * lc, le.item(), lc.item(), e
+    pred_r = torch.stack(rs, 1)                              # the frames each step throws away
+    lr = (F.smooth_l1_loss(pred_r.float() / 16, r / 16, reduction='none') * valid).sum() / valid.sum().clamp(min=1)
+    with torch.no_grad():
+        mae = ((pred_r.float() - r).abs() * valid).sum() / valid.sum().clamp(min=1)
+    return w_event * le + w_cons * lc + w_waste * lr, le.item(), lc.item(), mae.item()
 
 
 @torch.no_grad()
@@ -81,7 +90,7 @@ def gate(model, data, rows, device='cuda', batch=256):
     tp = np.zeros((K, 3)); fp = np.zeros((K, 3)); fn = np.zeros((K, 3)); n = 0
     for i in range(0, len(rows), batch):
         r = rows[i:i + batch]
-        obs, acts, ev, _ = data.batch(r, device)
+        obs, acts, ev = data.batch(r, device)[:3]
         with torch.autocast('cuda', dtype=torch.bfloat16):
             _, evs, _, _, _ = model.unroll(obs, acts)
         p = (torch.stack(evs, 1).float().sigmoid() > 0.5).cpu().numpy()
@@ -119,9 +128,9 @@ def main():
     t0, hist = time.time(), []
     for step in range(1, a.steps + 1):
         model.train()
-        obs, acts, ev, tgt = data.batch(rng.choice(tr, a.batch), 'cuda')
+        obs, acts, ev, tgt, r, valid = data.batch(rng.choice(tr, a.batch), 'cuda')
         with torch.autocast('cuda', dtype=torch.bfloat16):
-            loss, le, lc, _ = losses(model, obs, acts, ev, tgt)
+            loss, le, lc, rmae = losses(model, obs, acts, ev, tgt, r, valid)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -129,11 +138,11 @@ def main():
         if step % 2000 == 0 or step == a.steps:
             model.eval()
             prec, rec, tot = gate(model, data, va)
-            hist.append(dict(step=step, event=le, consistency=lc, s=round(time.time() - t0),
+            hist.append(dict(step=step, event=le, consistency=lc, waste_mae=rmae, s=round(time.time() - t0),
                              prec1=prec[0].tolist(), rec1=rec[0].tolist(),
                              precK=prec[-1].tolist(), recK=rec[-1].tolist()))
-            log('[wm] step %5d event %.4f cons %.4f | 1 step ahead %s | %d steps ahead %s (%.0f s)'
-                % (step, le, lc,
+            log('[wm] step %5d event %.4f cons %.4f waste %.1f frames | 1 step ahead %s | %d steps ahead %s (%.0f s)'
+                % (step, le, lc, rmae,
                    ' '.join('%s P%.0f/R%.0f' % (e, 100 * prec[0, i], 100 * rec[0, i]) for i, e in enumerate(EVENTS)),
                    a.unroll,
                    ' '.join('%s P%.0f/R%.0f' % (e, 100 * prec[-1, i], 100 * rec[-1, i]) for i, e in enumerate(EVENTS)),
