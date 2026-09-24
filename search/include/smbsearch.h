@@ -89,6 +89,11 @@ SS_API void ss_mcts_set_value_mix(ss_mcts* m, float mix);
  * (training data for a relative value: D = value(leaf) - value(root)) */
 SS_API void ss_mcts_leaf_info(ss_mcts* m, int n, const int32_t* leaves, float* values, int32_t* depths);
 SS_API float ss_mcts_root_value(ss_mcts* m, int tree);
+/* after a decision: up to max_n visited nodes of the tree with the value the search backed up
+ * into them (relative to the root), depth, visits and 4-frame stacks -- value targets from the
+ * agent's own search, needing no route */
+SS_API int ss_mcts_dump(ss_mcts* m, int tree, int max_n, uint64_t seed, float* b, int32_t* depth,
+                        int32_t* visits, uint8_t* stacks);
 SS_API void ss_mcts_safe(ss_mcts* m, int tree, const int32_t* actions, int n, int horizon, int32_t* out);
 #ifdef __cplusplus
 }

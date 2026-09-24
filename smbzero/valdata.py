@@ -15,15 +15,17 @@ The net predicts W (well conditioned, >= 0, mostly small) and the search uses D 
 """
 import argparse, os, time
 import numpy as np
-from .common import DATA, MAX_DELAY, ROUTE, THREADS, Search, e2e_segments, route_values
+from .common import DATA, MAX_DELAY, ROUTE, THREADS, Search, e2e_segments, gp, route_values
 from .net import Evaluator, load
 from .play import Game, Player
 
 
 class Collector:
     """Samples leaves of each wave; flushes shards of `shard` samples."""
-    def __init__(self, out, per_wave=6, shard=8192, seed=0):
+    def __init__(self, out, per_wave=6, shard=8192, seed=0, quota=0):
         self.out, self.per_wave, self.shard = out, per_wave, shard
+        self.quota, self.per_level = quota, {}      # a stalling game makes ten times the leaves of a
+                                                    # clean one: cap each level or the data is all 8-1
         self.rng = np.random.default_rng(seed)
         os.makedirs(out, exist_ok=True)
         self.reset()
@@ -42,11 +44,18 @@ class Collector:
             key = (t, step)
             j = self.root_key.get(key)
             if j is None:
-                j = self.root_key[key] = len(self.roots)
                 _, ram, stack = f.state(t)
+                lvl = int(ram[0x75F]) * 4 + int(ram[0x75C])
+                if self.quota and self.per_level.get(lvl, 0) >= self.quota:
+                    continue
+                j = self.root_key[key] = len(self.roots)
                 self.roots.append(stack.copy())
                 self.rval.append(f.root_value(t))
-                self.rlvl.append(int(ram[0x75F]) * 4 + int(ram[0x75C]))
+                self.rlvl.append(lvl)
+            lvl = self.rlvl[j]
+            if self.quota and self.per_level.get(lvl, 0) >= self.quota:
+                continue
+            self.per_level[lvl] = self.per_level.get(lvl, 0) + 1
             self.leaf.append(f.stacks[i].copy())
             self.ridx.append(j); self.depth.append(int(depths[i])); self.dval.append(float(vals[i]))
         if len(self.leaf) >= self.shard:
@@ -78,6 +87,7 @@ def main():
     ap.add_argument('--per-wave', type=int, default=6, help='leaves sampled per wave')
     ap.add_argument('--samples', type=int, default=250000)
     ap.add_argument('--noise', type=float, default=0.25, help='root noise: the data must cover mistakes too')
+    ap.add_argument('--quota', type=int, default=0, help='samples per level (0: no cap)')
     ap.add_argument('--seed', type=int, default=0)
     a = ap.parse_args()
     s = Search(threads=THREADS)
@@ -86,7 +96,7 @@ def main():
     net, _ = load(a.net)
     ev = Evaluator(net, a.games * a.per_tree)
     pl = Player(s, ev, a.games, per_tree=a.per_tree, routes=route_values(segs), value_mix=0.0, min_backup=True)
-    col = Collector(a.out, per_wave=a.per_wave, seed=a.seed)
+    col = Collector(a.out, per_wave=a.per_wave, seed=a.seed, quota=a.quota)
     rng = np.random.default_rng(a.seed)
     t0, rounds = time.time(), 0
     while col.total < a.samples:
@@ -99,9 +109,12 @@ def main():
             caps.append(int(1.5 * len(segs[l]['opt'])))
         pl.play(games, sims=a.sims, noise=a.noise, segment_limit=1, rng=rng, max_decisions=caps, on_wave=col)
         col.flush()
-        print('[valdata] round %d: %d samples in %d shards (%.0f s); %s' % (
+        print('[valdata] round %d: %d samples in %d shards (%.0f s); %s | per level %s' % (
             rounds, col.total, col.files, time.time() - t0,
-            ' '.join('%s%s' % (g.tag[0], '+' if g.won else '-') for g in games)), flush=True)
+            ' '.join('%s%s' % (g.tag[0], '+' if g.won else '-') for g in games),
+            ' '.join('%d-%d %d' % (g // 4 + 1, g % 4 + 1, n) for g, n in sorted(col.per_level.items()))), flush=True)
+        if a.quota and all(col.per_level.get(gp(l), 0) >= a.quota for l in levels):
+            break
     print('[valdata] done: %d samples, %d shards' % (col.total, col.files))
 
 

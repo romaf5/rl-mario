@@ -287,6 +287,11 @@ void ss_mcts_leaf_info(ss_mcts* m, int n, const int32_t* leaves, float* values, 
 
 float ss_mcts_root_value(ss_mcts* m, int t) { return m->forest.root_value(t); }
 
+int ss_mcts_dump(ss_mcts* m, int t, int max_n, uint64_t seed, float* b, int32_t* depth,
+                 int32_t* visits, uint8_t* stacks) {
+    return m->forest.dump(t, max_n, seed, b, depth, visits, stacks);
+}
+
 void ss_mcts_safe(ss_mcts* m, int t, const int32_t* actions, int n, int horizon, int32_t* out) {
     m->forest.safe(t, actions, n, horizon, out);
 }

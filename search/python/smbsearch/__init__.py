@@ -272,6 +272,7 @@ class Forest:
         L.ss_mcts_set_value_mix.argtypes = [P, F]
         L.ss_mcts_safe.argtypes = [P, I, P, I, I, P]
         L.ss_mcts_leaf_info.argtypes = [P, I, P, P, P]
+        L.ss_mcts_dump.restype = I; L.ss_mcts_dump.argtypes = [P, I, I, ctypes.c_uint64, P, P, P, P]
         L.ss_mcts_root_value.restype = F; L.ss_mcts_root_value.argtypes = [P, I]
         self.params = _MctsParams(c_puct, fpu, scale, v_death, max_nodes, value_mix, int(min_backup),
                                   int(relative))
@@ -355,6 +356,15 @@ class Forest:
         v = np.zeros(n, np.float32); d = np.zeros(n, np.int32)
         self._lib.ss_mcts_leaf_info(self._m, n, self.leaves.ctypes.data, v.ctypes.data, d.ctypes.data)
         return v, d
+
+    def dump(self, tree, max_n=64, seed=0):
+        """A sample of the tree's visited nodes: (b relative to the root, depth, visits,
+        stacks (n, 4, 84, 84)) -- the search's own value targets, no route needed."""
+        b = np.zeros(max_n, np.float32); d = np.zeros(max_n, np.int32); v = np.zeros(max_n, np.int32)
+        st = np.zeros((max_n, 4, OBS, OBS), np.uint8)
+        n = self._lib.ss_mcts_dump(self._m, tree, max_n, seed, b.ctypes.data, d.ctypes.data,
+                                   v.ctypes.data, st.ctypes.data)
+        return b[:n], d[:n], v[:n], st[:n]
 
     def root_value(self, tree):
         """The route's frames to go at the tree's root."""

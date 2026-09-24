@@ -58,14 +58,16 @@ def load(path, device='cuda'):
 class Data:
     """The shards of smbzero/data/value, with root groups kept whole across the split."""
     def __init__(self, pattern, device='cpu'):
-        roots, leaves, ridx, depth, d, lvl = [], [], [], [], [], []
+        roots, leaves, ridx, depth, d, lvl, shard = [], [], [], [], [], [], []
         off = 0
-        for p in sorted(glob.glob(pattern)):
+        for i, p in enumerate(sorted(glob.glob(pattern)) if isinstance(pattern, str) else pattern):
             z = np.load(p)
             roots.append(z['roots']); leaves.append(z['leaves'])
             ridx.append(z['root_idx'] + off); depth.append(z['depth']); d.append(z['d'])
             lvl.append(z['root_level'][z['root_idx']])
+            shard.append(np.full(len(z['roots']), i, np.int32))
             off += len(z['roots'])
+        self.shard = np.concatenate(shard)
         self.roots = torch.from_numpy(np.concatenate(roots))
         self.leaves = torch.from_numpy(np.concatenate(leaves))
         self.ridx = torch.from_numpy(np.concatenate(ridx).astype(np.int64))
@@ -77,13 +79,13 @@ class Data:
     def __len__(self):
         return len(self.d)
 
-    def split(self, frac=0.05, seed=0):
-        """Hold out whole root groups (leaves of one root never straddle the split)."""
+    def split(self, frac=0.08, seed=0):
+        """Hold out whole shards. Roots of one game a few decisions apart are nearly the same
+        state, so a scattered split would let the answer leak; a shard is a slice of play."""
         rng = np.random.default_rng(seed)
-        nroot = len(self.roots)
-        hold = np.zeros(nroot, bool)
-        hold[rng.choice(nroot, int(frac * nroot), replace=False)] = True
-        m = hold[self.ridx.numpy()]
+        ids = np.unique(self.shard)
+        hold = set(rng.choice(ids, max(1, int(round(frac * len(ids)))), replace=False).tolist())
+        m = np.isin(self.shard[self.ridx.numpy()], list(hold))
         return np.nonzero(~m)[0], np.nonzero(m)[0]
 
     def batch(self, idx, device):

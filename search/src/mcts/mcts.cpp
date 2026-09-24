@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include "../core/hash.h"
 #include "../core/keys.h"
 
 namespace ss {
@@ -65,6 +66,32 @@ float Forest::route_value(int t, int32_t node) const {
     const MctsTree& T = trees_[t];
     if (!T.rp) return -1.f;
     return std::min(p_.v_death, std::max(0.f, (float)T.nodes[node].rank / 16.f));
+}
+
+int Forest::dump(int t, int max_n, uint64_t seed, float* b, int32_t* depth, int32_t* visits,
+                 uint8_t* stacks) const {
+    const MctsTree& T = trees_[t];
+    if (T.root < 0) return 0;
+    std::vector<std::pair<int32_t, int32_t>> stack{{T.root, 0}}, keep;   // (node, depth)
+    while (!stack.empty()) {
+        const auto [x, d] = stack.back();
+        stack.pop_back();
+        if (T.nodes[x].n > 0 && T.nodes[x].evaluated && T.nodes[x].term != kDup) keep.push_back({x, d});
+        for (int32_t c : T.nodes[x].child)
+            if (c >= 0) stack.push_back({c, d + 1});
+    }
+    uint64_t r = seed | 1;                                   // reservoir sample, cheapest shuffle
+    for (size_t i = keep.size(); i > 1; i--) {
+        r = mix64(r);
+        std::swap(keep[i - 1], keep[r % i]);
+    }
+    const int n = (int)std::min<size_t>(keep.size(), (size_t)max_n);
+    for (int i = 0; i < n; i++) {
+        const auto [x, d] = keep[i];
+        b[i] = T.nodes[x].b; depth[i] = d; visits[i] = T.nodes[x].n;
+        stack_of(T, x, stacks + (size_t)i * kStack * kObsSize);
+    }
+    return n;
 }
 
 void Forest::leaf_info(int n, const MctsLeaf* leaves, float* values, int32_t* depths) const {

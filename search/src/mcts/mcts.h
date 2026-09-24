@@ -110,6 +110,11 @@ public:
     // constant per tree cancels -- and unlike absolute frames to go, it is on the screen.
     void leaf_info(int n, const MctsLeaf* leaves, float* values, int32_t* depths) const;
     float root_value(int t) const { return route_value(t, trees_[t].root); }
+    // after a decision: a sample of the tree's visited nodes with the value the search backed
+    // up into them (relative to the root), their depth, visits and frames. This is the search's
+    // own improved value -- the training target that needs no route at all.
+    int dump(int t, int max_n, uint64_t seed, float* b, int32_t* depth, int32_t* visits,
+             uint8_t* stacks) const;
 
 private:
     int32_t alloc(MctsTree& T);
