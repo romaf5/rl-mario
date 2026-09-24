@@ -62,7 +62,8 @@ class Player:
         g._seg = None
 
     def play(self, games, sims=None, budget_s=None, noise=0.0, alpha=0.3, max_decisions=20000,
-             segment_limit=None, rng=None, log=None, label_every=0, safe_horizon=24, on_wave=None):
+             segment_limit=None, rng=None, log=None, label_every=0, safe_horizon=24, on_wave=None,
+             on_decision=None):
         """Play the games to the end (axe, death or max_decisions). sims: simulations per
         searched decision; budget_s: wall-clock seconds per searched decision (live play).
         segment_limit: stop each game after this many finished segments (per-level play); an int,
@@ -72,7 +73,9 @@ class Player:
         safe_horizon: before a commit, the chosen action must have a surviving continuation
         (some button held this many steps); else the next most visited (0: off).
         on_wave(forest, n, trees, step): called after each wave's net evaluation, while its
-        leaves are still in forest.leaves / forest.stacks (training data for values)."""
+        leaves are still in forest.leaves / forest.stacks (training data for values).
+        on_decision(forest, tree, step): called when a searched tree is about to play its move,
+        while the tree is whole (the search's own value targets)."""
         assert len(games) <= self.n and (sims or budget_s)
         rng = rng or np.random.default_rng()
         for t, g in enumerate(games):
@@ -128,6 +131,8 @@ class Player:
                         g.unsafe = getattr(g, 'unsafe', 0) + 1
                     g.decision_s.append(time.perf_counter() - t0 if budget_s else dt)
                 seg = g._seg
+                if on_decision is not None and not fz:
+                    on_decision(self.f, t, step)
                 if label_every and not fz and (len(g.decision_s) - 1) % label_every == 0:
                     seg['label_idx'].append(len(seg['policy'])); seg['label_states'].append(self.f.state(t)[0])
                 seg['policy'].append(pol.astype(np.float32)); seg['root_b'].append(rb); seg['forced'].append(bool(fz))
