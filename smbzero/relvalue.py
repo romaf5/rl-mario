@@ -23,26 +23,38 @@ from .net import _Stage
 
 
 class RelValue(nn.Module):
-    """embed(frames) once per root; head(leaf, root, depth) per leaf."""
-    def __init__(self, channels=(16, 32, 32), hidden=256):
+    """W from the root's frames, the leaf's frames and the depth.
+
+    fusion='late':  each is embedded on its own (the root's embedding is cached per decision).
+    fusion='early': both go through one trunk as 8 channels -- how far one screen has moved
+                    on from the other is exactly what a convolution over the pair can see.
+    """
+    def __init__(self, channels=(16, 32, 32), hidden=256, fusion='late'):
         super().__init__()
-        stages, cin = [], 4
+        self.fusion = fusion
+        stages, cin = [], 8 if fusion == 'early' else 4
         for c in channels:
             stages.append(_Stage(cin, c)); cin = c
         self.stages = nn.Sequential(*stages)
         self.fc = nn.Linear(cin * 11 * 11, hidden)
-        self.h1 = nn.Linear(3 * hidden + 2, hidden)
+        self.h1 = nn.Linear((hidden if fusion == 'early' else 3 * hidden) + 2, hidden)
         self.h2 = nn.Linear(hidden, 1)
 
-    def embed(self, x):
+    def trunk(self, x):
         h = self.stages(x.float() / 255.0)
         return F.relu(self.fc(F.relu(h).flatten(1)))
+
+    def embed(self, x):
+        return x if self.fusion == 'early' else self.trunk(x)
 
     def head(self, e_leaf, e_root, depth):
         """-> W in frames (wasted against perfect play from the root)"""
         d = depth.float().unsqueeze(1)
-        z = torch.cat([e_leaf, e_root, e_leaf - e_root, d / 32, (d / 32) ** 2], 1)
-        return self.h2(F.relu(self.h1(z))).squeeze(1) * 16.0
+        if self.fusion == 'early':
+            e = self.trunk(torch.cat([e_leaf, e_root], 1))
+        else:
+            e = torch.cat([e_leaf, e_root, e_leaf - e_root], 1)
+        return self.h2(F.relu(self.h1(torch.cat([e, d / 32, (d / 32) ** 2], 1)))).squeeze(1) * 16.0
 
     def forward(self, leaf, root, depth):
         return self.head(self.embed(leaf), self.embed(root), depth)
@@ -50,7 +62,7 @@ class RelValue(nn.Module):
 
 def load(path, device='cuda'):
     ck = torch.load(path, map_location=device, weights_only=False)
-    net = RelValue()
+    net = RelValue(fusion=ck.get('fusion', 'late'))
     net.load_state_dict(ck['state'])
     return net.to(device).eval(), ck
 
@@ -165,6 +177,7 @@ def main():
     ap.add_argument('--steps', type=int, default=20000)
     ap.add_argument('--batch', type=int, default=256)
     ap.add_argument('--lr', type=float, default=3e-4)
+    ap.add_argument('--fusion', default='late', choices=('late', 'early'))
     ap.add_argument('--holdout', type=float, default=0.08)
     ap.add_argument('--baseline', default='smbzero/runs/zero8/net.pt', help='net whose absolute value head to compare')
     ap.add_argument('--out', default=os.path.join(RUNS, 'relv0'))
@@ -190,7 +203,7 @@ def main():
         del bnet
         torch.cuda.empty_cache()
 
-    net = RelValue().cuda()
+    net = RelValue(fusion=a.fusion).cuda()
     opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=1e-4)
     rng = np.random.default_rng(0)
     t0, hist = time.time(), []
@@ -220,7 +233,7 @@ def main():
     report('relative value (new)', pair_score(f, data, pairs)[0], data.level, pairs, log)
     fd = lambda idx: f(idx) - 4.0 * data.depth.numpy()[idx]        # D = W - 4 depth
     report('relative value, whole tree', pair_score(fd, data, tree_pairs)[0], data.level, tree_pairs, log)
-    torch.save(dict(state=net.state_dict(), hist=hist), os.path.join(a.out, 'relvalue.pt'))
+    torch.save(dict(state=net.state_dict(), hist=hist, fusion=a.fusion), os.path.join(a.out, 'relvalue.pt'))
     json.dump(hist, open(os.path.join(a.out, 'hist.json'), 'w'), indent=1)
 
 

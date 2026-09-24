@@ -78,6 +78,9 @@ def main():
     ap.add_argument('--train-steps', type=int, default=1500)
     ap.add_argument('--batch', type=int, default=256)
     ap.add_argument('--lr', type=float, default=1e-4)
+    ap.add_argument('--play', default='value', choices=('value', 'route'),
+                    help="what drives play while training: the learned value, or the search route "
+                         "(training-time only -- the value still learns from the search's verdicts)")
     ap.add_argument('--levels', default=','.join(ROUTE))
     ap.add_argument('--seed', type=int, default=0)
     a = ap.parse_args()
@@ -92,7 +95,12 @@ def main():
     net, _ = load_net(a.net)
     rel, _ = load_rel(a.relvalue)
     ev = RelEvaluator(net, rel, a.trees * a.per_tree)
-    player = Player(s, ev, a.trees, per_tree=a.per_tree, value_mix=1.0, min_backup=True, relative=True)
+    if a.play == 'route':      # a value that is still weak would otherwise poison its own data
+        from .common import route_values
+        player = Player(s, ev, a.trees, per_tree=a.per_tree, routes=route_values(segs), value_mix=0.0,
+                        min_backup=True)
+    else:
+        player = Player(s, ev, a.trees, per_tree=a.per_tree, value_mix=1.0, min_backup=True, relative=True)
     buf = Buffer()
     rng = np.random.default_rng(a.seed)
     opt_p = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=1e-4)
@@ -117,7 +125,10 @@ def main():
         def after_decision(f, t, step):                    # the tree is whole: take its verdict
             b, dep, vis, st = f.dump(t, a.dump, seed=int(rng.integers(1 << 62)))
             if len(b):
-                buf.add_values(f.state(t)[2], st, dep, b, vis, a.min_visits)
+                root = f.state(t)[2]
+                if a.play == 'route':                      # b is absolute there: make it relative
+                    b = b - f.root_value(t)
+                buf.add_values(root, st, dep, b, vis, a.min_visits)
 
         player.play(games, sims=a.sims, noise=a.noise, rng=rng, max_decisions=caps,
                     segment_limit=[None if g.tag[0] == 'game' else 1 for g in games],
