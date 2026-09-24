@@ -76,6 +76,37 @@ Goal: the MCTS searches a learned model. The real game is stepped only by commit
      actions: within a few points of the emulator-MCTS baseline (28/32).
    - B3 full game from 1-1 at the live budget, several delays.
 
+### Stage A, results (2026-09-24)
+
+The value predicts W, the frames wasted against perfect play from the tree's root. Held-out
+pairs from the agent's own searches:
+
+| | same depth (what q ranks) | whole tree (what b minimises) |
+|---|---|---|
+| old absolute head | 49.4% | 72.3% |
+| relative value, search leaves only | 83.8% | 98.5% |
+| relative value, + rollout traps | **91.7%** | 95.4% |
+
+Playing with no route at all (1000 simulations, 4 start delays per level):
+
+| | 1-1 | 1-2 | 4-1 | 4-2 | 8-1 | 8-2 | 8-3 | 8-4 | total |
+|---|---|---|---|---|---|---|---|---|---|
+| route value | 4/4 | 4/4 | 4/4 | 4/4 | 1/4 | 3/4 | 4/4 | 2/4 | ~26/32 |
+| learned, search leaves only | 4/4 | 2/4 | 4/4 | 3/4 | 0/4 | 3/4 | 4/4 | 0/4 | 20/32 |
+| learned, + rollout traps | 4/4 | 4/4 | 4/4 | 2/4 | 1/4 | 3/4 | 4/4 | 0/4 | 22/32 |
+
+Two things did not work and are worth not repeating:
+- Early fusion (root and leaf as 8 channels through one trunk) is worse than late fusion
+  with the embeddings' difference: 74% against 84%.
+- Training the value on the search's own backed-up verdicts made it worse (1/16 on the
+  levels it had failed, against 5/16): MCTS only revisits shallow nodes, so its verdicts sit
+  at median depth 5 with ~18 frames of typical waste, while the value is asked about leaves
+  at median depth 25 where typical waste is ~0.
+
+8-4 is the gap left (0/4, stalls not deaths, and the value's weakest level on the pair test).
+It is the puzzle level: progress there means bumping a hidden block and taking the right
+pipe, which the route's rank reads from the tiles and the net has to see.
+
 ### Stage B, first result (2026-09-24, wm1: 6000 trajectories / 250k frames, 30k steps)
 
 Held-out unrolls, average precision (the base rate is in brackets):
