@@ -13,14 +13,14 @@ replayed in stable-retro (--verify) and saved as route files for render_demo.
 import argparse, json, os, sys, time
 import numpy as np
 from .common import (FPS, MAX_DELAY, REPO, RUNS, THREADS, Search, e2e_segments, load_state, route_values)
-from .net import Evaluator, load
+from .net import Evaluator, RelEvaluator, load
 from .play import Game, Player
 
 sys.path.insert(0, os.path.join(REPO, 'search', 'tools'))
 
 
 def run(net, delays, sims=None, budget_ms=None, parallel=1, per_tree=None, level=None, verify=False, out=None,
-        log=print, s=None, c_puct=1.5, value_mix=0.0, min_backup=False):
+        log=print, s=None, c_puct=1.5, value_mix=0.0, min_backup=False, relvalue=None):
     s = s or Search(threads=THREADS)
     segs = {g['level']: g for g in e2e_segments(s)}
     if level:
@@ -31,9 +31,14 @@ def run(net, delays, sims=None, budget_ms=None, parallel=1, per_tree=None, level
         cap = int(2.5 * sum(len(g['opt']) for g in segs.values())) + 2000      # + the forced transitions
     per_tree = per_tree or (256 if budget_ms else 128)
     n_par = 1 if budget_ms else parallel
-    ev = Evaluator(net, max_leaves=max(per_tree * n_par, 256))
-    player = Player(s, ev, n_par, per_tree=per_tree, c_puct=c_puct, routes=route_values(segs), value_mix=value_mix,
-                    min_backup=min_backup)
+    if relvalue is not None:                        # the learned value: no route at play time
+        ev = RelEvaluator(net, relvalue, max_leaves=max(per_tree * n_par, 256))
+        player = Player(s, ev, n_par, per_tree=per_tree, c_puct=c_puct, value_mix=1.0, min_backup=min_backup,
+                        relative=True)
+    else:
+        ev = Evaluator(net, max_leaves=max(per_tree * n_par, 256))
+        player = Player(s, ev, n_par, per_tree=per_tree, c_puct=c_puct, routes=route_values(segs),
+                        value_mix=value_mix, min_backup=min_backup)
     results = []
     for i in range(0, len(delays), n_par):
         chunk = delays[i:i + n_par]
@@ -61,7 +66,8 @@ def run(net, delays, sims=None, budget_ms=None, parallel=1, per_tree=None, level
         log('[eval] %d/%d games done (%.0f s)' % (len(results), len(delays), time.time() - t))
     won = [r for r in results if r['won']]
     summary = dict(games=len(results), won=len(won), mean_seconds_won=float(np.mean([r['seconds'] for r in won])) if won else None,
-                   sims=sims, budget_ms=budget_ms, level=level, value_mix=value_mix)
+                   sims=sims, budget_ms=budget_ms, level=level, value_mix=value_mix,
+                   relvalue=relvalue is not None)
     return summary, results
 
 
@@ -76,6 +82,7 @@ def main():
     ap.add_argument('--c-puct', type=float, default=1.5)
     ap.add_argument('--value-mix', type=float, default=0.0, help='leaf value: this x net + (1 - this) x route')
     ap.add_argument('--min-backup', action='store_true', help='b = 4 + min over children (exact route values)')
+    ap.add_argument('--relvalue', help='a relvalue.pt: leaf values from the net, no route at play time')
     ap.add_argument('--level')
     ap.add_argument('--verify', action='store_true')
     ap.add_argument('--out')
@@ -84,11 +91,15 @@ def main():
     out = a.out or os.path.join(os.path.dirname(os.path.abspath(a.net)), 'eval_%s' % time.strftime('%H%M%S'))
     os.makedirs(out, exist_ok=True)
     net, _ = load(a.net)
+    rv = None
+    if a.relvalue:
+        from .relvalue import load as load_rel
+        rv, _ = load_rel(a.relvalue)
     logf = open(os.path.join(out, 'eval.log'), 'a')
     log = lambda m: (print(m, flush=True), logf.write(m + '\n'), logf.flush())
     summary, results = run(net, delays, sims=a.sims, budget_ms=a.budget_ms, parallel=a.parallel, per_tree=a.per_tree,
                            level=a.level, verify=a.verify, out=out, log=log, c_puct=a.c_puct, value_mix=a.value_mix,
-                           min_backup=a.min_backup)
+                           min_backup=a.min_backup, relvalue=rv)
     log('[eval] summary %s' % json.dumps(summary))
     json.dump(dict(summary=summary, results=results), open(os.path.join(out, 'eval.json'), 'w'), indent=1)
 

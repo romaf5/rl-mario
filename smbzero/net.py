@@ -58,12 +58,41 @@ class Evaluator:
         self.stacks = self.pinned.numpy()             # hand this to Forest(stacks=...)
 
     @torch.no_grad()
-    def __call__(self, n):
+    def __call__(self, n, forest=None):
         x = self.pinned[:n].to(self.device, non_blocking=True)
         with torch.autocast('cuda', dtype=torch.float16):
             logits, v = self.net(x)
         p = torch.softmax(logits.float(), 1)
         return p.cpu().numpy(), (v.float() * V_SCALE).cpu().numpy()
+
+
+class RelEvaluator(Evaluator):
+    """Prior from the policy net, value from the relative-value net: W frames wasted against
+    perfect play from the tree's root, returned as D = W - 4 depth (Forest(relative=True)).
+    The root's frames are embedded once per decision."""
+    def __init__(self, net, relnet, max_leaves, device='cuda'):
+        super().__init__(net, max_leaves, device)
+        self.rel = relnet.to(device).eval()
+        self.root_e = {}
+
+    @torch.no_grad()
+    def new_decision(self, forest, trees):
+        st = np.stack([forest.state(t)[2] for t in trees])
+        with torch.autocast('cuda', dtype=torch.float16):
+            e = self.rel.embed(torch.from_numpy(st).to(self.device))
+        self.root_e = {int(t): e[i] for i, t in enumerate(trees)}
+
+    @torch.no_grad()
+    def __call__(self, n, forest=None):
+        x = self.pinned[:n].to(self.device, non_blocking=True)
+        depth = forest.leaf_info(n)[1]
+        trees = forest.leaves[:n, 0]
+        with torch.autocast('cuda', dtype=torch.float16):
+            logits, _ = self.net(x)
+            e_root = torch.stack([self.root_e[int(t)] for t in trees])
+            w = self.rel.head(self.rel.embed(x), e_root, torch.from_numpy(depth).to(self.device))
+        p = torch.softmax(logits.float(), 1)
+        return p.cpu().numpy(), w.float().cpu().numpy() - 4.0 * depth
 
 
 def save(net, path, **meta):

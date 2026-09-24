@@ -48,6 +48,13 @@ class RelValue(nn.Module):
         return self.head(self.embed(leaf), self.embed(root), depth)
 
 
+def load(path, device='cuda'):
+    ck = torch.load(path, map_location=device, weights_only=False)
+    net = RelValue()
+    net.load_state_dict(ck['state'])
+    return net.to(device).eval(), ck
+
+
 class Data:
     """The shards of smbzero/data/value, with root groups kept whole across the split."""
     def __init__(self, pattern, device='cpu'):

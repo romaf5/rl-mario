@@ -27,7 +27,8 @@ class Game:
 
 
 class Player:
-    def __init__(self, search, evaluator, n_trees, per_tree=128, max_nodes=1 << 15, routes=None, value_mix=1.0, **mcts):
+    def __init__(self, search, evaluator, n_trees, per_tree=128, max_nodes=1 << 15, routes=None, value_mix=1.0,
+                 **mcts):
         """routes: {level: (start state, actions)} -- leaf values use frames to go along them
         (value_mix x net + (1 - value_mix) x route)."""
         self.s = search
@@ -84,6 +85,8 @@ class Player:
             think = [t for t, fz in zip(live, forced) if not fz]
             t0 = time.perf_counter()
             if think:
+                if hasattr(self.ev, 'new_decision'):     # a value relative to each root
+                    self.ev.new_decision(self.f, think)
                 base = {t: self.f.root(t)[3] for t in think}
                 noised = set()
                 while True:
@@ -93,7 +96,7 @@ class Player:
                     n = self.f.select(todo, self.per_tree)
                     if n == 0:
                         break
-                    pri, val = self.ev(n)
+                    pri, val = self.ev(n, self.f)
                     if on_wave is not None:          # the leaves are still in self.f.stacks / leaves
                         on_wave(self.f, n, todo, step)
                     self.f.backup(n, pri, val)

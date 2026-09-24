@@ -36,6 +36,8 @@ struct MctsParams {
     int max_nodes = 1 << 16;       // per tree
     float value_mix = 1.0f;        // leaf value: this x net + (1 - this) x route (1 without a route)
     int min_backup = 0;            // 1: b(n) = 4 + min over children (the best line; for exact values)
+    int relative = 0;              // 1: leaf values are relative to the root (relvalue.py), so a
+                                   // goal at depth k is worth -4k: the root's b is then exactly 0
 };
 
 enum : uint8_t { kRunning = 0, kGoal = 1, kDead = 2, kDup = 3 };   // kDup: same state as a sibling
@@ -49,6 +51,7 @@ struct MctsNode {
     int32_t pending;               // simulations of the current wave through this node
     double w;                      // sum over simulations of the frames to go they found
     float b;                       // w / n: mean frames to go (the net's value at a new leaf)
+    float v0;                      // the value this node was given when it was created
     uint8_t action;                // the edge from the parent
     uint8_t term;                  // kRunning / kGoal / kDead
     uint8_t evaluated;             // prior and value set (terminals: at creation)
@@ -112,6 +115,7 @@ private:
     int32_t alloc(MctsTree& T);
     void stack_of(const MctsTree& T, int32_t node, uint8_t* out) const;
     void add_path(MctsTree& T, int32_t leaf, float v, bool pending);
+    float term_value(const MctsTree& T, int32_t node) const;
     void refresh_min(MctsTree& T, int32_t x);
     void gc(MctsTree& T);
     void route_root(MctsTree& T);

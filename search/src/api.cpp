@@ -243,6 +243,7 @@ ss_mcts* ss_mcts_create(ss_ctx* c, int n_trees, const ss_mcts_params* p) {
     if (p) {
         q.c_puct = p->c_puct; q.fpu = p->fpu; q.scale = p->scale; q.v_death = p->v_death;
         q.max_nodes = p->max_nodes; q.value_mix = p->value_mix; q.min_backup = p->min_backup;
+        q.relative = p->relative;
     }
     return n_trees > 0 ? new ss_mcts(c, n_trees, q) : nullptr;
 }

@@ -65,7 +65,8 @@ SS_API int ss_replay_obs(ss_ctx* ctx, const uint8_t* start, const uint8_t* actio
  * them (priors as probabilities, values in frames to the segment goal) and backs up.
  * Leaves are (tree, node) int32 pairs; stacks are 4 x 84 x 84 uint8, oldest first. */
 typedef struct ss_mcts ss_mcts;
-typedef struct { float c_puct, fpu, scale, v_death; int32_t max_nodes; float value_mix; int32_t min_backup; } ss_mcts_params;
+typedef struct { float c_puct, fpu, scale, v_death; int32_t max_nodes; float value_mix;
+                 int32_t min_backup, relative; } ss_mcts_params;
 SS_API ss_mcts* ss_mcts_create(ss_ctx* ctx, int n_trees, const ss_mcts_params* p);
 SS_API void ss_mcts_destroy(ss_mcts* m);
 SS_API int ss_mcts_reset(ss_mcts* m, int tree, const uint8_t* state, const int32_t* route, int n_route);

@@ -11,7 +11,7 @@ namespace {
 void init_node(MctsNode& n, int32_t parent, uint8_t action) {
     n.parent = parent;
     for (int a = 0; a < kNumActions; a++) { n.child[a] = -1; n.prior[a] = 1.0f / kNumActions; }
-    n.n = 0; n.pending = 0; n.w = 0; n.b = 0; n.action = action;
+    n.n = 0; n.pending = 0; n.w = 0; n.b = 0; n.v0 = 0; n.action = action;
     n.term = kRunning; n.evaluated = 0; n.inflight = 0; n.tau = 0; n.rank = 0; n.key = 0;
 }
 
@@ -108,6 +108,16 @@ void Forest::stack_of(const MctsTree& T, int32_t node, uint8_t* out) const {
     }
 }
 
+// a terminal leaf's value. Relative mode: the goal at depth k is -4k, so the root's b
+// becomes exactly 0 -- a line that reaches the goal beats every estimate.
+float Forest::term_value(const MctsTree& T, int32_t node) const {
+    if (T.nodes[node].term != kGoal) return p_.v_death;
+    if (!p_.relative) return 0.f;
+    int d = 0;
+    for (int32_t x = node; x >= 0 && x != T.root; x = T.nodes[x].parent) d++;
+    return -(float)(kFrameSkip * d);
+}
+
 // a finished simulation: the leaf is worth v frames to go; each ancestor k steps up
 // gets 4k + v (pending: the path was counted in flight by select)
 void Forest::add_path(MctsTree& T, int32_t leaf, float v, bool pending) {
@@ -196,7 +206,7 @@ int Forest::select(const int32_t* trees, int n_trees, int per_tree, int max_leav
             }
             if (leaf < 0) continue;
             if (terminal) {                               // a known end: count it, no net
-                add_path(T, leaf, T.nodes[leaf].term == kGoal ? 0.f : p_.v_death, false);
+                add_path(T, leaf, term_value(T, leaf), false);
                 continue;
             }
             for (int32_t p : path) T.nodes[p].pending++;
@@ -242,7 +252,8 @@ int Forest::select(const int32_t* trees, int n_trees, int per_tree, int max_leav
         }
         if (C.term == kRunning) { leaves[n_out++] = {J.t, J.node}; continue; }
         C.evaluated = 1; C.inflight = 0;                  // a new terminal: back it up now
-        add_path(T, J.node, C.term == kGoal ? 0.f : p_.v_death, true);
+        C.v0 = term_value(T, J.node);
+        add_path(T, J.node, C.v0, true);
     }
     pool_.parallel_for(n_out, [&](int64_t i, int) {
         stack_of(trees_[leaves[i].tree], leaves[i].node, obs + (size_t)i * kStack * kObsSize);
@@ -256,8 +267,10 @@ void Forest::backup(int n, const MctsLeaf* leaves, const float* priors, const fl
         MctsNode& C = T.nodes[leaves[i].node];
         memcpy(C.prior, priors + (size_t)i * kNumActions, sizeof C.prior);
         C.evaluated = 1; C.inflight = 0;
-        float v = std::min(p_.v_death, std::max(0.f, values[i]));
+        float v = p_.relative ? std::min(p_.v_death, values[i])          // relative: below 0 is progress
+                              : std::min(p_.v_death, std::max(0.f, values[i]));
         if (T.rp) v = p_.value_mix * v + (1 - p_.value_mix) * route_value(leaves[i].tree, leaves[i].node);
+        C.v0 = v;
         add_path(T, leaves[i].node, v, true);
     }
 }
@@ -315,7 +328,7 @@ int Forest::commit(int t, int action) {
         C.term = term_of(T.seg.classify(e.ram()));
         C.key = exact_key(e.ram());
         if (T.rp) T.rp->rank(e.ram(), T.nodes[T.root].tau, T.nodes[T.root].rank, &C.tau, &C.rank);
-        if (C.term != kRunning) { C.evaluated = 1; C.b = C.term == kGoal ? 0.f : p_.v_death; C.w = C.b; C.n = 1; }
+        if (C.term != kRunning) { C.evaluated = 1; C.b = C.v0 = term_value(T, c); C.w = C.b; C.n = 1; }
     }
     if (T.nodes[c].term == kDup) {                        // a duplicate is a real state: a fresh root
         T.nodes[c].term = kRunning; T.nodes[c].evaluated = 0; T.nodes[c].n = 0; T.nodes[c].w = 0;
@@ -324,6 +337,12 @@ int Forest::commit(int t, int action) {
     memcpy(T.hist[0], &T.frames[(size_t)T.root * kObsSize], kObsSize);
     T.nodes[c].parent = -1;
     T.root = c;
+    if (p_.relative) {
+        // the kept subtree was valued against the old root; move it into the new root's frame
+        // (the chosen child's own value is how much closer to the goal the new root is)
+        const float delta = T.nodes[c].v0;
+        for (MctsNode& n : T.nodes) { n.b -= delta; n.w -= (double)delta * n.n; n.v0 -= delta; }
+    }
     gc(T);
     return T.nodes[c].term;
 }

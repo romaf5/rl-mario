@@ -235,7 +235,7 @@ class Search:
 class _MctsParams(ctypes.Structure):
     _fields_ = [('c_puct', ctypes.c_float), ('fpu', ctypes.c_float), ('scale', ctypes.c_float),
                 ('v_death', ctypes.c_float), ('max_nodes', ctypes.c_int32), ('value_mix', ctypes.c_float),
-                ('min_backup', ctypes.c_int32)]
+                ('min_backup', ctypes.c_int32), ('relative', ctypes.c_int32)]
 
 
 class Forest:
@@ -253,7 +253,7 @@ class Forest:
     RUNNING, GOAL, DEAD = 0, 1, 2
 
     def __init__(self, search, n_trees, c_puct=1.5, fpu=0.5, scale=32.0, v_death=4096.0, max_nodes=1 << 16,
-                 max_leaves=2048, stacks=None, value_mix=1.0, min_backup=False):
+                 max_leaves=2048, stacks=None, value_mix=1.0, min_backup=False, relative=False):
         self.s = search
         L = self._lib = search._lib
         P, I, F = ctypes.c_void_p, ctypes.c_int, ctypes.c_float
@@ -273,7 +273,8 @@ class Forest:
         L.ss_mcts_safe.argtypes = [P, I, P, I, I, P]
         L.ss_mcts_leaf_info.argtypes = [P, I, P, P, P]
         L.ss_mcts_root_value.restype = F; L.ss_mcts_root_value.argtypes = [P, I]
-        self.params = _MctsParams(c_puct, fpu, scale, v_death, max_nodes, value_mix, int(min_backup))
+        self.params = _MctsParams(c_puct, fpu, scale, v_death, max_nodes, value_mix, int(min_backup),
+                                  int(relative))
         self.v_death = v_death
         self.n_trees = n_trees
         self._m = L.ss_mcts_create(search._ctx, n_trees, ctypes.byref(self.params))
