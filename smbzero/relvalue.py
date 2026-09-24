@@ -86,7 +86,9 @@ class Data:
         self.depth = torch.from_numpy(np.concatenate(depth).astype(np.int64))
         self.d = torch.from_numpy(np.concatenate(d).astype(np.float32))
         self.level = np.concatenate(lvl)
-        self.w = self.d + 4.0 * self.depth
+        # past a few hundred frames the search only needs "hopeless"; exact magnitudes would
+        # swamp the regression (a rollout into a pit can read thousands)
+        self.w = (self.d + 4.0 * self.depth).clamp(max=512.0)
 
     def __len__(self):
         return len(self.d)
