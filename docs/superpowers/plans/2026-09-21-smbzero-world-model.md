@@ -76,6 +76,27 @@ Goal: the MCTS searches a learned model. The real game is stepped only by commit
      actions: within a few points of the emulator-MCTS baseline (28/32).
    - B3 full game from 1-1 at the live budget, several delays.
 
+### Stage B, first result (2026-09-24, wm1: 6000 trajectories / 250k frames, 30k steps)
+
+Held-out unrolls, average precision (the base rate is in brackets):
+
+| depth | goal | dead | forced | waste error |
+|---|---|---|---|---|
+| 1 step ahead | 0.18 (0.8%) | 0.50 | **1.00** | 1.3 frames |
+| 10 steps ahead | 0.54 (7%) | 0.74 | **1.00** | 1.4 frames |
+
+- Forced is solved: the model knows exactly when the input does nothing, ten steps out.
+- Death is real but loose (0.74 against a 7% base rate), not the emulator's certainty.
+- Waste, the signal that ranks one line against another, is the weak one: correlation 0.39,
+  and on the steps that matter it under-calls badly -- steps that really throw away 8-32
+  frames are called 3.5, and the catastrophic ones (mean 158) are called 2.0.
+- Latent consistency 0.16: an unrolled latent drifts from the one the real frames give.
+
+What it needs before a latent search is worth writing: far more data and training (250k
+frames and 50 minutes is tiny for a MuZero-style model), trajectories that contain many more
+catastrophic steps (random play rarely commits the interesting mistakes), a bigger latent,
+and a consistency term strong enough to keep the unroll on the rails.
+
 ## Stage C: no teacher at all (full MuZero loop)
 
 The teacher (the C++ search) does not extend to other games: it needs savestates (Go-Explore
