@@ -89,6 +89,8 @@ class Search:
         L.ss_replay_obs.restype = I; L.ss_replay_obs.argtypes = [P, ctypes.c_char_p, P, I, P, P, P]
         L.ss_forced_along.restype = I; L.ss_forced_along.argtypes = [P, ctypes.c_char_p, P, I, P]
         L.ss_classify_along.restype = I; L.ss_classify_along.argtypes = [P, ctypes.c_char_p, P, I, P, I, P]
+        L.ss_set_progress_route.restype = I
+        L.ss_set_progress_route.argtypes = [P, ctypes.c_char_p, P, I, P, I]
         L.ss_progress_along.restype = I
         L.ss_progress_along.argtypes = [P, ctypes.c_char_p, P, I, P, I, ctypes.c_char_p, P, I, P]
         L.ss_lookahead.restype = I
@@ -201,6 +203,13 @@ class Search:
         out = np.zeros((OBS, OBS), dtype=np.uint8)
         self._lib.ss_obs(self._ctx, self._state(state), out.ctypes.data)
         return out
+
+    def set_progress_route(self, route, reference, ref_start):
+        """Keep this level's reference, so progress_along costs one replay instead of two."""
+        r, rp, rn = self._route(route)
+        ref = np.ascontiguousarray(reference, dtype=np.uint8)
+        return self._lib.ss_set_progress_route(self._ctx, self._state(ref_start), rp, rn, ref.ctypes.data,
+                                               len(ref)) == 0
 
     def progress_along(self, state, route, reference, actions, ref_start=None):
         """The route's frames to go at the start and after each action (n + 1 values).

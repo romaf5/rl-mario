@@ -1,6 +1,7 @@
 #include "../include/smbsearch.h"
 #include <chrono>
 #include <cstring>
+#include <map>
 #include <memory>
 #include <random>
 #include <thread>
@@ -21,6 +22,7 @@ struct ss_ctx {
     std::unique_ptr<Pool> pool;
     std::vector<std::unique_ptr<Emu>> owned;
     std::vector<Emu*> emus;
+    std::map<int, std::unique_ptr<RefProgress>> prog;   // level -> its reference, built once
 };
 
 struct ss_mcts {
@@ -117,19 +119,38 @@ int ss_replay_obs(ss_ctx* c, const uint8_t* start, const uint8_t* actions, int n
     return n;
 }
 
-int ss_progress_along(ss_ctx* c, const uint8_t* start, const int32_t* route, int n_route, const uint8_t* ref,
-                      int n_ref, const uint8_t* ref_start, const uint8_t* actions, int n, float* out) {
+static RefProgress* build_progress(ss_ctx* c, const uint8_t* ref_start, const int32_t* route, int n_route,
+                                   const uint8_t* ref, int n_ref) {
     Emu& e = *c->emus[0];
-    e.load_full(ref_start ? ref_start : start);
+    e.load_full(ref_start);
     const Segment seg = Segment::make(std::vector<int>(route, route + n_route), e.ram());
-    if (seg.start_gp < 0) return -1;
-    RefProgress rp;
-    rp.add(e.ram(), 0);
+    if (seg.start_gp < 0) return nullptr;
+    auto rp = std::make_unique<RefProgress>();
+    rp->add(e.ram(), 0);
     for (int i = 0; i < n_ref; i++) {
         e.step(ref[i]);
         if (seg.classify(e.ram()) != Outcome::Running) break;
-        rp.add(e.ram(), i + 1);
+        rp->add(e.ram(), i + 1);
     }
+    c->prog[seg.start_gp] = std::move(rp);
+    return c->prog[seg.start_gp].get();
+}
+
+int ss_set_progress_route(ss_ctx* c, const uint8_t* ref_start, const int32_t* route, int n_route,
+                          const uint8_t* ref, int n_ref) {
+    return build_progress(c, ref_start, route, n_route, ref, n_ref) ? 0 : -1;
+}
+
+int ss_progress_along(ss_ctx* c, const uint8_t* start, const int32_t* route, int n_route, const uint8_t* ref,
+                      int n_ref, const uint8_t* ref_start, const uint8_t* actions, int n, float* out) {
+    Emu& e = *c->emus[0];
+    e.load_full(start);
+    const int lvl = level_gp(e.ram());
+    auto it = c->prog.find(lvl);                     // rebuilding the reference per call costs
+    RefProgress* rpp = it != c->prog.end() ? it->second.get()      // more than the trajectory itself
+                     : build_progress(c, ref_start ? ref_start : start, route, n_route, ref, n_ref);
+    if (!rpp) return -1;
+    const RefProgress& rp = *rpp;
     e.load_full(start);
     int tau = rp.nearest(e.ram());
     int64_t rank = 0;

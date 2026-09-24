@@ -55,6 +55,8 @@ def main():
     s = Search(threads=THREADS)
     segs = {g['level']: g for g in e2e_segments(s)}
     levels = a.levels.split(',')
+    for l in levels:                                   # keep each level's reference: one replay per call
+        s.set_progress_route(ROUTE, segs[l]['opt'], segs[l]['start'])
     modes = a.modes.split(',')
     rng = np.random.default_rng(a.seed)
     t0, done, files = time.time(), 0, 0

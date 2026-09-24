@@ -53,6 +53,9 @@ SS_API int ss_obs(ss_ctx* ctx, const uint8_t* state, uint8_t* obs_out /* 84*84: 
 /* per step of a replay: the route's frames to go (the beam's progress rank), from which the
  * waste of a step follows: r = R(next) - R(now) + 4, never below 0. ref/ref_start: the level's
  * reference actions and the state they were found from */
+/* build a level's reference once and keep it (ss_progress_along then costs one replay) */
+SS_API int ss_set_progress_route(ss_ctx* ctx, const uint8_t* ref_start, const int32_t* route, int n_route,
+                                 const uint8_t* ref, int n_ref);
 SS_API int ss_progress_along(ss_ctx* ctx, const uint8_t* start, const int32_t* route, int n_route,
                              const uint8_t* ref, int n_ref, const uint8_t* ref_start,
                              const uint8_t* actions, int n, float* out);
