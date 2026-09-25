@@ -180,6 +180,7 @@ def main():
     ap.add_argument('--batch', type=int, default=256)
     ap.add_argument('--lr', type=float, default=3e-4)
     ap.add_argument('--fusion', default='late', choices=('late', 'early'))
+    ap.add_argument('--precision', default='bf16', choices=('bf16', 'fp32'))
     ap.add_argument('--holdout', type=float, default=0.08)
     ap.add_argument('--baseline', default='smbzero/runs/zero8/net.pt', help='net whose absolute value head to compare')
     ap.add_argument('--out', default=os.path.join(RUNS, 'relv0'))
@@ -209,11 +210,12 @@ def main():
     opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=1e-4)
     rng = np.random.default_rng(0)
     t0, hist = time.time(), []
+    amp = torch.autocast('cuda', dtype=torch.bfloat16, enabled=a.precision == 'bf16')
     for step in range(1, a.steps + 1):
         net.train()
         idx = torch.from_numpy(rng.choice(tr, a.batch))
         leaf, root, dep, w = data.batch(idx, 'cuda')
-        with torch.autocast('cuda', dtype=torch.bfloat16):
+        with amp:
             pred = net(leaf, root, dep)
             loss = F.smooth_l1_loss(pred.float() / 16, w / 16)
         opt.zero_grad(set_to_none=True)

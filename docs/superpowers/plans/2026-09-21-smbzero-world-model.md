@@ -107,6 +107,13 @@ as well on a value read off the screen as on progress along a route it was hande
 route is no longer needed at play time. It is still used to label training data (valroll),
 which stage C removes.
 
+Precision was checked rather than assumed (RL is often sensitive to it): at play time fp16
+differs from fp32 by 0.02 frames on average (max 0.24) and flips a sibling comparison 0.05%
+of the time, against a value whose own error is 4.2 frames; training the same data and seed
+for 10k steps gives 91.1% (bf16, 329 s) against 91.3% (fp32, 600 s) -- inside the noise for
+1.8x the time. There is no bootstrapping loop here for small errors to compound in, since
+the targets are computed from the emulator. `relvalue --precision fp32` keeps the check cheap.
+
 Two things did not work and are worth not repeating:
 - Early fusion (root and leaf as 8 channels through one trunk) is worse than late fusion
   with the embeddings' difference: 74% against 84%.
