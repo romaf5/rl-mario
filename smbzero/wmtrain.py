@@ -80,7 +80,9 @@ def losses(model, obs, acts, ev, tgt_obs, r, valid, wt, wvalid,
     pos = ev.sum((0, 1)).clamp(min=1)
     weight = (ev.numel() / 3 / pos).clamp(max=50)            # events are rare: weight them up
     le = F.binary_cross_entropy_with_logits(e, ev, pos_weight=weight)
-    lc = consistency(model, torch.cat(lat[1:], 0), tgt_obs)
+    # (B, K, ...) flattened batch-major, the order tgt_obs is built in -- cat(dim=0)
+    # would be depth-major and pair each latent with another sample's frames.
+    lc = consistency(model, torch.stack(lat[1:], 1).flatten(0, 1), tgt_obs)
     pred_r = torch.stack(rs, 1)                              # the frames each step throws away
     lr = (F.smooth_l1_loss(pred_r.float() / 16, r / 16, reduction='none') * valid).sum() / valid.sum().clamp(min=1)
     pred_w = torch.stack(ws, 1)                              # W: thrown away since the root
@@ -148,7 +150,7 @@ def main():
         if step % 2000 == 0 or step == a.steps:
             model.eval()
             prec, rec, tot = gate(model, data, va)
-            hist.append(dict(step=step, event=le, consistency=lc, waste_mae=rmae, s=round(time.time() - t0),
+            hist.append(dict(step=step, event=le, consistency=lc, w_mae=rmae, s=round(time.time() - t0),
                              prec1=prec[0].tolist(), rec1=rec[0].tolist(),
                              precK=prec[-1].tolist(), recK=rec[-1].tolist()))
             log('[wm] step %5d event %.4f cons %.4f W error %.1f frames | 1 step ahead %s | %d steps ahead %s (%.0f s)'

@@ -183,7 +183,8 @@ def main():
             % (it, ' '.join('%s %d/%d' % (k, sum(v), len(v)) for k, v in sorted(won.items())),
                t1 - t0, time.time() - t1, lp.item(), lv.item(), len(buf.pol_x), len(buf.val_w)))
         save_net(net, os.path.join(a.out, 'net.pt'), it=it)
-        torch.save(dict(state=rel.state_dict(), it=it), os.path.join(a.out, 'relvalue.pt'))
+        torch.save(dict(state=rel.state_dict(), it=it, fusion=rel.fusion),
+                   os.path.join(a.out, 'relvalue.pt'))
 
 
 if __name__ == '__main__':

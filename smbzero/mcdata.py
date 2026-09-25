@@ -90,9 +90,10 @@ def main():
         for _ in range(max(1, a.games // nb)):
             l, st0, acts, T = pool[int(rng.integers(len(pool)))]
             groups.append((l, st0, acts, T, int(rng.integers(0, max(T - 8, 1)))))
-        bstarts, bcaps, prefixes, owner = [], [], [], []
+        bstarts, bcaps, prefixes, owner, root_states = [], [], [], [], []
         for gi, (l, st0, acts, T, t) in enumerate(groups):
             _, root_state = s.replay(st0, acts[:t])
+            root_states.append(root_state)
             for _ in range(nb):
                 k = int(rng.integers(2, a.prefix + 1))
                 pre = (rng.integers(0, 12, k).astype(np.uint8) if rng.random() < 0.5
@@ -113,12 +114,11 @@ def main():
             if bg.won and len(pool) < 200:      # a branch that finished is a line of its own
                 pool.append((l, bstarts[b], np.array(bg.actions, np.uint8), len(bg.actions)))
             if owner[b] not in jroot:
+                rs = root_states[owner[b]]                 # already replayed once, above
                 if t >= 4:                                 # render only the root's last four frames
                     _, before = s.replay(st0, acts[:t - 4])
-                    robs, _, rs = s.replay_obs(before, acts[t - 4:t])
-                    root_stack = robs[-4:]
+                    root_stack = s.replay_obs(before, acts[t - 4:t])[0][-4:]
                 else:
-                    rs = s.replay(st0, acts[:t])[1] if t else st0
                     root_stack = np.repeat(s.obs(rs)[None], 4, 0)
                 jroot[owner[b]] = (len(roots), rs)
                 roots.append(root_stack); rval.append(4.0 * (T - t)); rlvl.append(gp(l))

@@ -61,7 +61,8 @@ class LatentTree:
         self.size = 1
 
     def _select(self):
-        """Walk down by PUCT to an edge with no child. Returns (node, action) or None."""
+        """Walk down by PUCT. Returns (node, action) for an edge to expand, or (None, c) for a
+        child already settled -- visiting it again is what lets PUCT divert to its brothers."""
         x = 0
         while True:
             kids = self.child[x]
@@ -80,7 +81,7 @@ class LatentTree:
             if c < 0:
                 return x, a
             if self.term[c]:
-                return None                                # a settled line: nothing to expand
+                return None, int(c)                        # settled: count the visit, look elsewhere
             x = int(c)
 
     def _backup(self, node):
@@ -96,12 +97,13 @@ class LatentTree:
     def run(self, sims, per_wave=32):
         done = 0
         while done < sims and self.size < self.max_nodes - per_wave:
-            picks = []
+            picks, revisits = [], 0
             for _ in range(min(per_wave, sims - done)):
-                p = self._select()
-                if p is None:
-                    break
-                x, a = p
+                x, a = self._select()
+                if x is None:                  # a settled child: its visit raises the brothers' pull
+                    self._backup(a)
+                    done += 1; revisits += 1
+                    continue
                 c = self.size
                 self.size += 1
                 self.child[x, a] = c
@@ -111,7 +113,9 @@ class LatentTree:
                 self.b[c] = self.w[c] = 0.0
                 picks.append((x, a, c))
             if not picks:
-                break
+                if not revisits:
+                    break
+                continue
             src = torch.tensor([p[0] for p in picks], device=self.dev)
             act = torch.tensor([p[1] for p in picks], device=self.dev)
             dep = torch.tensor([float(self.depth[p[2]]) for p in picks], device=self.dev)
