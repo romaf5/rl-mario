@@ -92,6 +92,10 @@ def main():
                 if g.won:
                     pool.append((lv[g.tag], starts[g.tag], np.array(g.actions, np.uint8), len(g.actions)))
             stats['spine_wins'] = len(pool)
+            print('[mcdata] spines %s -> pool %d (%s) | %.0f s' % (
+                ','.join(sorted(set(lv.tolist()))), len(pool),
+                ','.join('%s=%d' % (k, v) for k, v in sorted(made.items()) if v) or 'no roots yet',
+                time.time() - t0), flush=True)
             if not pool:
                 continue
 
