@@ -109,7 +109,8 @@ class Data:
 
 def sibling_pairs(data, idx, min_gap=8.0, max_pairs=20000, seed=0, same_depth=True):
     """Pairs of leaves of one root whose route values differ by >= min_gap frames: the
-    comparison the search makes. same_depth: siblings of one parent (what PUCT's q ranks);
+    comparison the search makes. same_depth: two nodes of the tree at equal depth -- close to
+    what PUCT's q ranks, though the shards carry no parent id, so they are cousins not brothers;
     otherwise any two leaves of the tree (what the root's b is a minimum over, ranked by
     D = W - 4 depth). Returns (i, j) with the better node first."""
     rng = np.random.default_rng(seed)
