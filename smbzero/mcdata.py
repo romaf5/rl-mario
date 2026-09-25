@@ -45,6 +45,8 @@ def main():
     ap.add_argument('--levels', default=','.join(ROUTE))
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--spine-tries', type=int, default=6, help='attempts per level before giving up on it')
+    ap.add_argument('--spine-sims', type=int, default=0, help='simulations for a spine (0: same as --sims); '
+                    'a winning line is rare and is branched from many times, so it is worth more search')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     s = Search(threads=THREADS)
@@ -82,7 +84,7 @@ def main():
                 tries[l] += 1
             starts = [s.frames(segs[l]['start'], int(rng.integers(0, MAX_DELAY + 1))) for l in lv]
             caps = [int(2.0 * len(segs[l]['opt'])) for l in lv]
-            spines = play_batch(player, starts, caps, a.sims, rng)
+            spines = play_batch(player, starts, caps, a.spine_sims or a.sims, rng)
             stats['spines'] += len(spines)
             for g in spines:
                 if g.won:
