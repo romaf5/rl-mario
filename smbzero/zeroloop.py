@@ -150,9 +150,15 @@ def main():
                     if not ep['forced'][k]:                # a forced move teaches the prior nothing
                         buf.add_policy(ep['frames'][np.clip(np.arange(k - 3, k + 1), 0, None)], ep['policy'][k])
         buf.trim()
-        won = {}
+        won, full = {}, []
         for g in games:
             won.setdefault(g.tag[0], []).append(g.won)
+            if g.tag[0] == 'game':                     # where a whole run actually ended
+                full.append('d%d %s (%d levels)' % (g.tag[1], 'WON %.1fs' % ((g.tag[1] + g.frames()) / 50.007)
+                                                    if g.won else g.reason, len(g.episodes)))
+                os.makedirs(os.path.join(a.out, 'games'), exist_ok=True)
+                np.savez(os.path.join(a.out, 'games', 'it%04d_d%02d%s.npz' % (it, g.tag[1], '_won' if g.won else '')),
+                         start='FullGame', lead_frames=g.tag[1], actions=np.array(g.actions, np.uint8))
         # train the prior on the visits and the value on the search's own backed-up values
         net.train(); rel.train()
         lp = lv = torch.zeros(())
@@ -171,6 +177,8 @@ def main():
                 opt_v.zero_grad(set_to_none=True); lv.backward()
                 torch.nn.utils.clip_grad_norm_(rel.parameters(), 5.0); opt_v.step()
         net.eval(); rel.eval()
+        if full:
+            log('[zero] it %d: full games %s' % (it, '; '.join(full)))
         log('[zero] it %d: %s | play %.0f s, train %.0f s | policy %.3f value %.3f | buffer %d policy / %d value'
             % (it, ' '.join('%s %d/%d' % (k, sum(v), len(v)) for k, v in sorted(won.items())),
                t1 - t0, time.time() - t1, lp.item(), lv.item(), len(buf.pol_x), len(buf.val_w)))
