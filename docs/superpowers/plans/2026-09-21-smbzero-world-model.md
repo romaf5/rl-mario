@@ -289,8 +289,17 @@ both delays, 8-1 dead at 197 / wanders until the PAL timer kills it at 120.4 s, 
 a compressed good end predicts: among twelve candidate moves whose true W all lie within a
 few frames, the model's ordering is noise and the agent random-walks.
 
-Next, and the reason for `wmdata --siblings`: every trajectory in the world-model data gave
-one action per state, so the model was never shown the comparison the search actually makes.
+The reason for `wmdata --siblings` was that every trajectory gave one action per state, so
+the model was never shown the comparison the search makes. **That was the wrong diagnosis.**
+wm6, trained on 8000 sibling trajectories on top of everything else, is worse on both
+measurements: near-sibling agreement on 8-1 falls from 91% to 82% (flip1) and 92% to 88%
+(flip3), and the bounded latent search dies after 84 and 83 decisions where wm5 reached 197.
+The compression at the good end is unchanged -- the route still prices at 4.3 against a true
+0.3, flip1 at 4.8 against 3.7 -- so showing the model several first actions from one state
+does not make it value them apart.
+
+The best stage B configuration is therefore wm5: unroll 12, calibrated, tree bounded to 12.
+The compression stays unexplained, and it is the thing to attack next.
 
 **Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
 against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and
