@@ -242,6 +242,27 @@ each level's labels, which is what an over-weighted death probability would do. 
 better head per level would give 19/32. Where it wins it is also fast: 1-1 in 33.1 s against
 the search's own 31.7 s, 1-2 in 31.7 s against 32.4 s.
 
+**Death charged as a price (`--split --dead-cost 128`): 18/32**, the best teacher-free
+result. Tonight's progression is 9 -> 15 -> 16 -> 18, all of it from how the data is
+collected and how a death enters the score; the labels and the training budget never changed.
+
+| level | mc 9/32 | plain 15/32 | mixture 16/32 | price 18/32 |
+|---|---|---|---|---|
+| 1-1 | 1/4 | 2/4 | 4/4 | 4/4, 34.6-36.7 s |
+| 1-2 | 0/4 | 0/4 | 2/4 | 2/4, 27.8 s (the search: 32.4 s) |
+| 4-1 | 4/4 | 4/4 | 4/4 | 4/4 |
+| 4-2 | 0/4 | 0/4 | 0/4 | 0/4 |
+| 8-1 | 0/4 | 2/4 | 0/4 | 1/4 |
+| 8-2 | 1/4 | 4/4 | 3/4 | 3/4 |
+| 8-3 | 3/4 | 3/4 | 3/4 | 4/4 |
+| 8-4 | 0/4 | 0/4 | 0/4 | 0/4 |
+
+The price recovers most of what the mixture lost in world 8 without giving up world 1, and
+whole-tree ranking rises to 86.7% (8-1 alone from 67% to 80%). What is left is 4-2 and 8-4,
+which no variant has ever won: both need something a random prefix essentially never
+produces -- the hidden vine, the right way through the maze -- so the spine pool never holds
+a line that reaches them, and no amount of branching from the wrong place will make one.
+
 Note for anyone reading the pair metrics: they pointed the wrong way here. The split head
 scores 56.1% on siblings against the plain head's 57.2%, and wins by one level and by a lot
 of seconds. Three times tonight the pair metric mispredicted play. Gate, not pairs.
