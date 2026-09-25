@@ -159,7 +159,7 @@ def main():
                    a.unroll,
                    ' '.join('%s P%.0f/R%.0f' % (e, 100 * prec[-1, i], 100 * rec[-1, i]) for i, e in enumerate(EVENTS)),
                    time.time() - t0))
-            save(model, os.path.join(a.out, 'wm.pt'), hist=hist)
+            save(model, os.path.join(a.out, 'wm.pt'), hist=hist, unroll=a.unroll)
     json.dump(hist, open(os.path.join(a.out, 'hist.json'), 'w'), indent=1)
 
 

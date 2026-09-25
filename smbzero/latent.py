@@ -6,7 +6,9 @@ line has died or finished. The real game is stepped only by the move actually pl
 frames per decision, the same as a person at a controller.
 
 Scores are W, the frames a node has thrown away since the root, so a node's value already
-includes its depth and the backup is a plain minimum over children. Every decision re-encodes
+includes its depth and the backup is a plain minimum over children. The tree is not allowed
+to grow deeper than the model was trained to unroll: at 1000 simulations PUCT drives a line
+31 steps long, and a model honest to 12 steps will happily price a 31-step fantasy as cheap. Every decision re-encodes
 the real screen, so the model never has to stay honest for longer than one lookahead.
 
 A model that is sure a line dies is rare; one that is 30% worried is common. So death is not
@@ -30,9 +32,11 @@ HOPELESS = 512.0
 class LatentTree:
     """One tree, grown in the model. Nodes live in tensors; a wave expands many leaves at once."""
     def __init__(self, model, max_nodes=4096, c_puct=1.5, scale=32.0, fpu=0.5,
-                 dead_p=0.95, goal_p=0.9, death_cost=HOPELESS, calib=None, device='cuda'):
+                 dead_p=0.95, goal_p=0.9, death_cost=HOPELESS, calib=None, max_depth=12,
+                 device='cuda'):
         self.m, self.dev = model, device
         self.calib = calib                    # (K, 3, 2): temperature and bias per depth per head
+        self.max_depth = max_depth            # as far as the model was trained to imagine
         self.max_nodes, self.c_puct, self.scale, self.fpu = max_nodes, c_puct, scale, fpu
         self.dead_p, self.goal_p, self.death_cost = dead_p, goal_p, death_cost
         c = model.g.conv.out_channels
@@ -67,6 +71,8 @@ class LatentTree:
         child already settled -- visiting it again is what lets PUCT divert to its brothers."""
         x = 0
         while True:
+            if self.depth[x] >= self.max_depth:
+                return None, x             # as deep as the model is honest: widen, do not dream
             kids = self.child[x]
             made = kids >= 0
             bstar = self.b[kids[made]].min() if made.any() else 0.0
@@ -144,6 +150,15 @@ class LatentTree:
                 self._backup(c)
                 done += 1
 
+    def pv(self):
+        """How deep the line the search actually believes in goes, and how deep the tree got."""
+        x, d = 0, 0
+        while True:
+            kids = self.child[x][self.child[x] >= 0]
+            if not len(kids):
+                return d, int(self.depth[:self.size].max())
+            x = int(kids[np.argmin(self.b[kids])]); d += 1
+
     def visits(self):
         kids = self.child[0]
         return np.array([self.n[c] if c >= 0 else 0 for c in kids]), \
@@ -156,10 +171,13 @@ def play(search_engine, tree, start, route, sims, max_decisions, per_wave=32):
     state = start
     stack = np.repeat(s.obs(state)[None], 4, 0)
     acts, reason = [], 'too long'
+    pvd, maxd = [], []
     start_level = s.level(state)
     for _ in range(max_decisions):
         tree.reset(stack)
         tree.run(sims, per_wave)
+        p, m = tree.pv()
+        pvd.append(p); maxd.append(m)
         n, b = tree.visits()
         a = int(np.lexsort((np.where(np.isinf(b), 1e9, b), -n))[0]) if n.sum() else 1
         obs, tr, state = s.replay_obs(state, np.array([a], np.uint8))
@@ -169,10 +187,10 @@ def play(search_engine, tree, start, route, sims, max_decisions, per_wave=32):
         if lvl != gp(start_level) or mode == 2:
             k = ROUTE.index(start_level)
             won = mode == 2 if k == len(ROUTE) - 1 else lvl == gp(ROUTE[k + 1])
-            return acts, ('goal' if won else 'dead at %s' % start_level), won
+            return acts, ('goal' if won else 'dead at %s' % start_level), won, (pvd, maxd)
         if tr[-1, 6] in (0x0B, 0x06) or tr[-1, 9] < s.ram(start)[0x75A]:
-            return acts, 'dead at %s' % start_level, False
-    return acts, reason, False
+            return acts, 'dead at %s' % start_level, False, (pvd, maxd)
+    return acts, reason, False, (pvd, maxd)
 
 
 def main():
@@ -184,6 +202,8 @@ def main():
     ap.add_argument('--per-wave', type=int, default=32)
     ap.add_argument('--max-nodes', type=int, default=4096)
     ap.add_argument('--death-cost', type=float, default=HOPELESS, help='frames charged per unit of p(dead)')
+    ap.add_argument('--max-depth', type=int, default=0,
+                    help="deepest node the tree may grow (0: the model's training unroll)")
     ap.add_argument('--raw', action='store_true', help='ignore the checkpoint calibration')
     ap.add_argument('--out')
     a = ap.parse_args()
@@ -194,18 +214,25 @@ def main():
     calib = None if a.raw else ck.get('calib')
     if calib is None and not a.raw:
         print('[latent] no calibration in the checkpoint: run tools.wmcal first', flush=True)
-    tree = LatentTree(model, max_nodes=a.max_nodes, death_cost=a.death_cost, calib=calib)
+    md = a.max_depth or int(ck.get('unroll', 12))
+    print('[latent] tree may grow %d deep (the model was trained to unroll %s)'
+          % (md, ck.get('unroll', 'unknown')), flush=True)
+    tree = LatentTree(model, max_nodes=a.max_nodes, death_cost=a.death_cost, calib=calib,
+                      max_depth=md)
     cap = int(2.5 * len(segs[a.level]['opt']))
     res = []
     for d in [int(x) for x in a.delays.split(',')]:
         t0 = time.time()
         start = s.frames(segs[a.level]['start'], d)
-        acts, reason, won = play(s, tree, start, ROUTE, a.sims, cap, a.per_wave)
+        acts, reason, won, (pvd, maxd) = play(s, tree, start, ROUTE, a.sims, cap, a.per_wave)
         res.append(dict(delay=d, won=won, reason=reason, decisions=len(acts),
                         seconds=round((d + 4 * len(acts)) / FPS, 1), wall=round(time.time() - t0)))
-        print('[latent] %s d=%02d %s: %d decisions, %.1f s game time, %.0f ms per decision'
+        res[-1].update(pv=round(float(np.mean(pvd)), 1), max_depth=int(np.max(maxd)) if maxd else 0)
+        print('[latent] %s d=%02d %s: %d decisions, %.1f s game time, %.0f ms per decision, '
+              'believed line %.1f deep (tree reaches %d)'
               % (a.level, d, 'WON' if won else reason, len(acts), res[-1]['seconds'],
-                 1000 * (time.time() - t0) / max(len(acts), 1)), flush=True)
+                 1000 * (time.time() - t0) / max(len(acts), 1), res[-1]['pv'],
+                 res[-1]['max_depth']), flush=True)
     print('[latent] %s: won %d/%d, the game stepped only by the moves played'
           % (a.level, sum(r['won'] for r in res), len(res)))
     if a.out:

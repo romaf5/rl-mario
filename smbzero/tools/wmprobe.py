@@ -19,10 +19,17 @@ import torch
 from ..common import MAX_DELAY, ROUTE, THREADS, Search, e2e_segments
 from ..model import load as load_model
 
-LINES = ('route', 'random', 'sticky')
+LINES = ('route', 'random', 'sticky', 'flip1', 'flip3')
 
 
 def line(kind, opt, t, K, rng):
+    if kind.startswith('flip'):
+        # The route with one or three actions replaced: near-siblings, which is what the
+        # search really compares. Telling a good line from noise is the easy question.
+        acts = line('route', opt, t, K, rng)
+        for i in rng.choice(K, int(kind[4:]), replace=False):
+            acts[i] = rng.integers(0, 12)
+        return acts
     if kind == 'route':
         acts = np.array(opt[t:t + K], np.uint8).copy()
         if len(acts) < K:
@@ -70,7 +77,7 @@ def main():
     print('  %-8s %9s %9s' % ('line', 'W said', 'W true'))
     for kind in LINES:
         print('  %-8s %9.1f %9.1f' % (kind, np.mean(pred[kind]), np.mean(true[kind])))
-    for other in ('random', 'sticky'):
+    for other in ('random', 'sticky', 'flip1', 'flip3'):
         pw = np.array(pred['route']) < np.array(pred[other])
         tw = np.array(true['route']) < np.array(true[other])
         both = tw.sum()
