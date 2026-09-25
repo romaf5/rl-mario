@@ -7,6 +7,10 @@ delay, or a random point along the route -- and is played by one of:
   sticky   a random action held for a few decisions (how a body moves)
   random   independent random actions (deaths, walls, the game's ugly corners)
   agent    the agent's own MCTS play -- the states a search inside the model will really see
+
+With --siblings N, a start is emitted N times with a different first action each, the rest
+played the same way. The search always compares several actions from one state, and nothing
+else in this data ever shows the model that comparison.
 It stops when the segment ends (the search's own rule), so the last step carries the event.
 
   venv_retro/bin/python -m smbzero.wmdata --trajectories 6000
@@ -78,6 +82,8 @@ def main():
     ap.add_argument('--agent-relvalue', help="learned value for the 'agent' mode")
     ap.add_argument('--agent-sims', type=int, default=200)
     ap.add_argument('--agent-games', type=int, default=16)
+    ap.add_argument('--siblings', type=int, default=0,
+                    help='emit each start this many times, differing in the first action')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     s = Search(threads=THREADS)
@@ -87,7 +93,7 @@ def main():
         s.set_progress_route(ROUTE, segs[l]['opt'], segs[l]['start'])
     modes = a.modes.split(',')
     rng = np.random.default_rng(a.seed)
-    player, queue = None, []
+    player, queue, sibs = None, [], []
     if 'agent' in modes:
         from .net import RelEvaluator, load as load_net
         from .play import Player
@@ -101,7 +107,9 @@ def main():
     while done < a.trajectories:
         lvl = levels[int(rng.integers(len(levels)))]
         mode = modes[int(rng.integers(len(modes)))]
-        if mode == 'agent':
+        if sibs:
+            start, action = sibs.pop()
+        elif mode == 'agent':
             if not queue:
                 queue = agent_rollouts(s, player, segs, levels, rng, a.length,
                                        a.agent_games, a.agent_sims)
@@ -110,6 +118,12 @@ def main():
             lvl, start, action = queue.pop()
         else:
             start, action = rollout(s, segs[lvl], rng, mode, a.length)
+            if a.siblings > 1:            # the same state, a different first move, N times over
+                sibs = []
+                for b in rng.choice(12, min(a.siblings, 12), replace=False):
+                    alt = action.copy(); alt[0] = b
+                    sibs.append((start, alt))
+                start, action = sibs.pop()
         out, n = s.classify_along(start, ROUTE, action)
         if n <= 1:
             continue
