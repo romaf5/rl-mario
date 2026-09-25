@@ -178,6 +178,32 @@ What the data was missing, in both stages:
   4-2 or 8-4 again, so the value met 6 of 8 levels. It now asks for what is missing, up to
   `--spine-tries` rounds.
 
+**Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
+against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and
+spread in the data, and only two had both:
+
+| level | roots | W p90 | dead% | gate |
+|---|---|---|---|---|
+| 4-1 | 1175 | 108 | 1.7% | 4/4 |
+| 8-3 | 723 | 512 | 10.3% | 3/4 |
+| 8-2 | 582 | 144 | 4.9% | 1/4 |
+| 1-1 | 1172 | 52 | 1.6% | 1/4 |
+| 1-2 | 78 | 512 | 25.2% | 0/4 |
+| 8-1 | 110 | 512 | 37.0% | 0/4 |
+| 4-2, 8-4 | 0 | | | 0/4 |
+
+1-1 is the instructive one: as many roots as 4-1 and still 1/4, because its branches almost
+always recover (52 frames at the 90th percentile against 4-1's 108) so nearly every label
+is the same number and there is nothing to rank -- three of its four runs are "too long",
+the search wandering. Both shortfalls are in how the data was collected, not in dropping
+the teacher: mc2 draws pool lines inversely to the roots their level has given, and triples
+the random reach for a level whose branches recover more than nine times in ten.
+
+Note on what stage C claims: the labels are teacher-free (realised times from the agent
+racing itself), but the agent that generates them plays on relv3, which was trained on
+route labels. That is iteration 0 of expert iteration, not a teacher-free agent -- the loop
+closes when relv_mc2 replaces relv3 and the data is regenerated.
+
 Also recorded: the value's ranking test pairs two nodes of one tree at equal depth, not two
 children of one node -- the shards carry no parent id. Cousins, not brothers; the README
 said the stronger thing and now says this one.
