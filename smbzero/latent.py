@@ -128,7 +128,7 @@ class LatentTree:
             if self.calib is not None:        # a price is only fair if the probability is honest
                 k = np.clip(np.array([self.depth[q[2]] for q in picks]) - 1, 0, len(self.calib) - 1)
                 lg = lg / self.calib[k, :, 0] + self.calib[k, :, 1]
-            p_ev = 1.0 / (1.0 + np.exp(-lg))
+            p_ev = 1.0 / (1.0 + np.exp(-np.clip(lg, -30.0, 30.0)))
             w = w.float().cpu().numpy()
             pri = torch.softmax(pi.float(), 1)
             for i, (x, a, c) in enumerate(picks):
