@@ -83,6 +83,9 @@ def main():
     ap.add_argument('--train-steps', type=int, default=1500)
     ap.add_argument('--batch', type=int, default=256)
     ap.add_argument('--lr', type=float, default=1e-4)
+    ap.add_argument('--train', default='both', choices=('both', 'policy', 'value'),
+                    help="what to train. 'policy' keeps the value fixed: the search's own verdicts "
+                         "come from shallow nodes and make a value trained on them worse, not better")
     ap.add_argument('--play', default='value', choices=('value', 'route'),
                     help="what drives play while training: the learned value, or the search route "
                          "(training-time only -- the value still learns from the search's verdicts)")
@@ -128,6 +131,8 @@ def main():
                 caps.append(int(2.5 * len(segs[l]['opt'])))
 
         def after_decision(f, t, step):                    # the tree is whole: take its verdict
+            if a.train == 'policy':
+                return
             b, dep, vis, st = f.dump(t, a.dump, seed=int(rng.integers(1 << 62)))
             if len(b):
                 root = f.state(t)[2]
@@ -150,18 +155,21 @@ def main():
             won.setdefault(g.tag[0], []).append(g.won)
         # train the prior on the visits and the value on the search's own backed-up values
         net.train(); rel.train()
+        lp = lv = torch.zeros(())
         for _ in range(a.train_steps):
-            x, y = buf.policy_batch(rng, a.batch, 'cuda')
-            with torch.autocast('cuda', dtype=torch.bfloat16):
-                logits, _ = net(x)
-                lp = -(y * F.log_softmax(logits.float(), 1)).sum(1).mean()
-            opt_p.zero_grad(set_to_none=True); lp.backward()
-            torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0); opt_p.step()
-            leaf, root, dep, w = buf.value_batch(rng, a.batch, 'cuda')
-            with torch.autocast('cuda', dtype=torch.bfloat16):
-                lv = F.smooth_l1_loss(rel(leaf, root, dep).float() / 16, w / 16)
-            opt_v.zero_grad(set_to_none=True); lv.backward()
-            torch.nn.utils.clip_grad_norm_(rel.parameters(), 5.0); opt_v.step()
+            if a.train in ('both', 'policy'):
+                x, y = buf.policy_batch(rng, a.batch, 'cuda')
+                with torch.autocast('cuda', dtype=torch.bfloat16):
+                    logits, _ = net(x)
+                    lp = -(y * F.log_softmax(logits.float(), 1)).sum(1).mean()
+                opt_p.zero_grad(set_to_none=True); lp.backward()
+                torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0); opt_p.step()
+            if a.train in ('both', 'value'):
+                leaf, root, dep, w = buf.value_batch(rng, a.batch, 'cuda')
+                with torch.autocast('cuda', dtype=torch.bfloat16):
+                    lv = F.smooth_l1_loss(rel(leaf, root, dep).float() / 16, w / 16)
+                opt_v.zero_grad(set_to_none=True); lv.backward()
+                torch.nn.utils.clip_grad_norm_(rel.parameters(), 5.0); opt_v.step()
         net.eval(); rel.eval()
         log('[zero] it %d: %s | play %.0f s, train %.0f s | policy %.3f value %.3f | buffer %d policy / %d value'
             % (it, ' '.join('%s %d/%d' % (k, sum(v), len(v)) for k, v in sorted(won.items())),
