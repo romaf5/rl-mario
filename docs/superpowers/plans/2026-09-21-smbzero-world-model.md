@@ -203,6 +203,32 @@ depths, so a good deep node loses to a mediocre shallow one; unroll 12-16 is the
 1-1, the level every stage B test has used, is the least discriminating level in the game,
 the same one whose value data had the lowest spread.
 
+**Stage C, second attempt (mc2: 120,754 pairs, 804 roots, 94% of them with true siblings):
+15/32**, against 9/32 from the first run and 26/32 from the route-trained relv3. Same
+labelling, same training budget; only the collection changed.
+
+| level | mc 9/32 | mc2 15/32 | roots | dead% | W p90 |
+|---|---|---|---|---|---|
+| 1-1 | 1/4 | 2/4 | 73 | 2.3% | 164 |
+| 1-2 | 0/4 | 0/4 | 80 | 25.2% | 512 |
+| 4-1 | 4/4 | 4/4 | 145 | 5.6% | 232 |
+| 4-2 | 0/4 | 0/4 | 155 | 11.3% | 512 |
+| 8-1 | 0/4 | 2/4 | 74 | 34.4% | 512 |
+| 8-2 | 1/4 | 4/4 | 138 | 8.8% | 288 |
+| 8-3 | 3/4 | 3/4 | 75 | 14.8% | 512 |
+| 8-4 | 0/4 | 0/4 | 64 | 57.5% | 512 |
+
+Teacher-free labelling therefore reaches about 58% of the teacher's score. The three levels
+that still win nothing -- 1-2, 4-2, 8-4 -- are the branch-heavy ones (warp pipes, the vine,
+the maze), where a random prefix rarely leaves a position the agent can recover from; 4-2
+has 155 roots and wins none of them.
+
+What the pair metrics say, measured against the old absolute head on the same data: whole
+tree 83.0% against 58.4%, true siblings 57.2% against 54.9%. The value separates subtrees
+well and near-identical siblings barely, which is what play needs -- but it is also why
+`relvalue --split` exists: a sixth of the branches die and every one is labelled 512, so the
+few frames between two live lines vanish beside them and the W error never falls below ~130.
+
 **Stage B, the depth bound (wm5: unroll 12, calibrated).** The search's lookahead was
 measured rather than assumed, after two wrong assertions that it was too shallow. At 1000
 simulations the line it believes in is **31 steps long** and the tree reaches 33, against a
