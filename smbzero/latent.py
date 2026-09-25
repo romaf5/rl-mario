@@ -10,9 +10,10 @@ includes its depth and the backup is a plain minimum over children. Every decisi
 the real screen, so the model never has to stay honest for longer than one lookahead.
 
 A model that is sure a line dies is rare; one that is 30% worried is common. So death is not
-a verdict here but a price: a node costs W + p(dead) x 512 frames. A search that treated a
-half-confident model as certain would flinch away from every good line, and this model raises
-two or three false alarms per real death.
+a verdict here but a price: a node costs W + p(dead) x 512 frames. That only works if p is a
+probability and not a mood -- the event heads are trained with a positive weight of up to 50
+and say 0.82 where they are right 0.39 of the time. `tools.wmcal` fits a temperature and bias
+per head per depth, and the price is charged on the calibrated number.
 
   CUDA_VISIBLE_DEVICES=1 venv_retro/bin/python -m smbzero.latent --model smbzero/runs/wm3/wm.pt \
       --level 1-1 --delays 5,20 --sims 600
@@ -29,8 +30,9 @@ HOPELESS = 512.0
 class LatentTree:
     """One tree, grown in the model. Nodes live in tensors; a wave expands many leaves at once."""
     def __init__(self, model, max_nodes=4096, c_puct=1.5, scale=32.0, fpu=0.5,
-                 dead_p=0.95, goal_p=0.9, death_cost=HOPELESS, device='cuda'):
+                 dead_p=0.95, goal_p=0.9, death_cost=HOPELESS, calib=None, device='cuda'):
         self.m, self.dev = model, device
+        self.calib = calib                    # (K, 3, 2): temperature and bias per depth per head
         self.max_nodes, self.c_puct, self.scale, self.fpu = max_nodes, c_puct, scale, fpu
         self.dead_p, self.goal_p, self.death_cost = dead_p, goal_p, death_cost
         c = model.g.conv.out_channels
@@ -122,7 +124,11 @@ class LatentTree:
             with torch.autocast('cuda', dtype=torch.float16):
                 s2, ev, _ = self.m.g(self.lat[src], act)
                 pi, w = self.m.f(s2, self.root_lat.expand(len(picks), -1, -1, -1), dep)
-            p_ev = ev.float().sigmoid().cpu().numpy()
+            lg = ev.float().cpu().numpy()
+            if self.calib is not None:        # a price is only fair if the probability is honest
+                k = np.clip(np.array([self.depth[q[2]] for q in picks]) - 1, 0, len(self.calib) - 1)
+                lg = lg / self.calib[k, :, 0] + self.calib[k, :, 1]
+            p_ev = 1.0 / (1.0 + np.exp(-lg))
             w = w.float().cpu().numpy()
             pri = torch.softmax(pi.float(), 1)
             for i, (x, a, c) in enumerate(picks):
@@ -178,13 +184,17 @@ def main():
     ap.add_argument('--per-wave', type=int, default=32)
     ap.add_argument('--max-nodes', type=int, default=4096)
     ap.add_argument('--death-cost', type=float, default=HOPELESS, help='frames charged per unit of p(dead)')
+    ap.add_argument('--raw', action='store_true', help='ignore the checkpoint calibration')
     ap.add_argument('--out')
     a = ap.parse_args()
     s = Search(threads=THREADS)
     segs = {g['level']: g for g in e2e_segments(s)}
-    model, _ = load_model(a.model)
+    model, ck = load_model(a.model)
     model.eval()
-    tree = LatentTree(model, max_nodes=a.max_nodes, death_cost=a.death_cost)
+    calib = None if a.raw else ck.get('calib')
+    if calib is None:
+        print('[latent] no calibration in the checkpoint: run tools.wmcal first', flush=True)
+    tree = LatentTree(model, max_nodes=a.max_nodes, death_cost=a.death_cost, calib=calib)
     cap = int(2.5 * len(segs[a.level]['opt']))
     res = []
     for d in [int(x) for x in a.delays.split(',')]:
