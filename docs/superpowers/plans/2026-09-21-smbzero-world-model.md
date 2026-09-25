@@ -203,6 +203,25 @@ depths, so a good deep node loses to a mediocre shallow one; unroll 12-16 is the
 1-1, the level every stage B test has used, is the least discriminating level in the game,
 the same one whose value data had the lowest spread.
 
+**Stage B, the depth bound (wm5: unroll 12, calibrated).** The search's lookahead was
+measured rather than assumed, after two wrong assertions that it was too shallow. At 1000
+simulations the line it believes in is **31 steps long** and the tree reaches 33, against a
+model trained to unroll 12 -- and the probe shows W compressed exactly at the good end (8-1,
+12 steps: route priced 4.5 where the truth is 0.3, a bad line 23.1 against a true 25.6). A
+long imagined line therefore looks cheap precisely where the model has no right to an
+opinion. Bounding the tree at the training unroll, on 8-1: dead after 24 decisions unbounded,
+**197 at max-depth 12**, 44 at max-depth 8 -- so the optimum is the horizon itself, and the
+result reproduces exactly.
+
+Across levels at 1000 simulations, bounded to 12 (wm5): 1-1 dead at 84 / wanders, 4-1 wanders
+both delays, 8-1 dead at 197 / wanders until the PAL timer kills it at 120.4 s, 8-2 dead at
+89. Zero clears. The bound makes the search safe without making it purposeful, which is what
+a compressed good end predicts: among twelve candidate moves whose true W all lie within a
+few frames, the model's ordering is noise and the agent random-walks.
+
+Next, and the reason for `wmdata --siblings`: every trajectory in the world-model data gave
+one action per state, so the model was never shown the comparison the search actually makes.
+
 **Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
 against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and
 spread in the data, and only two had both:
