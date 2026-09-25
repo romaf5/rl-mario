@@ -9,6 +9,11 @@ Scores are W, the frames a node has thrown away since the root, so a node's valu
 includes its depth and the backup is a plain minimum over children. Every decision re-encodes
 the real screen, so the model never has to stay honest for longer than one lookahead.
 
+A model that is sure a line dies is rare; one that is 30% worried is common. So death is not
+a verdict here but a price: a node costs W + p(dead) x 512 frames. A search that treated a
+half-confident model as certain would flinch away from every good line, and this model raises
+two or three false alarms per real death.
+
   CUDA_VISIBLE_DEVICES=1 venv_retro/bin/python -m smbzero.latent --model smbzero/runs/wm3/wm.pt \
       --level 1-1 --delays 5,20 --sims 600
 """
@@ -24,10 +29,10 @@ HOPELESS = 512.0
 class LatentTree:
     """One tree, grown in the model. Nodes live in tensors; a wave expands many leaves at once."""
     def __init__(self, model, max_nodes=4096, c_puct=1.5, scale=32.0, fpu=0.5,
-                 dead_p=0.5, goal_p=0.5, device='cuda'):
+                 dead_p=0.95, goal_p=0.9, death_cost=HOPELESS, device='cuda'):
         self.m, self.dev = model, device
         self.max_nodes, self.c_puct, self.scale, self.fpu = max_nodes, c_puct, scale, fpu
-        self.dead_p, self.goal_p = dead_p, goal_p
+        self.dead_p, self.goal_p, self.death_cost = dead_p, goal_p, death_cost
         c = model.g.conv.out_channels
         self.lat = torch.zeros((max_nodes, c, 11, 11), device=device)
         self.prior = torch.zeros((max_nodes, 12), device=device)
@@ -119,12 +124,12 @@ class LatentTree:
             for i, (x, a, c) in enumerate(picks):
                 self.lat[c] = s2[i].float()
                 self.prior[c] = pri[i]
-                if p_ev[i, 1] > self.dead_p:                       # the model says this line dies
+                if p_ev[i, 1] > self.dead_p:                       # certain enough to stop looking
                     self.term[c] = 2; self.w[c] = HOPELESS
                 elif p_ev[i, 0] > self.goal_p:                     # the model says it finished
                     self.term[c] = 1; self.w[c] = 0.0
-                else:
-                    self.w[c] = float(np.clip(w[i], 0.0, HOPELESS))
+                else:                                              # otherwise death is a price
+                    self.w[c] = float(np.clip(w[i], 0.0, HOPELESS) + p_ev[i, 1] * self.death_cost)
                 self.b[c] = self.w[c]
                 self._backup(c)
                 done += 1
@@ -168,13 +173,14 @@ def main():
     ap.add_argument('--sims', type=int, default=600)
     ap.add_argument('--per-wave', type=int, default=32)
     ap.add_argument('--max-nodes', type=int, default=4096)
+    ap.add_argument('--death-cost', type=float, default=HOPELESS, help='frames charged per unit of p(dead)')
     ap.add_argument('--out')
     a = ap.parse_args()
     s = Search(threads=THREADS)
     segs = {g['level']: g for g in e2e_segments(s)}
     model, _ = load_model(a.model)
     model.eval()
-    tree = LatentTree(model, max_nodes=a.max_nodes)
+    tree = LatentTree(model, max_nodes=a.max_nodes, death_cost=a.death_cost)
     cap = int(2.5 * len(segs[a.level]['opt']))
     res = []
     for d in [int(x) for x in a.delays.split(',')]:
