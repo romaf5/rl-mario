@@ -66,14 +66,18 @@ class RelValue(nn.Module):
             return out[:, 0] * 16.0, out[:, 1]
         return out.squeeze(1) * 16.0
 
-    def forward(self, leaf, root, depth):
-        """Always W in frames: split heads are folded into one expected cost."""
-        out = self.head(self.embed(leaf), self.embed(root), depth)
+    def fold(self, out):
+        """Whatever the head returned -> one W in frames. Callers that cache the root's
+        embedding call head() themselves, so the folding cannot live in forward()."""
         if not self.split:
             return out
         w, dead = out
-        p = torch.sigmoid(dead)
-        return (1 - p) * w.clamp(0, HOPELESS) + p * HOPELESS
+        p = torch.sigmoid(dead.float())
+        return (1 - p) * w.float().clamp(0, HOPELESS) + p * HOPELESS
+
+    def forward(self, leaf, root, depth):
+        """Always W in frames: split heads are folded into one expected cost."""
+        return self.fold(self.head(self.embed(leaf), self.embed(root), depth))
 
 
 def load(path, device='cuda'):

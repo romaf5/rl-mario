@@ -90,7 +90,8 @@ class RelEvaluator(Evaluator):
         with torch.autocast('cuda', dtype=torch.float16):
             logits, _ = self.net(x)
             e_root = torch.stack([self.root_e[int(t)] for t in trees])
-            w = self.rel.head(self.rel.embed(x), e_root, torch.from_numpy(depth).to(self.device))
+            w = self.rel.fold(
+                self.rel.head(self.rel.embed(x), e_root, torch.from_numpy(depth).to(self.device)))
         p = torch.softmax(logits.float(), 1)
         return p.cpu().numpy(), w.float().cpu().numpy() - 4.0 * depth
 
