@@ -20,6 +20,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .common import DATA, RUNS, V_SCALE
 from .net import _Stage
+from .wmtrain import h
 
 HOPELESS = 512.0
 
@@ -218,6 +219,8 @@ def main():
     ap.add_argument('--fusion', default='late', choices=('late', 'early'))
     ap.add_argument('--split', action='store_true',
                     help='predict P(dies) and W-if-it-lives separately instead of one number')
+    ap.add_argument('--transform', action='store_true',
+                    help="train W through MuZero's value transform (resolution where W is small)")
     ap.add_argument('--dead-cost', type=float, default=0,
                     help='frames charged per unit of P(dies) when the split head is folded '
                          '(0: the old mixture, which saturates wherever death is common)')
@@ -264,12 +267,17 @@ def main():
                 wa, dead = net.head(net.embed(leaf), net.embed(root), dep)
                 d_t = (w >= HOPELESS).float()
                 alive = 1.0 - d_t
-                lw = (F.smooth_l1_loss(wa.float() / 16, (w / 16).clamp(max=HOPELESS / 16),
-                                       reduction='none') * alive).sum() / alive.sum().clamp(min=1)
+                wt_ = w.clamp(max=HOPELESS)
+                if a.transform:
+                    lw = F.smooth_l1_loss(h(wa.float()), h(wt_), reduction='none')
+                else:
+                    lw = F.smooth_l1_loss(wa.float() / 16, wt_ / 16, reduction='none')
+                lw = (lw * alive).sum() / alive.sum().clamp(min=1)
                 loss = F.binary_cross_entropy_with_logits(dead.float(), d_t) + lw
             else:
                 pred = net(leaf, root, dep)
-                loss = F.smooth_l1_loss(pred.float() / 16, w / 16)
+                loss = (F.smooth_l1_loss(h(pred.float()), h(w)) if a.transform
+                        else F.smooth_l1_loss(pred.float() / 16, w / 16))
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)

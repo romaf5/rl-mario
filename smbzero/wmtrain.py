@@ -19,7 +19,7 @@ class Trajectories:
     def __init__(self, pattern, unroll):
         F_, A, O, Fo, P, starts, lvl = [], [], [], [], [], [], []
         fo = ao = 0
-        for p in sorted(glob.glob(pattern)):
+        for p in sorted(sum((glob.glob(q) for q in pattern.split(',')), [])):
             z = np.load(p)
             F_.append(z['frames']); A.append(z['acts']); O.append(z['outcome']); Fo.append(z['forced'])
             P.append(z['prog'])                      # n + 1 per trajectory: aligned with the frames
@@ -73,8 +73,18 @@ class Trajectories:
                 r.to(device), valid.to(device), w.to(device), wvalid.to(device))
 
 
+def h(x, eps=1e-3):
+    """MuZero's value transform. Every decision the search makes is between lines a few
+    frames apart, and on the raw scale those differences are invisible to the loss: smooth L1
+    on W/16 is quadratic below 16 frames, so pricing a perfect line at 4 instead of 0 costs
+    0.03 while a death-sized error costs 30. The model duly priced the route at 4.3 against a
+    true 0.3 and a one-action slip at 4.8 against 3.7 -- having seen both kinds of target
+    tens of thousands of times. Through h, 0 and 4 frames are 1.2 apart and 512 is 21.6."""
+    return torch.sign(x) * (torch.sqrt(x.abs() + 1) - 1) + eps * x
+
+
 def losses(model, obs, acts, ev, tgt_obs, r, valid, wt, wvalid,
-           w_event=1.0, w_cons=1.0, w_waste=1.0, w_value=1.0):
+           w_event=1.0, w_cons=1.0, w_waste=1.0, w_value=1.0, transform=False):
     lat, evs, rs, _, ws = model.unroll(obs, acts)
     e = torch.stack(evs, 1)                                  # (B, K, 3)
     pos = ev.sum((0, 1)).clamp(min=1)
@@ -84,9 +94,15 @@ def losses(model, obs, acts, ev, tgt_obs, r, valid, wt, wvalid,
     # would be depth-major and pair each latent with another sample's frames.
     lc = consistency(model, torch.stack(lat[1:], 1).flatten(0, 1), tgt_obs)
     pred_r = torch.stack(rs, 1)                              # the frames each step throws away
-    lr = (F.smooth_l1_loss(pred_r.float() / 16, r / 16, reduction='none') * valid).sum() / valid.sum().clamp(min=1)
+    if transform:
+        lr = (F.smooth_l1_loss(h(pred_r.float()), h(r), reduction='none') * valid).sum() / valid.sum().clamp(min=1)
+    else:
+        lr = (F.smooth_l1_loss(pred_r.float() / 16, r / 16, reduction='none') * valid).sum() / valid.sum().clamp(min=1)
     pred_w = torch.stack(ws, 1)                              # W: thrown away since the root
-    lw = (F.smooth_l1_loss(pred_w.float() / 16, wt / 16, reduction='none') * wvalid).sum() / wvalid.sum().clamp(min=1)
+    if transform:
+        lw = (F.smooth_l1_loss(h(pred_w.float()), h(wt), reduction='none') * wvalid).sum() / wvalid.sum().clamp(min=1)
+    else:
+        lw = (F.smooth_l1_loss(pred_w.float() / 16, wt / 16, reduction='none') * wvalid).sum() / wvalid.sum().clamp(min=1)
     with torch.no_grad():
         wmae = ((pred_w.float() - wt).abs() * wvalid).sum() / wvalid.sum().clamp(min=1)
     return (w_event * le + w_cons * lc + w_waste * lr + w_value * lw,
@@ -121,6 +137,8 @@ def main():
     ap.add_argument('--steps', type=int, default=30000)
     ap.add_argument('--batch', type=int, default=64)
     ap.add_argument('--lr', type=float, default=3e-4)
+    ap.add_argument('--transform', action='store_true',
+                    help="train W and the per-step waste through MuZero's value transform")
     ap.add_argument('--out', default=os.path.join(RUNS, 'wm0'))
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -142,7 +160,8 @@ def main():
         model.train()
         obs, acts, ev, tgt, r, valid, wt, wv = data.batch(rng.choice(tr, a.batch), 'cuda')
         with torch.autocast('cuda', dtype=torch.bfloat16):
-            loss, le, lc, rmae = losses(model, obs, acts, ev, tgt, r, valid, wt, wv, w_cons=a.w_cons)
+            loss, le, lc, rmae = losses(model, obs, acts, ev, tgt, r, valid, wt, wv, w_cons=a.w_cons,
+                                        transform=a.transform)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
