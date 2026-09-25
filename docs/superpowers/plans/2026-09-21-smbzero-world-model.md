@@ -178,6 +178,31 @@ What the data was missing, in both stages:
   4-2 or 8-4 again, so the value met 6 of 8 levels. It now asks for what is missing, up to
   `--spine-tries` rounds.
 
+**Stage B, 2026-09-25 (wm4: consistency fixed, agent play in the data, heads calibrated).**
+Consistency 0.86 against wm3's 0.37; W error 2.3 frames; death P24/R93 raw, P76/R45 and a
+Brier of 0.018 once calibrated. The latent search still clears nothing on 1-1 (dies at 151
+decisions where wm2 died at 46, or wanders to the cap).
+
+`tools.wmprobe` asks the model the question the search asks -- unroll from one state along
+the route, along noise, along a held input, and read the W predicted for each. It clears the
+model and indicts the setting:
+
+| probe (route vs random) | truly better | model says so | model right where true |
+|---|---|---|---|
+| 1-1, 6 steps | 19.5% | 67% | 100% |
+| 1-1, 12 steps | 32.8% | 96% | 93% |
+| 1-1, 24 steps | 46.9% | 97% | 93% |
+| 4-1, 12 steps | 64.1% | 98% | 98% |
+| 8-1, 12 steps | 76.6% | 96% | 95% |
+
+Three things follow. The horizon was too short: at 6 steps the route is genuinely better than
+noise only one time in five, and a 300-simulation tree over 12 actions reaches about depth 3.
+The W magnitudes drift past the training unroll -- at depth 24 the model says the route has
+wasted 15.1 frames where the truth is 0.8 -- and the search backs up a plain minimum across
+depths, so a good deep node loses to a mediocre shallow one; unroll 12-16 is the fix. And
+1-1, the level every stage B test has used, is the least discriminating level in the game,
+the same one whose value data had the lowest spread.
+
 **Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
 against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and
 spread in the data, and only two had both:
