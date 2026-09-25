@@ -192,7 +192,7 @@ def main():
     model, ck = load_model(a.model)
     model.eval()
     calib = None if a.raw else ck.get('calib')
-    if calib is None:
+    if calib is None and not a.raw:
         print('[latent] no calibration in the checkpoint: run tools.wmcal first', flush=True)
     tree = LatentTree(model, max_nodes=a.max_nodes, death_cost=a.death_cost, calib=calib)
     cap = int(2.5 * len(segs[a.level]['opt']))
