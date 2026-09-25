@@ -12,7 +12,8 @@ Above: the last 26 seconds at real speed; click for the whole run
 
 | video (real speed, 50 fps, replayed in stable-retro) | |
 |---|---|
-| [**1-1 to the axe**](docs/media/smbzero_win.mp4) | the whole game in **5:37.0** (the search below: 5:26.4); one of its own training games, 2000 simulations per move |
+| [**1-1 to the axe, on a learned value**](docs/media/smbzero_learned_win.mp4) | the whole game in **5:48.4** with **no route at play time**: the net alone says how much time a position has thrown away (2500 simulations per move) |
+| [1-1 to the axe](docs/media/smbzero_win.mp4) | the whole game in **5:37.0** (the search below: 5:26.4), scored by progress along the search's route, 2000 simulations per move |
 | [8-4 to the axe](docs/media/smbzero_8-4.mp4) | its first clear of Bowser's castle (4000 simulations per move) |
 | [1-1 to 8-1](docs/media/smbzero_full_game.mp4) | at the live budget (1000 simulations per move): 1-1 to 4-2 in 143.4 s, then stuck in 8-1 |
 
@@ -28,6 +29,18 @@ last 4 frames (84x84) ─► network ─► prior over the 12 actions
 It learned from the search below (its routes, labels of the states SMBZero itself reached)
 and from the visit counts of its own bigger searches.
 
+**What scores a position.** The search ranks a node against its siblings, so it never needs
+the absolute time left in the level -- which a cropped screen does not show anyway (the old
+value head ranked positions at chance, 49%). The net instead reads *how much time a position
+has thrown away* against perfect play from where the search started, which is on the screen:
+94% of held-out sibling pairs ordered correctly. That was enough to drop the route at play
+time -- 26/32 level clears with it, 26/32 without -- and to win a whole game.
+
+The data that made it work is the part a search never shows you: the leaves it hands out are
+the ones its prior already liked, so only 0.04% of them were badly wasted. Walking into the
+bad states on purpose (random and sticky rollouts, labelled by the route) supplied the other
+half of the problem.
+
 Does the net matter? The same MCTS (1000 simulations per move, 4 start delays per level),
 only the prior changes ([data](docs/smbzero_ablation.json)):
 
@@ -37,11 +50,12 @@ only the prior changes ([data](docs/smbzero_ablation.json)):
 | uniform prior + MCTS | 0/4 | 0/4 | 3/4 | 0/4 | 0/4 | 2/4 | 3/4 | 0/4 | 8/32 |
 | net alone (no search) | 0/4 | 0/4 | 0/4 | 0/4 | 0/4 | 0/4 | 0/4 | 0/4 | 0/32 |
 
-Where it stands: at the live budget it clears 28 of 32 level runs but no full game yet (8-1
-and 8-2 stop it). And two parts still lean on the emulator and the search: the MCTS looks
-ahead by stepping the real game from savestates, and scores its leaves by progress along the
-search's route. Next ([plan](docs/superpowers/plans/2026-09-21-smbzero-world-model.md)): a
-value network, then a learned world model, so that at evaluation the agent touches the game
+Where it stands: at the live budget (1000 simulations) it clears 26 of 32 level runs on the
+learned value, the same as on the search's route; a whole game is won at 2500 simulations
+(one start delay of six -- the rest stop at 8-1, 1-2, 8-3 or 8-4). What still leans on the
+emulator is the lookahead itself: the search steps the real game from savestates and asks it
+whether a line dies. Next ([plan](docs/superpowers/plans/2026-09-21-smbzero-world-model.md)):
+a learned world model to unroll instead, so that at evaluation the agent touches the game
 only by playing it; then no teacher at all.
 
 ## The teacher: the whole game by search
