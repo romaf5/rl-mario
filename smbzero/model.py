@@ -22,12 +22,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .net import _Res, _Stage
 
-LATENT_C = 32          # latent: LATENT_C x 11 x 11 (the IMPALA trunk's grid)
+LATENT_C = 48          # latent: LATENT_C x 11 x 11 (the IMPALA trunk's grid)
 N_ACTIONS = 12
 
 
 class Representation(nn.Module):
-    def __init__(self, channels=(16, 32, LATENT_C), stack=4):
+    def __init__(self, channels=None, stack=4):
+        channels = channels or (32, 48, LATENT_C)
         super().__init__()
         stages, cin = [], stack
         for c in channels:
@@ -94,12 +95,13 @@ class Projector(nn.Module):
 
 
 class WorldModel(nn.Module):
-    def __init__(self):
+    def __init__(self, latent=LATENT_C):
         super().__init__()
-        self.h = Representation()
-        self.g = Dynamics()
-        self.f = Prediction()
-        self.proj = Projector()
+        chans = (32, 48, latent) if latent >= 48 else (16, 32, latent)
+        self.h = Representation(chans)
+        self.g = Dynamics(latent)
+        self.f = Prediction(latent)
+        self.proj = Projector(latent)
 
     def initial(self, obs):
         s = self.h(obs)
@@ -145,6 +147,7 @@ def save(model, path, **meta):
 
 def load(path, device='cuda'):
     ck = torch.load(path, map_location=device, weights_only=False)
-    m = WorldModel()
+    latent = ck['state']['g.conv.weight'].shape[0]      # read the size the checkpoint was trained at
+    m = WorldModel(latent)
     m.load_state_dict(ck['state'])
     return m.to(device), ck

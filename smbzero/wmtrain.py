@@ -114,7 +114,8 @@ def gate(model, data, rows, device='cuda', batch=256):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--data', default=os.path.join(DATA, 'world', '*.npz'))
-    ap.add_argument('--unroll', type=int, default=10)
+    ap.add_argument('--unroll', type=int, default=6, help='MuZero trains 5; the gate still unrolls further')
+    ap.add_argument('--w-cons', type=float, default=2.0, help='weight on keeping the unrolled latent real')
     ap.add_argument('--steps', type=int, default=30000)
     ap.add_argument('--batch', type=int, default=64)
     ap.add_argument('--lr', type=float, default=3e-4)
@@ -139,7 +140,7 @@ def main():
         model.train()
         obs, acts, ev, tgt, r, valid, wt, wv = data.batch(rng.choice(tr, a.batch), 'cuda')
         with torch.autocast('cuda', dtype=torch.bfloat16):
-            loss, le, lc, rmae = losses(model, obs, acts, ev, tgt, r, valid, wt, wv)
+            loss, le, lc, rmae = losses(model, obs, acts, ev, tgt, r, valid, wt, wv, w_cons=a.w_cons)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
