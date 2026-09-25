@@ -147,6 +147,41 @@ frames and 50 minutes is tiny for a MuZero-style model), trajectories that conta
 catastrophic steps (random play rarely commits the interesting mistakes), a bigger latent,
 and a consistency term strong enough to keep the unroll on the rails.
 
+### Stage B and C, 2026-09-25: two bugs, and what the data was missing
+
+Two defects found in review, both of which we had been reading as limits of the approach:
+
+- **The consistency loss compared unrelated samples.** `unroll` returns K latents of shape
+  (B, ...); they were joined with `cat(dim=0)` (depth-major) while the target frames are
+  built batch-major, so at batch 64 / unroll 6 almost every predicted latent was matched to
+  a different sample's frames. Weight 2.0 on a random target -- this is the consistency of
+  0.22 we recorded three times and could not explain. Fixed with `stack(dim=1)`; wm3 was
+  discarded mid-run because it had trained against it.
+- **The latent search ended its run on a settled line.** `_select` returned `None` when the
+  best line under PUCT was already terminal, the wave broke, and an empty wave ended the
+  search. A settled child now takes its visit, which is what lets PUCT turn to its brothers.
+  Measured after the fix: the 1-1 outcome is unchanged (dies at 43 / 46 decisions for death
+  cost 0 / 128), so the failure is the model, not the bookkeeping -- but the death-cost
+  sweep that came before the fix was not evidence of anything.
+
+What the data was missing, in both stages:
+
+- **The world model had never seen the agent play.** Its trajectories were the route, a held
+  input, or noise; a search inside the model only ever visits states the agent's own play
+  reaches. `wmdata --modes ...,agent` plays with the net and the learned value.
+- **The teacher-free value had no siblings.** `mcdata --branches` was declared and never
+  used, so all 120k pairs had one branch per root. A winning branch's W is constant along
+  its whole line, so with one branch per root the only learnable signal is alive-vs-dead:
+  the ranking metric read 99.6% and the per-level gate collapsed (1-1 1/4, 1-2 0/4, against
+  relv3's 4/4 and 4/4). Branches now fan out from a shared root.
+- **Two levels were absent.** The spine pool filled with the easy levels and never attempted
+  4-2 or 8-4 again, so the value met 6 of 8 levels. It now asks for what is missing, up to
+  `--spine-tries` rounds.
+
+Also recorded: the value's ranking test pairs two nodes of one tree at equal depth, not two
+children of one node -- the shards carry no parent id. Cousins, not brothers; the README
+said the stronger thing and now says this one.
+
 ## Stage C: no teacher at all (full MuZero loop)
 
 The teacher (the C++ search) does not extend to other games: it needs savestates (Go-Explore

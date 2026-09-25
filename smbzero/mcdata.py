@@ -44,6 +44,7 @@ def main():
     ap.add_argument('--shard', type=int, default=8192)
     ap.add_argument('--levels', default=','.join(ROUTE))
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--spine-tries', type=int, default=6, help='attempts per level before giving up on it')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     s = Search(threads=THREADS)
@@ -69,9 +70,16 @@ def main():
         roots, leaves, ridx, depth, dval, rval, rlvl = [], [], [], [], [], [], []
 
     pool = []          # winning lines: (level, start, actions, T). A line is expensive to earn,
-    while total < a.pairs:                          # so it is kept and branched from many times
-        if len(pool) < a.games:
-            lv = rng.choice(levels, a.games)
+    tries = {l: 0 for l in levels}                  # so it is kept and branched from many times
+    while total < a.pairs:
+        # A pool that fills with the easy levels never tries the hard ones again, and the
+        # value then goes into the gate never having seen them. Ask for what is missing.
+        have = {q[0] for q in pool}
+        want = [l for l in levels if l not in have and tries[l] < a.spine_tries]
+        if len(pool) < a.games or want:
+            lv = rng.choice(want if want else levels, a.games)
+            for l in set(lv.tolist()):            # one round, not one game, per attempt
+                tries[l] += 1
             starts = [s.frames(segs[l]['start'], int(rng.integers(0, MAX_DELAY + 1))) for l in lv]
             caps = [int(2.0 * len(segs[l]['opt'])) for l in lv]
             spines = play_batch(player, starts, caps, a.sims, rng)
