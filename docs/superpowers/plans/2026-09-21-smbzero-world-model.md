@@ -95,6 +95,18 @@ Playing with no route at all (1000 simulations, 4 start delays per level):
 | learned, search leaves only | 4/4 | 2/4 | 4/4 | 3/4 | 0/4 | 3/4 | 4/4 | 0/4 | 20/32 |
 | learned, + rollout traps | 4/4 | 4/4 | 4/4 | 2/4 | 1/4 | 3/4 | 4/4 | 0/4 | 22/32 |
 
+Adding 120k more rollout pairs on the levels that were behind (8-4, 4-2, 8-1) closed the gap:
+the pair test reached 93.6% with no level below 84% (8-4 went 80% -> 95%), and play reached
+
+| | 1-1 | 1-2 | 4-1 | 4-2 | 8-1 | 8-2 | 8-3 | 8-4 | total |
+|---|---|---|---|---|---|---|---|---|---|
+| learned value, targeted traps | 4/4 | 4/4 | 4/4 | 4/4 | 1/4 | 4/4 | 4/4 | 1/4 | **26/32** |
+
+which is what the route value scores on the same net. **Stage A is passed**: the search plays
+as well on a value read off the screen as on progress along a route it was handed, so the
+route is no longer needed at play time. It is still used to label training data (valroll),
+which stage C removes.
+
 Two things did not work and are worth not repeating:
 - Early fusion (root and leaf as 8 channels through one trunk) is worse than late fusion
   with the embeddings' difference: 74% against 84%.
