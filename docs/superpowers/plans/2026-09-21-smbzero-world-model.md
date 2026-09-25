@@ -223,6 +223,29 @@ that still win nothing -- 1-2, 4-2, 8-4 -- are the branch-heavy ones (warp pipes
 the maze), where a random prefix rarely leaves a position the agent can recover from; 4-2
 has 155 roots and wins none of them.
 
+**The split head (`relvalue --split`): 16/32**, the best teacher-free result so far, and the
+two heads are complementary rather than one dominating:
+
+| level | mc 9/32 | mc2 plain 15/32 | mc2 split 16/32 | dead% in the data |
+|---|---|---|---|---|
+| 1-1 | 1/4 | 2/4 | **4/4** | 2.3% |
+| 1-2 | 0/4 | 0/4 | **2/4** | 25.2% |
+| 4-1 | 4/4 | 4/4 | 4/4 | 5.6% |
+| 4-2 | 0/4 | 0/4 | 0/4 | 11.3% |
+| 8-1 | 0/4 | **2/4** | 0/4 | 34.4% |
+| 8-2 | 1/4 | **4/4** | 3/4 | 8.8% |
+| 8-3 | 3/4 | 3/4 | 3/4 | 14.8% |
+| 8-4 | 0/4 | 0/4 | 0/4 | 57.5% |
+
+The split head takes world 1 and loses world 8, in the order of how much death there is in
+each level's labels, which is what an over-weighted death probability would do. Picking the
+better head per level would give 19/32. Where it wins it is also fast: 1-1 in 33.1 s against
+the search's own 31.7 s, 1-2 in 31.7 s against 32.4 s.
+
+Note for anyone reading the pair metrics: they pointed the wrong way here. The split head
+scores 56.1% on siblings against the plain head's 57.2%, and wins by one level and by a lot
+of seconds. Three times tonight the pair metric mispredicted play. Gate, not pairs.
+
 What the pair metrics say, measured against the old absolute head on the same data: whole
 tree 83.0% against 58.4%, true siblings 57.2% against 54.9%. The value separates subtrees
 well and near-identical siblings barely, which is what play needs -- but it is also why
