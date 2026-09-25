@@ -138,7 +138,8 @@ def sibling_pairs(data, idx, min_gap=8.0, max_pairs=20000, seed=0, same_depth=Tr
 @torch.no_grad()
 def pair_score(pred_fn, data, pairs, device='cuda', batch=2048):
     """Share of pairs the predictor orders like the route. pred_fn(idx) -> value per sample."""
-    good = np.zeros(len(pairs), bool)
+    if not len(pairs):
+        return np.zeros(0, bool), np.zeros((0, 2), np.float32)
     flat = pairs.reshape(-1)
     vals = np.concatenate([pred_fn(flat[i:i + batch]) for i in range(0, len(flat), batch)])
     vals = vals.reshape(-1, 2)
@@ -165,12 +166,14 @@ def abs_pred(net, data, device='cuda'):
 
 
 def report(name, good, level, pairs, log):
+    if not len(good):
+        return
     per = []
     lv = level[pairs[:, 0]]
     for g in sorted(set(lv.tolist())):
         m = lv == g
         per.append('%d-%d %.0f%%' % (g // 4 + 1, g % 4 + 1, 100 * good[m].mean()))
-    log('[relvalue] %-22s %.1f%% of %d sibling pairs   %s' % (name, 100 * good.mean(), len(good), ' '.join(per)))
+    log('[relvalue] %-22s %.1f%% of %d pairs   %s' % (name, 100 * good.mean(), len(good), ' '.join(per)))
 
 
 def main():
@@ -197,6 +200,9 @@ def main():
         'W: median %.0f, 90pct %.0f frames' % (len(data), len(data.roots), len(tr), len(va), len(pairs),
                                                len(tree_pairs), np.median(data.w.numpy()),
                                                np.percentile(data.w.numpy(), 90)))
+    gate, gate_name = (pairs, 'sibling') if len(pairs) else (tree_pairs, 'whole-tree')
+    if not len(pairs):
+        log('[relvalue] no same-depth siblings in this data: ranking on %d whole-tree pairs' % len(tree_pairs))
     if a.baseline and os.path.exists(a.baseline):
         from .net import load as load_net
         bnet, _ = load_net(a.baseline)
@@ -224,15 +230,19 @@ def main():
         opt.step()
         if step % 1000 == 0 or step == a.steps:
             net.eval()
-            good, _ = pair_score(rel_pred(net, data), data, pairs)
+            fg = rel_pred(net, data)
+            if gate_name == 'whole-tree':
+                base, dep_all = fg, data.depth.numpy()
+                fg = lambda idx: base(idx) - 4.0 * dep_all[idx]
+            good, _ = pair_score(fg, data, gate)
             vi = torch.from_numpy(rng.choice(va, 4096))
             with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16):
                 l2, r2, d2, w2 = data.batch(vi, 'cuda')
                 mae = (net(l2, r2, d2).float() - w2).abs().mean().item()
             hist.append(dict(step=step, loss=loss.item(), pair=float(good.mean()), mae_frames=mae,
                              s=round(time.time() - t0)))
-            log('[relvalue] step %5d loss %.4f  pairs %.1f%%  W error %.1f frames  (%.0f s)'
-                % (step, loss.item(), 100 * good.mean(), mae, time.time() - t0))
+            log('[relvalue] step %5d loss %.4f  %s pairs %.1f%%  W error %.1f frames  (%.0f s)'
+                % (step, loss.item(), gate_name, 100 * good.mean(), mae, time.time() - t0))
     f = rel_pred(net, data)
     report('relative value (new)', pair_score(f, data, pairs)[0], data.level, pairs, log)
     fd = lambda idx: f(idx) - 4.0 * data.depth.numpy()[idx]        # D = W - 4 depth

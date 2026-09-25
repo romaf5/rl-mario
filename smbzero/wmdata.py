@@ -6,6 +6,7 @@ delay, or a random point along the route -- and is played by one of:
   route    the search's own actions from that point, with a few random ones mixed in
   sticky   a random action held for a few decisions (how a body moves)
   random   independent random actions (deaths, walls, the game's ugly corners)
+  agent    the agent's own MCTS play -- the states a search inside the model will really see
 It stops when the segment ends (the search's own rule), so the last step carries the event.
 
   venv_retro/bin/python -m smbzero.wmdata --trajectories 6000
@@ -41,6 +42,29 @@ def rollout(s, seg, rng, mode, length):
     return start, acts
 
 
+def start_state(s, seg, rng):
+    """Where a trajectory begins: a level's entry after a start delay, or a point along it."""
+    opt = seg['opt']
+    if rng.random() < 0.35:
+        return s.frames(seg['start'], int(rng.integers(0, MAX_DELAY + 1)))
+    return s.replay(seg['start'], opt[:int(rng.integers(0, max(len(opt) - 8, 1)))])[1]
+
+
+def agent_rollouts(s, player, segs, levels, rng, length, n, sims):
+    """A batch of trajectories played by the agent itself. Its own play is the only
+    distribution that matters for a search that will run inside the model."""
+    from .play import Game
+    lv = [levels[int(rng.integers(len(levels)))] for _ in range(n)]
+    starts = [start_state(s, segs[l], rng) for l in lv]
+    games = [Game(st, tag=i) for i, st in enumerate(starts)]
+    player.play(games, sims=sims, segment_limit=1, rng=rng, max_decisions=[length] * n)
+    out = []
+    for g in games:
+        if len(g.actions):
+            out.append((lv[g.tag], starts[g.tag], np.array(g.actions, np.uint8)))
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--out', default=os.path.join(DATA, 'world'))
@@ -50,6 +74,10 @@ def main():
     ap.add_argument('--modes', default='route,route,sticky,random')
     ap.add_argument('--levels', default=','.join(ROUTE))
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--agent-net', help="net for the 'agent' mode")
+    ap.add_argument('--agent-relvalue', help="learned value for the 'agent' mode")
+    ap.add_argument('--agent-sims', type=int, default=200)
+    ap.add_argument('--agent-games', type=int, default=16)
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     s = Search(threads=THREADS)
@@ -59,12 +87,29 @@ def main():
         s.set_progress_route(ROUTE, segs[l]['opt'], segs[l]['start'])
     modes = a.modes.split(',')
     rng = np.random.default_rng(a.seed)
+    player, queue = None, []
+    if 'agent' in modes:
+        from .net import RelEvaluator, load as load_net
+        from .play import Player
+        from .relvalue import load as load_rel
+        net, _ = load_net(a.agent_net)
+        rel, _ = load_rel(a.agent_relvalue)
+        player = Player(s, RelEvaluator(net, rel, a.agent_games * 48), a.agent_games,
+                        per_tree=48, value_mix=1.0, min_backup=True, relative=True)
     t0, done, files = time.time(), 0, 0
     frames, acts, outcome, forced, prog, offs, foffs, meta = [], [], [], [], [], [0], [0], []
     while done < a.trajectories:
         lvl = levels[int(rng.integers(len(levels)))]
         mode = modes[int(rng.integers(len(modes)))]
-        start, action = rollout(s, segs[lvl], rng, mode, a.length)
+        if mode == 'agent':
+            if not queue:
+                queue = agent_rollouts(s, player, segs, levels, rng, a.length,
+                                       a.agent_games, a.agent_sims)
+                if not queue:
+                    continue
+            lvl, start, action = queue.pop()
+        else:
+            start, action = rollout(s, segs[lvl], rng, mode, a.length)
         out, n = s.classify_along(start, ROUTE, action)
         if n <= 1:
             continue

@@ -38,7 +38,7 @@ def main():
     ap.add_argument('--games', type=int, default=16)
     ap.add_argument('--sims', type=int, default=300)
     ap.add_argument('--per-tree', type=int, default=48)
-    ap.add_argument('--branches', type=int, default=2, help='branches per winning spine')
+    ap.add_argument('--branches', type=int, default=4, help='branches per root (siblings)')
     ap.add_argument('--prefix', type=int, default=24, help='longest random prefix of a branch')
     ap.add_argument('--depth', type=int, default=60, help='deepest pair taken from a branch')
     ap.add_argument('--shard', type=int, default=8192)
@@ -83,44 +83,51 @@ def main():
             if not pool:
                 continue
 
-        picks = []
-        for _ in range(a.games):
+        # Several branches from ONE root: leaves of equal depth are then true siblings, the
+        # comparison the search actually makes when PUCT ranks a node against its brothers.
+        nb = max(a.branches, 1)
+        groups = []
+        for _ in range(max(1, a.games // nb)):
             l, st0, acts, T = pool[int(rng.integers(len(pool)))]
-            picks.append((l, st0, acts, T, int(rng.integers(0, max(T - 8, 1)))))
-        bstarts, bcaps, prefixes = [], [], []
-        for l, st0, acts, T, t in picks:
+            groups.append((l, st0, acts, T, int(rng.integers(0, max(T - 8, 1)))))
+        bstarts, bcaps, prefixes, owner = [], [], [], []
+        for gi, (l, st0, acts, T, t) in enumerate(groups):
             _, root_state = s.replay(st0, acts[:t])
-            k = int(rng.integers(2, a.prefix + 1))
-            pre = (rng.integers(0, 12, k).astype(np.uint8) if rng.random() < 0.5
-                   else np.full(k, rng.integers(0, 12), np.uint8))       # a held input, or anything
-            out, n = s.classify_along(root_state, ROUTE, pre)
-            pre = pre[:n - 1] if n and out[n - 1] else pre[:n]
-            prefixes.append(pre)
-            _, after = s.replay(root_state, pre)
-            bstarts.append(after)
-            bcaps.append(int(2.0 * len(segs[l]['opt'])))
+            for _ in range(nb):
+                k = int(rng.integers(2, a.prefix + 1))
+                pre = (rng.integers(0, 12, k).astype(np.uint8) if rng.random() < 0.5
+                       else np.full(k, rng.integers(0, 12), np.uint8))   # a held input, or anything
+                out, n = s.classify_along(root_state, ROUTE, pre)
+                pre = pre[:n - 1] if n and out[n - 1] else pre[:n]
+                prefixes.append(pre)
+                _, after = s.replay(root_state, pre)
+                bstarts.append(after); bcaps.append(int(2.0 * len(segs[l]['opt']))); owner.append(gi)
         branches = play_batch(player, bstarts, bcaps, a.sims, rng) if bstarts else []
         stats['branches'] += len(branches)
 
-        for (l, st0, acts, T, t), pre, bg in zip(picks, prefixes, branches):
+        jroot = {}                       # one stored root per group, shared by all its branches
+        for bg in branches:
+            b = bg.tag
+            l, st0, acts, T, t = groups[owner[b]]
             stats['branch_wins'] += bool(bg.won)
-            if bg.won and len(pool) < 200:          # a branch that finished is a line of its own
-                pool.append((l, bstarts[bg.tag], np.array(bg.actions, np.uint8), len(bg.actions)))
-            # the root's own four frames, and the agent's realised time from it
-            if t >= 4:                                     # render only the root's last four frames
-                _, before = s.replay(st0, acts[:t - 4])
-                robs, _, root_state = s.replay_obs(before, acts[t - 4:t])
-                root_stack = robs[-4:]
-            else:
-                root_state = s.replay(st0, acts[:t])[1] if t else st0
-                root_stack = np.repeat(s.obs(root_state)[None], 4, 0)
+            if bg.won and len(pool) < 200:      # a branch that finished is a line of its own
+                pool.append((l, bstarts[b], np.array(bg.actions, np.uint8), len(bg.actions)))
+            if owner[b] not in jroot:
+                if t >= 4:                                 # render only the root's last four frames
+                    _, before = s.replay(st0, acts[:t - 4])
+                    robs, _, rs = s.replay_obs(before, acts[t - 4:t])
+                    root_stack = robs[-4:]
+                else:
+                    rs = s.replay(st0, acts[:t])[1] if t else st0
+                    root_stack = np.repeat(s.obs(rs)[None], 4, 0)
+                jroot[owner[b]] = (len(roots), rs)
+                roots.append(root_stack); rval.append(4.0 * (T - t)); rlvl.append(gp(l))
+            j, root_state = jroot[owner[b]]
             r_root = 4.0 * (T - t)
-            branch_acts = np.concatenate([pre, np.array(bg.actions, np.uint8)])
+            branch_acts = np.concatenate([prefixes[b], np.array(bg.actions, np.uint8)])
             obs, _, _ = s.replay_obs(root_state, branch_acts[:a.depth])
-            frames = np.concatenate([root_stack, obs])
+            frames = np.concatenate([roots[j], obs])
             Tb = len(branch_acts)
-            j = len(roots)
-            roots.append(root_stack); rval.append(r_root); rlvl.append(gp(l))
             for d in range(1, min(a.depth, len(branch_acts)) + 1):
                 r_leaf = 4.0 * (Tb - d) if bg.won else HOPELESS + r_root
                 leaves.append(frames[d:d + 4])                 # the stack ending at that step
