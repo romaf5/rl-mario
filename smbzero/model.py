@@ -3,13 +3,14 @@
     h(4 frames)          -> latent s0                                  (representation)
     g(s, action)         -> s', the step's waste r, and the events that end a segment or a
                             line: goal, dead, forced (the input does nothing now)  (dynamics)
-    f(s)                 -> prior over the 12 actions, and the waste still to come V (prediction)
+    f(s, s0, depth)      -> prior over the 12 actions, and W, the frames this node has thrown
+                            away against the best play known from the root       (prediction)
 
-Waste, not time to go: r is how many frames this step threw away against perfect play
-(0 on a perfect line, large when the step commits Mario to a pit), and V is how much more
-the position will throw away. A line is scored by the waste it accumulates, sum r + V, which
-is what PUCT already compares -- and unlike "frames to the end of the level", both are local
-quantities a screen actually shows.
+W is the quantity the pixel value already predicts well, and it is what PUCT compares. It
+cannot be read from an unrolled latent alone: the consistency loss pins that latent to what
+the frames show, and "how far from the root" is not in them -- so the head sees the root's
+latent as well, the way the pixel value sees the root's frames. r, the waste of a single
+step, is kept as an auxiliary output of the dynamics.
 
 Trained on the agent's own trajectories (frames, actions, events): the latent of an unrolled
 step must match the latent of the frames the game really produced (EfficientZero's
@@ -65,12 +66,15 @@ class Prediction(nn.Module):
         super().__init__()
         self.fc = nn.Linear(c * 11 * 11, hidden)
         self.pi = nn.Linear(hidden, N_ACTIONS)
-        self.w = nn.Linear(hidden, 1)
+        self.w1 = nn.Linear(3 * hidden + 2, hidden)
+        self.w2 = nn.Linear(hidden, 1)
 
-    def forward(self, s):
-        """s -> (policy logits, V: the frames this position will still waste, >= 0)"""
-        h = F.relu(self.fc(s.flatten(1)))
-        return self.pi(h), F.softplus(self.w(h).squeeze(1)) * 16.0
+    def forward(self, s, s0, depth):
+        """(latent, the root's latent, depth) -> (policy logits, W in frames)"""
+        e, e0 = F.relu(self.fc(s.flatten(1))), F.relu(self.fc(s0.flatten(1)))
+        d = depth.float().unsqueeze(1) if depth.dim() == 1 else depth.float()
+        z = torch.cat([e, e0, e - e0, d / 32, (d / 32) ** 2], 1)
+        return self.pi(e), self.w2(F.relu(self.w1(z))).squeeze(1) * 16.0
 
 
 class Projector(nn.Module):
@@ -99,26 +103,28 @@ class WorldModel(nn.Module):
 
     def initial(self, obs):
         s = self.h(obs)
-        pi, w = self.f(s)
+        zero = torch.zeros(len(obs), device=obs.device)
+        pi, w = self.f(s, s, zero)
         return s, pi, w
 
-    def step(self, s, a):
+    def step(self, s, s0, a, depth):
         s2, ev, r = self.g(s, a)
-        pi, v = self.f(s2)
-        return s2, ev, r, pi, v
+        pi, w = self.f(s2, s0, depth)
+        return s2, ev, r, pi, w
 
     def unroll(self, obs, actions):
-        """obs (B,4,84,84), actions (B,K) -> latents, event logits, step waste, policy logits, V."""
-        s = self.h(obs)
-        lat, evs, rs, pis, vs = [s], [], [], [], []
-        pi, v = self.f(s)
-        pis.append(pi); vs.append(v)
+        """obs (B,4,84,84), actions (B,K) -> latents, event logits, step waste, policy logits, W."""
+        s = s0 = self.h(obs)
+        lat, evs, rs, pis, ws = [s], [], [], [], []
+        zero = torch.zeros(len(obs), device=obs.device)
+        pi, w = self.f(s, s0, zero)
+        pis.append(pi); ws.append(w)
         for k in range(actions.shape[1]):
             s, ev, r = self.g(s, actions[:, k])
             s = scale_grad(s, 0.5)                      # MuZero: halve the gradient along the unroll
-            pi, v = self.f(s)
-            lat.append(s); evs.append(ev); rs.append(r); pis.append(pi); vs.append(v)
-        return lat, evs, rs, pis, vs
+            pi, w = self.f(s, s0, zero + (k + 1))
+            lat.append(s); evs.append(ev); rs.append(r); pis.append(pi); ws.append(w)
+        return lat, evs, rs, pis, ws
 
 
 def scale_grad(x, k):

@@ -62,14 +62,20 @@ class Trajectories:
         nxt = np.minimum(fi[:, None] + np.arange(1, K + 1)[None], fend[:, None])
         r = (self.prog[torch.from_numpy(nxt)] - self.prog[torch.from_numpy(now)] + 4.0).clamp(min=0)
         valid = torch.from_numpy((ai[:, None] + np.arange(K)[None] <= aend[:, None]).astype(np.float32))
+        # W at depth k: the frames thrown away since the unroll's root (depth 0 is 0 by definition)
+        at = np.minimum(fi[:, None] + np.arange(K + 1)[None], fend[:, None])
+        w = (self.prog[torch.from_numpy(at)] - self.prog[torch.from_numpy(fi)][:, None]
+             + 4.0 * torch.arange(K + 1)).clamp(0, 512)
+        wvalid = torch.cat([torch.ones(len(rows), 1), valid], 1)
         tgt_stack = np.clip(nxt[:, :, None] + np.arange(-3, 1)[None, None], f0[:, None, None], None)
         tgt_obs = self.frames[torch.from_numpy(tgt_stack.reshape(-1))].view(len(rows) * K, 4, 84, 84)
         return (obs.to(device), acts.to(device), ev.to(device), tgt_obs.to(device),
-                r.to(device), valid.to(device))
+                r.to(device), valid.to(device), w.to(device), wvalid.to(device))
 
 
-def losses(model, obs, acts, ev, tgt_obs, r, valid, w_event=1.0, w_cons=1.0, w_waste=1.0):
-    lat, evs, rs, _, _ = model.unroll(obs, acts)
+def losses(model, obs, acts, ev, tgt_obs, r, valid, wt, wvalid,
+           w_event=1.0, w_cons=1.0, w_waste=1.0, w_value=1.0):
+    lat, evs, rs, _, ws = model.unroll(obs, acts)
     e = torch.stack(evs, 1)                                  # (B, K, 3)
     pos = ev.sum((0, 1)).clamp(min=1)
     weight = (ev.numel() / 3 / pos).clamp(max=50)            # events are rare: weight them up
@@ -77,9 +83,12 @@ def losses(model, obs, acts, ev, tgt_obs, r, valid, w_event=1.0, w_cons=1.0, w_w
     lc = consistency(model, torch.cat(lat[1:], 0), tgt_obs)
     pred_r = torch.stack(rs, 1)                              # the frames each step throws away
     lr = (F.smooth_l1_loss(pred_r.float() / 16, r / 16, reduction='none') * valid).sum() / valid.sum().clamp(min=1)
+    pred_w = torch.stack(ws, 1)                              # W: thrown away since the root
+    lw = (F.smooth_l1_loss(pred_w.float() / 16, wt / 16, reduction='none') * wvalid).sum() / wvalid.sum().clamp(min=1)
     with torch.no_grad():
-        mae = ((pred_r.float() - r).abs() * valid).sum() / valid.sum().clamp(min=1)
-    return w_event * le + w_cons * lc + w_waste * lr, le.item(), lc.item(), mae.item()
+        wmae = ((pred_w.float() - wt).abs() * wvalid).sum() / wvalid.sum().clamp(min=1)
+    return (w_event * le + w_cons * lc + w_waste * lr + w_value * lw,
+            le.item(), lc.item(), wmae.item())
 
 
 @torch.no_grad()
@@ -128,9 +137,9 @@ def main():
     t0, hist = time.time(), []
     for step in range(1, a.steps + 1):
         model.train()
-        obs, acts, ev, tgt, r, valid = data.batch(rng.choice(tr, a.batch), 'cuda')
+        obs, acts, ev, tgt, r, valid, wt, wv = data.batch(rng.choice(tr, a.batch), 'cuda')
         with torch.autocast('cuda', dtype=torch.bfloat16):
-            loss, le, lc, rmae = losses(model, obs, acts, ev, tgt, r, valid)
+            loss, le, lc, rmae = losses(model, obs, acts, ev, tgt, r, valid, wt, wv)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -141,7 +150,7 @@ def main():
             hist.append(dict(step=step, event=le, consistency=lc, waste_mae=rmae, s=round(time.time() - t0),
                              prec1=prec[0].tolist(), rec1=rec[0].tolist(),
                              precK=prec[-1].tolist(), recK=rec[-1].tolist()))
-            log('[wm] step %5d event %.4f cons %.4f waste %.1f frames | 1 step ahead %s | %d steps ahead %s (%.0f s)'
+            log('[wm] step %5d event %.4f cons %.4f W error %.1f frames | 1 step ahead %s | %d steps ahead %s (%.0f s)'
                 % (step, le, lc, rmae,
                    ' '.join('%s P%.0f/R%.0f' % (e, 100 * prec[0, i], 100 * rec[0, i]) for i, e in enumerate(EVENTS)),
                    a.unroll,
