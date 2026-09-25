@@ -73,6 +73,8 @@ def main():
 
     pool = []          # winning lines: (level, start, actions, T). A line is expensive to earn,
     tries = {l: 0 for l in levels}                  # so it is kept and branched from many times
+    made = {l: 0 for l in levels}                   # roots kept per level: keep the mix even
+    bwin = {l: [0, 0] for l in levels}              # branches won / tried: keep them hard enough
     while total < a.pairs:
         # A pool that fills with the easy levels never tries the hard ones again, and the
         # value then goes into the gate never having seen them. Ask for what is missing.
@@ -97,15 +99,23 @@ def main():
         # comparison the search actually makes when PUCT ranks a node against its brothers.
         nb = max(a.branches, 1)
         groups = []
-        for _ in range(max(1, a.games // nb)):
-            l, st0, acts, T = pool[int(rng.integers(len(pool)))]
+        # A level whose spines are easy to win fills the pool and crowds the rest out, and the
+        # value then has almost nothing of the hard levels. Favour what we have least of.
+        pw = np.array([1.0 / (1 + made[q[0]]) for q in pool])
+        for gi in rng.choice(len(pool), max(1, a.games // nb), p=pw / pw.sum()):
+            l, st0, acts, T = pool[int(gi)]
             groups.append((l, st0, acts, T, int(rng.integers(0, max(T - 8, 1)))))
         bstarts, bcaps, prefixes, owner, root_states = [], [], [], [], []
         for gi, (l, st0, acts, T, t) in enumerate(groups):
             _, root_state = s.replay(st0, acts[:t])
             root_states.append(root_state)
+            won_, tried_ = bwin[l]
+            # Where a branch almost always recovers, the labels are nearly all the same number
+            # and there is nothing to rank: 1-1's random branches cost 52 frames at the 90th
+            # percentile and its gate collapsed while 4-1, twice as spread, cleared 4/4.
+            reach = a.prefix if tried_ < 24 or won_ / tried_ < 0.9 else a.prefix * 3
             for _ in range(nb):
-                k = int(rng.integers(2, a.prefix + 1))
+                k = int(rng.integers(2, reach + 1))
                 pre = (rng.integers(0, 12, k).astype(np.uint8) if rng.random() < 0.5
                        else np.full(k, rng.integers(0, 12), np.uint8))   # a held input, or anything
                 out, n = s.classify_along(root_state, ROUTE, pre)
@@ -121,6 +131,7 @@ def main():
             b = bg.tag
             l, st0, acts, T, t = groups[owner[b]]
             stats['branch_wins'] += bool(bg.won)
+            bwin[l][1] += 1; bwin[l][0] += bool(bg.won)
             if bg.won and len(pool) < 200:      # a branch that finished is a line of its own
                 pool.append((l, bstarts[b], np.array(bg.actions, np.uint8), len(bg.actions)))
             if owner[b] not in jroot:
@@ -132,6 +143,7 @@ def main():
                     root_stack = np.repeat(s.obs(rs)[None], 4, 0)
                 jroot[owner[b]] = (len(roots), rs)
                 roots.append(root_stack); rval.append(4.0 * (T - t)); rlvl.append(gp(l))
+                made[l] += 1
             j, root_state = jroot[owner[b]]
             r_root = 4.0 * (T - t)
             branch_acts = np.concatenate([prefixes[b], np.array(bg.actions, np.uint8)])
