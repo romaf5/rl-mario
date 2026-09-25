@@ -21,6 +21,8 @@ import torch.nn.functional as F
 from .common import DATA, RUNS, V_SCALE
 from .net import _Stage
 
+HOPELESS = 512.0
+
 
 class RelValue(nn.Module):
     """W from the root's frames, the leaf's frames and the depth.
@@ -29,16 +31,16 @@ class RelValue(nn.Module):
     fusion='early': both go through one trunk as 8 channels -- how far one screen has moved
                     on from the other is exactly what a convolution over the pair can see.
     """
-    def __init__(self, channels=(16, 32, 32), hidden=256, fusion='late'):
+    def __init__(self, channels=(16, 32, 32), hidden=256, fusion='late', split=False):
         super().__init__()
-        self.fusion = fusion
+        self.fusion, self.split = fusion, split
         stages, cin = [], 8 if fusion == 'early' else 4
         for c in channels:
             stages.append(_Stage(cin, c)); cin = c
         self.stages = nn.Sequential(*stages)
         self.fc = nn.Linear(cin * 11 * 11, hidden)
         self.h1 = nn.Linear((hidden if fusion == 'early' else 3 * hidden) + 2, hidden)
-        self.h2 = nn.Linear(hidden, 1)
+        self.h2 = nn.Linear(hidden, 2 if split else 1)   # split: (W if it lives, logit it dies)
 
     def trunk(self, x):
         h = self.stages(x.float() / 255.0)
@@ -48,21 +50,35 @@ class RelValue(nn.Module):
         return x if self.fusion == 'early' else self.trunk(x)
 
     def head(self, e_leaf, e_root, depth):
-        """-> W in frames (wasted against perfect play from the root)"""
+        """-> W in frames (wasted against perfect play from the root); split: (W_alive, logit_dead).
+
+        A line that dies is labelled 512, and with a sixth of the branches dying those labels
+        swamp the regression: the few frames that separate two live lines are lost beside
+        them. Split, the death is a probability and W is only ever asked about a line that
+        lives."""
         d = depth.float().unsqueeze(1)
         if self.fusion == 'early':
             e = self.trunk(torch.cat([e_leaf, e_root], 1))
         else:
             e = torch.cat([e_leaf, e_root, e_leaf - e_root], 1)
-        return self.h2(F.relu(self.h1(torch.cat([e, d / 32, (d / 32) ** 2], 1)))).squeeze(1) * 16.0
+        out = self.h2(F.relu(self.h1(torch.cat([e, d / 32, (d / 32) ** 2], 1))))
+        if self.split:
+            return out[:, 0] * 16.0, out[:, 1]
+        return out.squeeze(1) * 16.0
 
     def forward(self, leaf, root, depth):
-        return self.head(self.embed(leaf), self.embed(root), depth)
+        """Always W in frames: split heads are folded into one expected cost."""
+        out = self.head(self.embed(leaf), self.embed(root), depth)
+        if not self.split:
+            return out
+        w, dead = out
+        p = torch.sigmoid(dead)
+        return (1 - p) * w.clamp(0, HOPELESS) + p * HOPELESS
 
 
 def load(path, device='cuda'):
     ck = torch.load(path, map_location=device, weights_only=False)
-    net = RelValue(fusion=ck.get('fusion', 'late'))
+    net = RelValue(fusion=ck.get('fusion', 'late'), split=ck.get('split', False))
     net.load_state_dict(ck['state'])
     return net.to(device).eval(), ck
 
@@ -88,7 +104,7 @@ class Data:
         self.level = np.concatenate(lvl)
         # past a few hundred frames the search only needs "hopeless"; exact magnitudes would
         # swamp the regression (a rollout into a pit can read thousands)
-        self.w = (self.d + 4.0 * self.depth).clamp(max=512.0)
+        self.w = (self.d + 4.0 * self.depth).clamp(max=HOPELESS)
 
     def __len__(self):
         return len(self.d)
@@ -184,6 +200,8 @@ def main():
     ap.add_argument('--batch', type=int, default=256)
     ap.add_argument('--lr', type=float, default=3e-4)
     ap.add_argument('--fusion', default='late', choices=('late', 'early'))
+    ap.add_argument('--split', action='store_true',
+                    help='predict P(dies) and W-if-it-lives separately instead of one number')
     ap.add_argument('--precision', default='bf16', choices=('bf16', 'fp32'))
     ap.add_argument('--holdout', type=float, default=0.08)
     ap.add_argument('--baseline', default='smbzero/runs/zero8/net.pt', help='net whose absolute value head to compare')
@@ -213,7 +231,7 @@ def main():
         del bnet
         torch.cuda.empty_cache()
 
-    net = RelValue(fusion=a.fusion).cuda()
+    net = RelValue(fusion=a.fusion, split=a.split).cuda()
     opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=1e-4)
     rng = np.random.default_rng(0)
     t0, hist = time.time(), []
@@ -223,8 +241,16 @@ def main():
         idx = torch.from_numpy(rng.choice(tr, a.batch))
         leaf, root, dep, w = data.batch(idx, 'cuda')
         with amp:
-            pred = net(leaf, root, dep)
-            loss = F.smooth_l1_loss(pred.float() / 16, w / 16)
+            if a.split:
+                wa, dead = net.head(net.embed(leaf), net.embed(root), dep)
+                d_t = (w >= HOPELESS).float()
+                alive = 1.0 - d_t
+                lw = (F.smooth_l1_loss(wa.float() / 16, (w / 16).clamp(max=HOPELESS / 16),
+                                       reduction='none') * alive).sum() / alive.sum().clamp(min=1)
+                loss = F.binary_cross_entropy_with_logits(dead.float(), d_t) + lw
+            else:
+                pred = net(leaf, root, dep)
+                loss = F.smooth_l1_loss(pred.float() / 16, w / 16)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(net.parameters(), 5.0)
@@ -248,7 +274,8 @@ def main():
     report('relative value (new)', pair_score(f, data, pairs)[0], data.level, pairs, log)
     fd = lambda idx: f(idx) - 4.0 * data.depth.numpy()[idx]        # D = W - 4 depth
     report('relative value, whole tree', pair_score(fd, data, tree_pairs)[0], data.level, tree_pairs, log)
-    torch.save(dict(state=net.state_dict(), hist=hist, fusion=a.fusion), os.path.join(a.out, 'relvalue.pt'))
+    torch.save(dict(state=net.state_dict(), hist=hist, fusion=a.fusion, split=a.split),
+               os.path.join(a.out, 'relvalue.pt'))
     json.dump(hist, open(os.path.join(a.out, 'hist.json'), 'w'), indent=1)
 
 
