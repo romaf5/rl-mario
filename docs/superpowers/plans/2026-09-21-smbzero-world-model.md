@@ -263,6 +263,10 @@ which no variant has ever won: both need something a random prefix essentially n
 produces -- the hidden vine, the right way through the maze -- so the spine pool never holds
 a line that reaches them, and no amount of branching from the wrong place will make one.
 
+The price itself, swept: **64 -> 16/32, 128 -> 18/32, 256 -> 18/32.** Below 128 the value no
+longer fears death enough and loses 1-2 and 8-1; 128 and 256 tie, trading 8-1 (1/4 against
+2/4) for 8-3 (4/4 against 3/4).
+
 Note for anyone reading the pair metrics: they pointed the wrong way here. The split head
 scores 56.1% on siblings against the plain head's 57.2%, and wins by one level and by a lot
 of seconds. Three times tonight the pair metric mispredicted play. Gate, not pairs.
@@ -299,7 +303,20 @@ The compression at the good end is unchanged -- the route still prices at 4.3 ag
 does not make it value them apart.
 
 The best stage B configuration is therefore wm5: unroll 12, calibrated, tree bounded to 12.
-The compression stays unexplained, and it is the thing to attack next.
+
+**The compression was the loss, not the data.** 21-32% of the world-model targets at depth 12
+are under one frame, so the model had seen perfect lines tens of thousands of times. But both
+W losses were smooth L1 on W/16, quadratic below 16 frames: pricing a perfect line at 4 costs
+0.031, a death at 400 instead of 512 costs 6.5. Trained through MuZero's value transform
+(wm7, otherwise wm5's recipe exactly), the probe moves the right way: 8-1 twelve steps ahead,
+the route priced at 2.1 against a true 0.3 (wm5: 4.5), a random line at 20.2 against 19.6
+(wm5: 17.2); on 1-1 the route at 1.3 against 1.5. Near-sibling agreement rises to 93% and 97%.
+
+**And single games cannot rank models.** wm5 alone went 197 decisions on one start and 1500
+on another; a game that survives 256 decisions reached 12% of the level. `latent` now scores
+each game by how far through the level it got (the route as ruler, evaluation only), over
+eight starts. wm7 on 8-1: 0/8, mean 7% -- and six of the eight die at the same spot, 2-4% in,
+after about 45 decisions. One hazard, failed every time: a diagnosis, not noise.
 
 **Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
 against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and

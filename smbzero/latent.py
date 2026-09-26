@@ -205,6 +205,7 @@ def main():
     ap.add_argument('--max-depth', type=int, default=0,
                     help="deepest node the tree may grow (0: the model's training unroll)")
     ap.add_argument('--raw', action='store_true', help='ignore the checkpoint calibration')
+    ap.add_argument('--cap', type=float, default=2.5, help='most decisions, as a multiple of the route')
     ap.add_argument('--out')
     a = ap.parse_args()
     s = Search(threads=THREADS)
@@ -219,7 +220,9 @@ def main():
           % (md, ck.get('unroll', 'unknown')), flush=True)
     tree = LatentTree(model, max_nodes=a.max_nodes, death_cost=a.death_cost, calib=calib,
                       max_depth=md)
-    cap = int(2.5 * len(segs[a.level]['opt']))
+    cap = int(a.cap * len(segs[a.level]['opt']))
+    opt, ref_start = segs[a.level]['opt'], segs[a.level]['start']
+    s.set_progress_route(ROUTE, opt, ref_start)
     res = []
     for d in [int(x) for x in a.delays.split(',')]:
         t0 = time.time()
@@ -228,13 +231,24 @@ def main():
         res.append(dict(delay=d, won=won, reason=reason, decisions=len(acts),
                         seconds=round((d + 4 * len(acts)) / FPS, 1), wall=round(time.time() - t0)))
         res[-1].update(pv=round(float(np.mean(pvd)), 1), max_depth=int(np.max(maxd)) if maxd else 0)
+        # How far through the level: one death ends a game, so won/lost on a few starts cannot
+        # rank two models (one model went 197 decisions on one start and 1500 on another).
+        # The route is only the ruler here.
+        try:
+            togo = s.progress_along(start, ROUTE, opt, np.array(acts, np.uint8), ref_start=ref_start)
+            res[-1]['progress'] = 1.0 if won else round(float(np.clip(1 - togo.min() / togo[0], 0, 1)), 3)
+        except ValueError:
+            res[-1]['progress'] = float('nan')
         print('[latent] %s d=%02d %s: %d decisions, %.1f s game time, %.0f ms per decision, '
-              'believed line %.1f deep (tree reaches %d)'
+              'believed line %.1f deep (tree reaches %d), %.0f%% of the level'
               % (a.level, d, 'WON' if won else reason, len(acts), res[-1]['seconds'],
                  1000 * (time.time() - t0) / max(len(acts), 1), res[-1]['pv'],
-                 res[-1]['max_depth']), flush=True)
-    print('[latent] %s: won %d/%d, the game stepped only by the moves played'
-          % (a.level, sum(r['won'] for r in res), len(res)))
+                 res[-1]['max_depth'], 100 * res[-1]['progress']), flush=True)
+    pr = [r['progress'] for r in res if r['progress'] == r['progress']]
+    print('[latent] %s: won %d/%d, mean %.0f%% of the level (min %.0f%%, max %.0f%%), '
+          'the game stepped only by the moves played'
+          % (a.level, sum(r['won'] for r in res), len(res), 100 * np.mean(pr) if pr else 0,
+             100 * min(pr) if pr else 0, 100 * max(pr) if pr else 0))
     if a.out:
         json.dump(res, open(a.out, 'w'), indent=1)
 
