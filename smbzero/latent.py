@@ -33,7 +33,7 @@ class LatentTree:
     """One tree, grown in the model. Nodes live in tensors; a wave expands many leaves at once."""
     def __init__(self, model, max_nodes=4096, c_puct=1.5, scale=32.0, fpu=0.5,
                  dead_p=0.95, goal_p=0.9, death_cost=HOPELESS, calib=None, max_depth=12,
-                 backup='self', prior_net=None, device='cuda'):
+                 backup='self', prior_net=None, deep_prior='uniform', device='cuda'):
         self.m, self.dev = model, device
         self.calib = calib                    # (K, 3, 2): temperature and bias per depth per head
         self.max_depth = max_depth            # as far as the model was trained to imagine
@@ -47,6 +47,7 @@ class LatentTree:
         # emulator search clears 28/32 with the net's prior and 8/32 with a uniform one. With a
         # prior net the root, whose real screen is known, gets its policy; deeper nodes uniform.
         self.prior_net = prior_net
+        self.deep_prior = deep_prior          # below the root: 'uniform', or the model's own head
         self.max_nodes, self.c_puct, self.scale, self.fpu = max_nodes, c_puct, scale, fpu
         self.dead_p, self.goal_p, self.death_cost = dead_p, goal_p, death_cost
         c = model.g.conv.out_channels
@@ -158,7 +159,7 @@ class LatentTree:
             pri = torch.softmax(pi.float(), 1)
             for i, (x, a, c) in enumerate(picks):
                 self.lat[c] = s2[i].float()
-                self.prior[c] = pri[i] if self.prior_net is None else 1.0 / 12
+                self.prior[c] = pri[i] if (self.prior_net is None or self.deep_prior == 'model') else 1.0 / 12
                 if p_ev[i, 1] > self.dead_p:                       # certain enough to stop looking
                     self.term[c] = 2; self.w[c] = HOPELESS
                 elif p_ev[i, 0] > self.goal_p:                     # the model says it finished
@@ -226,6 +227,8 @@ def main():
     ap.add_argument('--raw', action='store_true', help='ignore the checkpoint calibration')
     ap.add_argument('--cap', type=float, default=2.5, help='most decisions, as a multiple of the route')
     ap.add_argument('--prior-net', help="the policy net whose prior the root uses (the world model's head is untrained)")
+    ap.add_argument('--deep-prior', default='uniform', choices=('uniform', 'model'),
+                    help="with --prior-net, the prior below the root: uniform, or the world model's (distilled) head")
     ap.add_argument('--backup', default='self', choices=('self', 'children'),
                     help="'children': an expanded node is worth its best child, not min(itself, them)")
     ap.add_argument('--out')
@@ -245,7 +248,7 @@ def main():
     print('[latent] tree may grow %d deep (the model was trained to unroll %s)'
           % (md, ck.get('unroll', 'unknown')), flush=True)
     tree = LatentTree(model, max_nodes=a.max_nodes, death_cost=a.death_cost, calib=calib,
-                      max_depth=md, backup=a.backup, prior_net=pn)
+                      max_depth=md, backup=a.backup, prior_net=pn, deep_prior=a.deep_prior)
     cap = int(a.cap * len(segs[a.level]['opt']))
     opt, ref_start = segs[a.level]['opt'], segs[a.level]['start']
     s.set_progress_route(ROUTE, opt, ref_start)
