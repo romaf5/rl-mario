@@ -228,7 +228,7 @@ def main():
         t0 = time.time()
         start = s.frames(segs[a.level]['start'], d)
         acts, reason, won, (pvd, maxd) = play(s, tree, start, ROUTE, a.sims, cap, a.per_wave)
-        res.append(dict(delay=d, won=won, reason=reason, decisions=len(acts),
+        res.append(dict(delay=d, won=won, reason=reason, decisions=len(acts), actions=[int(x) for x in acts],
                         seconds=round((d + 4 * len(acts)) / FPS, 1), wall=round(time.time() - t0)))
         res[-1].update(pv=round(float(np.mean(pvd)), 1), max_depth=int(np.max(maxd)) if maxd else 0)
         # How far through the level: one death ends a game, so won/lost on a few starts cannot
