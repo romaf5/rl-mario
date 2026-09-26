@@ -365,6 +365,29 @@ imagines forward. But these probes mostly measure deaths 6-10 steps out (122 of 
 survival is decided in the last 1-3 steps, where a jump still saves it, and that bucket held
 five deaths. `deathprobe --near` closes in first and probes only the last three steps.
 
+**Near a hazard the model is good**: enemy deaths within three steps separate at 0.83 (wm5),
+0.88 (wm7), 0.90 (wm8), 8-1 included (0.84 / 0.92 / 0.90). Close-in enemy deaths average
+p = 0.24 against 0.05 for survivals -- and the Goomba trio sits at 0.05, like a survival. It
+is one blind spot, which ends six of eight starts only because it is the first hazard of 8-1.
+wm8 separates it best (walking 0.31 against jumping 0.06 four steps on) and still dies there
+in play: 0/8, mean 3% of the level.
+
+**The backup is part of it.** latent.py backed up b = min(own estimate, best child), so an
+expanded move kept its own first-step guess and nothing found below it could raise it -- the
+C++ search backs up 4 + min over children. With `--backup children` the trio is priced right
+(walking drops out of the six best moves; everything reaching the trio costs 36-42) -- but in
+play it does not help: wm8 3% -> 3%, wm7 7% -> ~1%, often 0% of the level after hundreds of
+decisions. The two rules fail in opposite directions: 'self' is myopic and walks in; 'children'
+carries every line's far-future death probability (~0.15 on every line twelve steps out,
+dead or not, x 512 = ~75 frames), which swamps the few frames of W that reward going forward,
+so it retreats. Next: the children rule with a cheaper death (128).
+
+**The sibling re-test, done properly** (wm9: wm7's recipe plus world_sib2, level tags checked
+at 0.3% mixed): no gain. 8-1 twelve steps ahead the route at 2.0 against 0.3 (wm7 2.1), one
+change 2.6 against 3.7, three changes 3.8 against 7.4 (wm7 4.7); near-sibling agreement 96%
+and 96% (wm7 93% and 97%); death AUC 8-1 0.67, overall enemy 0.75 (wm7 0.68, 0.77). A real
+negative this time.
+
 **Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
 against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and
 spread in the data, and only two had both:
