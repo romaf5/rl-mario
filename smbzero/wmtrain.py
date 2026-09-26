@@ -90,8 +90,9 @@ def h(x, eps=1e-3):
 
 
 def losses(model, obs, acts, ev, tgt_obs, r, valid, wt, wvalid,
-           w_event=1.0, w_cons=1.0, w_waste=1.0, w_value=1.0, transform=False, prev=None, tgt_prev=None):
-    lat, evs, rs, _, ws = model.unroll(obs, acts, prev)
+           w_event=1.0, w_cons=1.0, w_waste=1.0, w_value=1.0, transform=False, prev=None, tgt_prev=None,
+           teacher=None, w_policy=1.0):
+    lat, evs, rs, pis, ws = model.unroll(obs, acts, prev)
     e = torch.stack(evs, 1)                                  # (B, K, 3)
     pos = ev.sum((0, 1)).clamp(min=1)
     weight = (ev.numel() / 3 / pos).clamp(max=50)            # events are rare: weight them up
@@ -111,8 +112,19 @@ def losses(model, obs, acts, ev, tgt_obs, r, valid, wt, wvalid,
         lw = (F.smooth_l1_loss(pred_w.float() / 16, wt / 16, reduction='none') * wvalid).sum() / wvalid.sum().clamp(min=1)
     with torch.no_grad():
         wmae = ((pred_w.float() - wt).abs() * wvalid).sum() / wvalid.sum().clamp(min=1)
-    return (w_event * le + w_cons * lc + w_waste * lr + w_value * lw,
-            le.item(), lc.item(), wmae.item())
+    total = w_event * le + w_cons * lc + w_waste * lr + w_value * lw
+    if teacher is not None:
+        # The policy head had never been trained, so the latent search explored from random
+        # weights; given the policy net's prior at the root it went from 4% to 7% of 8-1. Here
+        # the head learns that policy -- at the root from the real frames, and at every imagined
+        # step from the real frames that step led to -- so deeper nodes get a prior too.
+        with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16):
+            B, K = acts.shape
+            tp = torch.softmax(teacher(torch.cat([obs, tgt_obs], 0))[0].float(), 1)
+            tp = torch.cat([tp[:B, None], tp[B:].view(B, K, -1)], 1)          # (B, K+1, 12)
+        lp = -(tp * F.log_softmax(torch.stack(pis, 1).float(), -1)).sum(-1)    # cross-entropy
+        total = total + w_policy * (lp * wvalid).sum() / wvalid.sum().clamp(min=1)
+    return (total, le.item(), lc.item(), wmae.item())
 
 
 @torch.no_grad()
@@ -147,6 +159,7 @@ def main():
     ap.add_argument('--w-event', type=float, default=1.0,
                     help='weight on the goal/dead/forced heads: a classifier on one 84x84 frame '
                          'predicts an enemy death better (0.8 AUC on 8-1) than this model on four (0.7)')
+    ap.add_argument('--distill', help="policy net whose prior the world model's policy head learns")
     ap.add_argument('--edge', action='store_true',
                     help='the dynamics sees the previous action at every step: a jump is A newly pressed')
     ap.add_argument('--prev', action='store_true',
@@ -168,6 +181,10 @@ def main():
            ' '.join('%s %.2f%%' % (e, 100 * v) for e, v in zip(EVENTS,
                     [(data.out == 1).float().mean(), (data.out == 2).float().mean(), data.forced.mean()]))))
     model = WorldModel(prev=a.prev, edge=a.edge).cuda()
+    teacher = None
+    if a.distill:
+        from .net import load as load_net
+        teacher = load_net(a.distill)[0].eval()
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     t0, hist = time.time(), []
     for step in range(1, a.steps + 1):
@@ -176,7 +193,7 @@ def main():
         with torch.autocast('cuda', dtype=torch.bfloat16):
             loss, le, lc, rmae = losses(model, obs, acts, ev, tgt, r, valid, wt, wv, w_cons=a.w_cons,
                                         w_event=a.w_event, transform=a.transform,
-                                        prev=prev, tgt_prev=tprev)
+                                        prev=prev, tgt_prev=tprev, teacher=teacher)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
