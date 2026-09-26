@@ -91,7 +91,19 @@ def h(x, eps=1e-3):
 
 def losses(model, obs, acts, ev, tgt_obs, r, valid, wt, wvalid,
            w_event=1.0, w_cons=1.0, w_waste=1.0, w_value=1.0, transform=False, prev=None, tgt_prev=None,
-           teacher=None, w_policy=1.0):
+           teacher=None, w_policy=1.0, value_teacher=None):
+    if value_teacher is not None:
+        # W from the agent's own experience, not the route. Frames-to-go along the search's route
+        # passes every hazard at a safe moment, so it is blind to danger that arrives late --
+        # and at states the latent agent visits, its choices were no better than the prior's
+        # alone. The teacher-free value (stage C) was trained on the agent's realised times,
+        # a line that dies later costing 512: same quantity, frames wasted since the root.
+        with torch.no_grad(), torch.autocast('cuda', dtype=torch.bfloat16):
+            B, K = acts.shape
+            roots = obs.repeat_interleave(K, 0)                               # batch-major, as tgt_obs
+            deps = torch.arange(1, K + 1, device=obs.device).repeat(B)
+            wv = value_teacher(tgt_obs, roots, deps).float().view(B, K)
+        wt = torch.cat([torch.zeros(B, 1, device=obs.device), wv], 1).clamp(0, 512)
     lat, evs, rs, pis, ws = model.unroll(obs, acts, prev)
     e = torch.stack(evs, 1)                                  # (B, K, 3)
     pos = ev.sum((0, 1)).clamp(min=1)
@@ -160,6 +172,7 @@ def main():
                     help='weight on the goal/dead/forced heads: a classifier on one 84x84 frame '
                          'predicts an enemy death better (0.8 AUC on 8-1) than this model on four (0.7)')
     ap.add_argument('--distill', help="policy net whose prior the world model's policy head learns")
+    ap.add_argument('--value-teacher', help="relative value net (stage C) whose W the model's W head learns, instead of the route")
     ap.add_argument('--edge', action='store_true',
                     help='the dynamics sees the previous action at every step: a jump is A newly pressed')
     ap.add_argument('--prev', action='store_true',
@@ -181,6 +194,10 @@ def main():
            ' '.join('%s %.2f%%' % (e, 100 * v) for e, v in zip(EVENTS,
                     [(data.out == 1).float().mean(), (data.out == 2).float().mean(), data.forced.mean()]))))
     model = WorldModel(prev=a.prev, edge=a.edge).cuda()
+    value_teacher = None
+    if a.value_teacher:
+        from .relvalue import load as load_rel
+        value_teacher = load_rel(a.value_teacher)[0].eval()
     teacher = None
     if a.distill:
         from .net import load as load_net
@@ -193,7 +210,8 @@ def main():
         with torch.autocast('cuda', dtype=torch.bfloat16):
             loss, le, lc, rmae = losses(model, obs, acts, ev, tgt, r, valid, wt, wv, w_cons=a.w_cons,
                                         w_event=a.w_event, transform=a.transform,
-                                        prev=prev, tgt_prev=tprev, teacher=teacher)
+                                        prev=prev, tgt_prev=tprev, teacher=teacher,
+                                        value_teacher=value_teacher)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
