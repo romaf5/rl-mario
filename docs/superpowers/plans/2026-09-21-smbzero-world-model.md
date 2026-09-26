@@ -494,6 +494,29 @@ frames (a move 4 frames better gains 0.125 in q), the prior makes nearly every c
 world model's opinions rarely change a move -- which would explain why improving the model has
 stopped moving play. Next: the same games with values four times as loud (--scale 8).
 
+**Louder values (--scale 8, wm13, same new starts):** 1-1 1/4 and mean 46% (default 3/4, 87%),
+4-1 mean 23% with a wider spread (default 23%). The world model does get a say -- it changes
+moves, wins a start the prior lost, loses two it won -- but its say is not better.
+
+**Decision quality (`tools.agree`), which settles it.** At 192 states the latent agent really
+visited, three pickers each choose a move, judged by the real game (does the move survive,
+then any held input for 20 steps) and by the emulator search's visits:
+
+| | all 192 | danger (43: some move dies) |
+|---|---|---|
+| survives -- prior / latent / emulator | 81% / 81% / 82% | 14% / 14% / 21% |
+| emulator's visit share on the pick -- prior / latent | 0.33 / 0.33 | 0.23 / 0.22 |
+| same move as the emulator -- prior / latent | 53% / 49% | 65% / 53% |
+
+**Planning inside the world model chooses no better than the policy alone** -- it survives
+exactly as often, and where it departs from the prior it departs from the emulator too. The
+probes (close-in death AUC 0.95, the held A, the plant on the states it was shown) measure
+whether the model knows things; this measures whether knowing them improves a choice, and it
+does not. That is why every model improvement today left play where it was. And the danger
+states are mostly lost already (even the emulator saves 21%): the mistakes that matter are made
+before the danger is visible, where the model's long-range W is what decides, and that is the
+part of it least trained on the agent's own play.
+
 **Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
 against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and
 spread in the data, and only two had both:
