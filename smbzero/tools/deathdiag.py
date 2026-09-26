@@ -42,6 +42,7 @@ def main():
     ap.add_argument('--level', default='8-1')
     ap.add_argument('--last', type=int, default=16, help='decisions to inspect before the end')
     ap.add_argument('--sims', type=int, default=1000)
+    ap.add_argument('--backup', default='self', choices=('self', 'children'))
     a = ap.parse_args()
     game = json.load(open(a.game))[0]
     acts = np.array(game['actions'], np.uint8)
@@ -50,7 +51,8 @@ def main():
     start = s.frames(seg['start'], game['delay'])
     model, ck = load_model(a.model)
     model.eval()
-    tree = LatentTree(model, max_nodes=8192, calib=ck.get('calib'), max_depth=int(ck.get('unroll', 12)))
+    tree = LatentTree(model, max_nodes=8192, calib=ck.get('calib'), max_depth=int(ck.get('unroll', 12)),
+                      backup=a.backup)
 
     obs, _, _ = s.replay_obs(start, acts)
     frames = np.concatenate([np.repeat(s.obs(start)[None], 4, 0), obs])

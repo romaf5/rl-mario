@@ -33,10 +33,15 @@ class LatentTree:
     """One tree, grown in the model. Nodes live in tensors; a wave expands many leaves at once."""
     def __init__(self, model, max_nodes=4096, c_puct=1.5, scale=32.0, fpu=0.5,
                  dead_p=0.95, goal_p=0.9, death_cost=HOPELESS, calib=None, max_depth=12,
-                 device='cuda'):
+                 backup='self', device='cuda'):
         self.m, self.dev = model, device
         self.calib = calib                    # (K, 3, 2): temperature and bias per depth per head
         self.max_depth = max_depth            # as far as the model was trained to imagine
+        # 'self': b = min(own estimate, children) -- the node's own first guess shields it from
+        # everything found below it, so a move that dies two steps later still looks as cheap
+        # as its first step. 'children': once expanded, a node is worth its best child, as in
+        # the C++ search (b = 4 + min over children; W here already counts the steps).
+        self.backup_mode = backup
         self.max_nodes, self.c_puct, self.scale, self.fpu = max_nodes, c_puct, scale, fpu
         self.dead_p, self.goal_p, self.death_cost = dead_p, goal_p, death_cost
         c = model.g.conv.out_channels
@@ -97,7 +102,8 @@ class LatentTree:
         while x >= 0:
             kids = self.child[x][self.child[x] >= 0]
             if len(kids):
-                self.b[x] = min(self.w[x], self.b[kids].min())
+                best = self.b[kids].min()
+                self.b[x] = best if self.backup_mode == 'children' else min(self.w[x], best)
             self.n[x] += 1
             x = int(self.parent[x])
 
@@ -206,6 +212,8 @@ def main():
                     help="deepest node the tree may grow (0: the model's training unroll)")
     ap.add_argument('--raw', action='store_true', help='ignore the checkpoint calibration')
     ap.add_argument('--cap', type=float, default=2.5, help='most decisions, as a multiple of the route')
+    ap.add_argument('--backup', default='self', choices=('self', 'children'),
+                    help="'children': an expanded node is worth its best child, not min(itself, them)")
     ap.add_argument('--out')
     a = ap.parse_args()
     s = Search(threads=THREADS)
@@ -219,7 +227,7 @@ def main():
     print('[latent] tree may grow %d deep (the model was trained to unroll %s)'
           % (md, ck.get('unroll', 'unknown')), flush=True)
     tree = LatentTree(model, max_nodes=a.max_nodes, death_cost=a.death_cost, calib=calib,
-                      max_depth=md)
+                      max_depth=md, backup=a.backup)
     cap = int(a.cap * len(segs[a.level]['opt']))
     opt, ref_start = segs[a.level]['opt'], segs[a.level]['start']
     s.set_progress_route(ROUTE, opt, ref_start)
