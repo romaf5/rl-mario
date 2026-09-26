@@ -430,6 +430,21 @@ prior is good, the world models' differences stop showing on 8-1: they all meet 
 `wmtrain --distill` teaches the world model's own head that prior (wm13), so the agent is one
 model and its deeper nodes get a prior too.
 
+**The distilled head is too blurry to lead** (it agrees with the net's top move 64% of the
+time, entropy 1.07 against the net's 0.66), so on its own it plays 8-1 at 4%. As the prior
+*below* the root it helps: net at the root, distilled head deeper, 8-1 over eight starts
+3 17 7 16 7 7 7 7, mean 9% -- the best there, two games past the Piranha Plant.
+
+**Branching from the agent's own failures (world_fail, wm14)** gives the sharpest death head
+yet (P40/R97 twelve steps out) but no gain in play on held-out starts: 6% with its own head,
+the same as wm13.
+
+**Stage B's first clear.** wm13, net at the root, distilled head below, 1000 simulations:
+**1-1 won from start delay 5 in 35.7 s** (445 decisions), the search planning entirely inside
+the world model and the game stepped only by the moves played; replayed in stable-retro, every
+frame matched (docs/media/smbzero_latent_1-1.mp4). 4-1 from four starts reaches 34, 34, 34 and
+23% of the level (before the trained prior it wandered at ~10%).
+
 **Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
 against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and
 spread in the data, and only two had both:

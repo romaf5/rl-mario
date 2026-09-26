@@ -12,6 +12,7 @@ Above: the last 26 seconds at real speed; click for the whole run
 
 | video (real speed, 50 fps, replayed in stable-retro) | |
 |---|---|
+| [**1-1, planning inside its world model**](docs/media/smbzero_latent_1-1.mp4) | the first level cleared with **no emulator in the search**: every line it considers is imagined by a learned world model, and the game is stepped only by the moves it plays (35.7 s) |
 | [**1-1 to the axe, on a learned value**](docs/media/smbzero_learned_win.mp4) | the whole game in **5:48.4** with **no route at play time**: the net alone says how much time a position has thrown away (2500 simulations per move) |
 | [1-1 to the axe](docs/media/smbzero_win.mp4) | the whole game in **5:37.0** (the search below: 5:26.4), scored by progress along the search's route, 2000 simulations per move |
 | [8-4 to the axe](docs/media/smbzero_8-4.mp4) | its first clear of Bowser's castle (4000 simulations per move) |
@@ -52,11 +53,11 @@ only the prior changes ([data](docs/smbzero_ablation.json)):
 
 Where it stands: at the live budget (1000 simulations) it clears 26 of 32 level runs on the
 learned value, the same as on the search's route; a whole game is won at 2500 simulations
-(one start delay of six -- the rest stop at 8-1, 1-2, 8-3 or 8-4). What still leans on the
-emulator is the lookahead itself: the search steps the real game from savestates and asks it
-whether a line dies. Next ([plan](docs/superpowers/plans/2026-09-21-smbzero-world-model.md)):
-a learned world model to unroll instead, so that at evaluation the agent touches the game
-only by playing it; then no teacher at all.
+(one start delay of six -- the rest stop at 8-1, 1-2, 8-3 or 8-4). The lookahead no longer
+has to lean on the emulator: planning inside a learned world model it has cleared 1-1 and
+gets a third of the way through 4-1; 8-1's Piranha Plants still stop it
+([plan](docs/superpowers/plans/2026-09-21-smbzero-world-model.md)). Next: the rest of the
+game that way, then no teacher at all.
 
 ## The teacher: the whole game by search
 
