@@ -318,6 +318,30 @@ each game by how far through the level it got (the route as ruler, evaluation on
 eight starts. wm7 on 8-1: 0/8, mean 7% -- and six of the eight die at the same spot, 2-4% in,
 after about 45 decisions. One hazard, failed every time: a diagnosis, not noise.
 
+**Why it dies there (`tools.deathdiag`).** Replaying that game: at the fatal decision ten of
+the twelve moves still survive, every jump among them, and the search walks right into an
+enemy, rating that move the cheapest (7 frames against 10-16). The death head along the fatal
+path says 0.09 at the step the game ends -- and 0.07 and 0.09 for jumping instead. It cannot
+tell the two apart.
+
+**Is it blind to enemies in general (`tools.deathprobe`)?** No. Over 2400 plain lines on five
+levels, enemy deaths separate from survivals at AUC 0.89 (pits 0.80): 1-1 0.95, 4-1 0.96,
+8-2 0.91, 8-3 0.86, 8-1 0.76. 8-1 is the weak level, and not for lack of data (12% of the
+steps, as many deaths as 8-2). Averaging wm5, wm6 and wm7 does not help: on identical states
+they score 0.72, 0.66, 0.68 on 8-1 and their average 0.70 -- their misses are the same misses.
+(Resampling moves one model by about 0.04; smaller differences are noise.)
+
+**Is the enemy even in the picture (`tools.percept`)?** Suspected from the frames -- sprites
+are a few pixels of mid-gray among tree trunks and fence posts. Tested by rendering the same
+3000 states of 8-1 five ways from one emulator step and training the same small classifier
+on each, to predict an enemy death within six steps of walking right: engine gray 84 0.78,
+gray 84 0.81, color 84 0.74, gray full 0.62, color full 0.65. **Refuted.** Neither color nor
+resolution helps at this data scale (full resolution trains worse; one seed never learned).
+And the telling number: a small classifier on one 84x84 gray frame reaches ~0.8 on 8-1 where
+the world model, with four frames, reaches ~0.7. The information is in the input; the world
+model does not extract it. The target is how it learns death -- one of several losses on a
+48-channel latent unrolled twelve steps -- not what it sees.
+
 **Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
 against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and
 spread in the data, and only two had both:
