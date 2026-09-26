@@ -517,6 +517,16 @@ states are mostly lost already (even the emulator saves 21%): the mistakes that 
 before the danger is visible, where the model's long-range W is what decides, and that is the
 part of it least trained on the agent's own play.
 
+**W from the agent's own value (`wmtrain --value-teacher`, wm16 = wm13 learning W from stage
+C's teacher-free value, relv_mc2d, instead of from the route): worse.** Decision quality at
+the same 192 states -- survives 80% (prior 81%), in danger states 9% (prior 14%, wm13 14%);
+same move as the emulator 32% overall and 16% in danger (prior 53% and 65%). The model's
+opinions got louder -- it now overrides the prior far more often -- and wrong more often: it
+can only be as good as the value it learns from, and that value orders near-identical
+siblings at 57%. wm17 learns W from relv3 instead, the best value there is (26/32 in the
+emulator search, 94% on its ranking test): if its choices then beat the prior's, the idea is
+right and the teacher was the problem.
+
 **Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
 against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and
 spread in the data, and only two had both:
