@@ -406,6 +406,30 @@ latent 4-6% between A held and released) but too weak -- the same Beetle at 0.01
 8-1 mean 4%. `--edge` (wm12) gives the dynamics the previous action as planes at every
 step of the imagined line, so "A newly pressed" is in its input rather than inferred.
 
+**--edge works.** wm12 at the Beetle: holding A now costs 0.22 at the step it dies (wm10 0.04,
+wm11 0.01) against 0.10 for releasing first, while running into it with no A reads 0.46 --
+the model knows a held A does not jump. Close-in death detection 0.95 overall (mean p 0.62,
+survivals 0.07). It still false-alarms after the safe jump (0.42-0.78 at steps 4-6).
+
+**The policy head had never been trained.** wmtrain had no policy loss, so the latent search
+explored from random weights; the emulator search clears 28/32 with the net's prior and 8/32
+uniform. With the policy net's prior at the root (`latent --prior-net`, deeper nodes uniform),
+8-1 over eight starts:
+
+| model | own (untrained) head | net's prior at the root |
+|---|---|---|
+| wm7 | 7% | 8% (3-22%) |
+| wm11 | 4% | 7% (3-8%) |
+| wm12 (--edge) | 5% | 8% (3-21%) |
+
+With a trained prior every game passes the Buzzy Beetle (2%) and the Goomba trio (4%), and
+nearly all die at the next hazard, **~7%: a Piranha Plant** (enemy 0x0D) rising out of a pipe
+into Mario's jump -- a timing hazard, the plant's phase only partly visible in four frames.
+Delay 24 reaches 21-22% for every model (the plant's cycle is favourable there). Once the
+prior is good, the world models' differences stop showing on 8-1: they all meet the plant.
+`wmtrain --distill` teaches the world model's own head that prior (wm13), so the agent is one
+model and its deeper nodes get a prior too.
+
 **Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
 against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and
 spread in the data, and only two had both:
