@@ -137,6 +137,9 @@ def main():
     ap.add_argument('--steps', type=int, default=30000)
     ap.add_argument('--batch', type=int, default=64)
     ap.add_argument('--lr', type=float, default=3e-4)
+    ap.add_argument('--w-event', type=float, default=1.0,
+                    help='weight on the goal/dead/forced heads: a classifier on one 84x84 frame '
+                         'predicts an enemy death better (0.8 AUC on 8-1) than this model on four (0.7)')
     ap.add_argument('--transform', action='store_true',
                     help="train W and the per-step waste through MuZero's value transform")
     ap.add_argument('--out', default=os.path.join(RUNS, 'wm0'))
@@ -161,7 +164,7 @@ def main():
         obs, acts, ev, tgt, r, valid, wt, wv = data.batch(rng.choice(tr, a.batch), 'cuda')
         with torch.autocast('cuda', dtype=torch.bfloat16):
             loss, le, lc, rmae = losses(model, obs, acts, ev, tgt, r, valid, wt, wv, w_cons=a.w_cons,
-                                        transform=a.transform)
+                                        w_event=a.w_event, transform=a.transform)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
