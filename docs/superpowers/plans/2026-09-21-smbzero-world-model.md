@@ -468,6 +468,32 @@ which it never saw, it gives 0.01-0.05. Next: the same thing from every level's 
 gate's lost games), retrain (wm15), and replay all eight levels on starts none of that data
 came from.
 
+**One turn of learning from its own failures, measured on new starts (12/27/42/57): worse.**
+wm15 = wm13 plus 12000 branches from the gate's 22 deaths on six levels (60% die). Its death
+head is the sharpest yet (next step P39/R90 against wm13's P15/R73; twelve steps P49/R92), and
+in play:
+
+| level | wm13 | wm15 |
+|---|---|---|
+| 1-1 | 3/4, 87% | 1/4, 53% |
+| 1-2 | 0/4, 39% | 0/4, 32% |
+| 4-1 | 0/4, 23% | 0/4, 25% |
+| 4-2 | 0/4, 26% | 0/4, 28% |
+| 8-1 | 0/4, 9% | 0/4, 10% |
+| 8-2 | 0/4, 6% | 0/4, 6% |
+| 8-3 | 0/4, 19% | 0/4, 15% |
+| 8-4 | 0/4, 1% | 0/4, 4% |
+| total | 3/32, mean 26% | 1/32, mean 22% |
+
+The loss is 1-1, where wm15 pressed down on the fourth pipe and went into the underground coin
+room -- a place no data has ever shown the model -- and stood there until the cap: a
+model-based search goes wherever its model is optimistic, including where it has never been.
+Everywhere else the two are within noise, and on 8-2 they play move for move the same games.
+That is the telling part: with the policy net's prior at the root and values scaled by 32
+frames (a move 4 frames better gains 0.125 in q), the prior makes nearly every choice and the
+world model's opinions rarely change a move -- which would explain why improving the model has
+stopped moving play. Next: the same games with values four times as loud (--scale 8).
+
 **Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
 against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and
 spread in the data, and only two had both:
