@@ -73,8 +73,10 @@ def main():
                         st2, stack = state, obs[-4:]
                     line = line[len(pre):][:3] if len(line) > len(pre) + 2 else line[-3:]
                     x_, state_ = torch.from_numpy(stack[None]).cuda(), st2
+                    pv = int(pre[-1]) if len(pre) else int(opt[t - 1])
                 else:
                     x_, state_ = x, state
+                    pv = int(opt[t - 1])
                 out, n = s.classify_along(state_, ROUTE, line)
                 out = np.asarray(out[:n])
                 _, tr, _ = s.replay_obs(state_, line[:max(n, 1)])
@@ -83,7 +85,8 @@ def main():
                 ps = []
                 for model, cal in models:
                     with torch.autocast('cuda', dtype=torch.float16):
-                        _, evs, _, _, _ = model.unroll(x_, torch.from_numpy(line.astype(np.int64))[None].cuda())
+                        _, evs, _, _, _ = model.unroll(x_, torch.from_numpy(line.astype(np.int64))[None].cuda(),
+                                                       torch.tensor([pv]).cuda())
                     lg = torch.stack(evs, 1).float()[0, :, 1].cpu().numpy()
                     if cal is not None:
                         k = np.arange(len(lg)).clip(max=len(cal) - 1)

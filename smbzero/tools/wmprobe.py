@@ -68,7 +68,8 @@ def main():
             acts = line(kind, opt, t, K, rng)
             x = torch.from_numpy(stack[None]).cuda()
             with torch.autocast('cuda', dtype=torch.float16):
-                _, _, _, _, ws = model.unroll(x, torch.from_numpy(acts.astype(np.int64))[None].cuda())
+                _, _, _, _, ws = model.unroll(x, torch.from_numpy(acts.astype(np.int64))[None].cuda(),
+                                              torch.tensor([int(opt[t - 1])]).cuda())
             pred[kind].append(float(ws[-1].float()[0]))
             p = s.progress_along(state, ROUTE, opt, acts, ref_start=seg['start'])
             true[kind].append(float(np.clip(p[min(K, len(p) - 1)] - p[0] + 4.0 * K, 0, 512)))

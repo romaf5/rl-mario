@@ -62,7 +62,7 @@ def main():
     for t in range(max(0, T - a.last), T):
         _, st = s.replay(start, acts[:t])
         ok = survivors(s, st)
-        tree.reset(frames[t:t + 4])
+        tree.reset(frames[t:t + 4], int(acts[t - 1]) if t else 12)
         tree.run(a.sims)
         n, b = tree.visits()
         order = np.argsort(-n)

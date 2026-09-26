@@ -24,7 +24,7 @@ import argparse, json, os, time
 import numpy as np
 import torch
 from .common import FPS, MAX_DELAY, ROUTE, RUNS, THREADS, Search, e2e_segments, gp, level_name, load_state
-from .model import load as load_model
+from .model import NO_PREV, load as load_model
 
 HOPELESS = 512.0
 
@@ -57,13 +57,14 @@ class LatentTree:
         self.size = 0
 
     @torch.no_grad()
-    def reset(self, stack):
-        """stack: (4, 84, 84) uint8 -- the real screen, encoded fresh every decision."""
+    def reset(self, stack, prev=NO_PREV):
+        """stack: (4, 84, 84) uint8 -- the real screen, encoded fresh every decision; prev: the
+        move played before it, which is what says whether A is already held."""
         self.child[:] = -1; self.parent[:] = -1; self.n[:] = 0; self.term[:] = 0
         self.depth[:] = 0
         x = torch.from_numpy(stack[None]).to(self.dev)
         with torch.autocast('cuda', dtype=torch.float16):
-            s, pi, w = self.m.initial(x)
+            s, pi, w = self.m.initial(x, torch.tensor([prev], device=self.dev))
         self.lat[0] = s[0].float()
         self.prior[0] = torch.softmax(pi.float(), 1)[0]
         self.root_lat = self.lat[0:1].clone()
@@ -180,7 +181,7 @@ def play(search_engine, tree, start, route, sims, max_decisions, per_wave=32):
     pvd, maxd = [], []
     start_level = s.level(state)
     for _ in range(max_decisions):
-        tree.reset(stack)
+        tree.reset(stack, acts[-1] if acts else NO_PREV)
         tree.run(sims, per_wave)
         p, m = tree.pv()
         pvd.append(p); maxd.append(m)

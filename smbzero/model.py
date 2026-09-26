@@ -23,6 +23,7 @@ import torch.nn.functional as F
 from .net import _Res, _Stage
 
 LATENT_C = 48          # latent: LATENT_C x 11 x 11 (the IMPALA trunk's grid)
+NO_PREV = 12           # the previous action is not known (a trajectory's or a game's first step)
 N_ACTIONS = 12
 
 
@@ -95,16 +96,31 @@ class Projector(nn.Module):
 
 
 class WorldModel(nn.Module):
-    def __init__(self, latent=LATENT_C):
+    def __init__(self, latent=LATENT_C, prev=False):
         super().__init__()
         chans = (32, 48, latent) if latent >= 48 else (16, 32, latent)
         self.h = Representation(chans)
         self.g = Dynamics(latent)
         self.f = Prediction(latent)
         self.proj = Projector(latent)
+        # A jump fires only when A is newly pressed: holding it after landing does nothing. So
+        # what a press of A does depends on the input before it, which four frames do not show,
+        # and a model that is not told assumes every press jumps -- on 8-1 the search held run +
+        # jump for twenty moves 'jumping' a Buzzy Beetle and ran into it. Zero at the start, so
+        # an untrained embedding changes nothing.
+        self.prev = nn.Embedding(NO_PREV + 1, latent) if prev else None
+        if prev:
+            nn.init.zeros_(self.prev.weight)
 
-    def initial(self, obs):
-        s = self.h(obs)
+    def encode(self, obs, prev=None):
+        """The real frames (and, if the model takes it, the action before them) -> latent."""
+        z = self.h.stages(obs.float() / 255.0)
+        if self.prev is not None and prev is not None:
+            z = z + self.prev(prev)[:, :, None, None]
+        return norm_latent(z)
+
+    def initial(self, obs, prev=None):
+        s = self.encode(obs, prev)
         zero = torch.zeros(len(obs), device=obs.device)
         pi, w = self.f(s, s, zero)
         return s, pi, w
@@ -114,9 +130,10 @@ class WorldModel(nn.Module):
         pi, w = self.f(s2, s0, depth)
         return s2, ev, r, pi, w
 
-    def unroll(self, obs, actions):
-        """obs (B,4,84,84), actions (B,K) -> latents, event logits, step waste, policy logits, W."""
-        s = s0 = self.h(obs)
+    def unroll(self, obs, actions, prev=None):
+        """obs (B,4,84,84), actions (B,K), prev (B,) -> latents, event logits, step waste, policy
+        logits, W."""
+        s = s0 = self.encode(obs, prev)
         lat, evs, rs, pis, ws = [s], [], [], [], []
         zero = torch.zeros(len(obs), device=obs.device)
         pi, w = self.f(s, s0, zero)
@@ -133,10 +150,11 @@ def scale_grad(x, k):
     return x * k + x.detach() * (1 - k)
 
 
-def consistency(model, pred_latents, target_obs):
-    """EfficientZero: the unrolled latent must project onto the latent of the real frames."""
+def consistency(model, pred_latents, target_obs, target_prev=None):
+    """EfficientZero: the unrolled latent must project onto the latent of the real frames (and
+    of the action that led to them, which is what says whether A is being held)."""
     with torch.no_grad():
-        t = model.proj(model.h(target_obs))
+        t = model.proj(model.encode(target_obs, target_prev))
     p = model.proj.predict(pred_latents)
     return -F.cosine_similarity(p, t.detach(), dim=1).mean()
 
@@ -148,6 +166,6 @@ def save(model, path, **meta):
 def load(path, device='cuda'):
     ck = torch.load(path, map_location=device, weights_only=False)
     latent = ck['state']['g.conv.weight'].shape[0]      # read the size the checkpoint was trained at
-    m = WorldModel(latent)
+    m = WorldModel(latent, prev='prev.weight' in ck['state'])
     m.load_state_dict(ck['state'])
     return m.to(device), ck

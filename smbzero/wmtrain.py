@@ -9,7 +9,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from .common import DATA, RUNS
-from .model import WorldModel, consistency, save
+from .model import NO_PREV, WorldModel, consistency, save
 
 EVENTS = ('goal', 'dead', 'forced')
 
@@ -69,8 +69,14 @@ class Trajectories:
         wvalid = torch.cat([torch.ones(len(rows), 1), valid], 1)
         tgt_stack = np.clip(nxt[:, :, None] + np.arange(-3, 1)[None, None], f0[:, None, None], None)
         tgt_obs = self.frames[torch.from_numpy(tgt_stack.reshape(-1))].view(len(rows) * K, 4, 84, 84)
+        # the action before the start (NO_PREV at a trajectory's first step, where it was not kept),
+        # and before each target frame -- the unroll's own previous step, batch-major like tgt_obs
+        a0 = ai - (fi - f0)
+        prev = torch.from_numpy(np.where(ai - 1 >= a0, self.acts.numpy()[np.maximum(ai - 1, 0)], NO_PREV))
+        tgt_prev = acts.reshape(-1)
         return (obs.to(device), acts.to(device), ev.to(device), tgt_obs.to(device),
-                r.to(device), valid.to(device), w.to(device), wvalid.to(device))
+                r.to(device), valid.to(device), w.to(device), wvalid.to(device),
+                prev.to(device), tgt_prev.to(device))
 
 
 def h(x, eps=1e-3):
@@ -84,15 +90,15 @@ def h(x, eps=1e-3):
 
 
 def losses(model, obs, acts, ev, tgt_obs, r, valid, wt, wvalid,
-           w_event=1.0, w_cons=1.0, w_waste=1.0, w_value=1.0, transform=False):
-    lat, evs, rs, _, ws = model.unroll(obs, acts)
+           w_event=1.0, w_cons=1.0, w_waste=1.0, w_value=1.0, transform=False, prev=None, tgt_prev=None):
+    lat, evs, rs, _, ws = model.unroll(obs, acts, prev)
     e = torch.stack(evs, 1)                                  # (B, K, 3)
     pos = ev.sum((0, 1)).clamp(min=1)
     weight = (ev.numel() / 3 / pos).clamp(max=50)            # events are rare: weight them up
     le = F.binary_cross_entropy_with_logits(e, ev, pos_weight=weight)
     # (B, K, ...) flattened batch-major, the order tgt_obs is built in -- cat(dim=0)
     # would be depth-major and pair each latent with another sample's frames.
-    lc = consistency(model, torch.stack(lat[1:], 1).flatten(0, 1), tgt_obs)
+    lc = consistency(model, torch.stack(lat[1:], 1).flatten(0, 1), tgt_obs, tgt_prev)
     pred_r = torch.stack(rs, 1)                              # the frames each step throws away
     if transform:
         lr = (F.smooth_l1_loss(h(pred_r.float()), h(r), reduction='none') * valid).sum() / valid.sum().clamp(min=1)
@@ -117,9 +123,10 @@ def gate(model, data, rows, device='cuda', batch=256):
     tp = np.zeros((K, 3)); fp = np.zeros((K, 3)); fn = np.zeros((K, 3)); n = 0
     for i in range(0, len(rows), batch):
         r = rows[i:i + batch]
-        obs, acts, ev = data.batch(r, device)[:3]
+        b = data.batch(r, device)
+        obs, acts, ev, prev = b[0], b[1], b[2], b[8]
         with torch.autocast('cuda', dtype=torch.bfloat16):
-            _, evs, _, _, _ = model.unroll(obs, acts)
+            _, evs, _, _, _ = model.unroll(obs, acts, prev)
         p = (torch.stack(evs, 1).float().sigmoid() > 0.5).cpu().numpy()
         t = ev.cpu().numpy() > 0.5
         tp += (p & t).sum(0); fp += (p & ~t).sum(0); fn += (~p & t).sum(0)
@@ -140,6 +147,8 @@ def main():
     ap.add_argument('--w-event', type=float, default=1.0,
                     help='weight on the goal/dead/forced heads: a classifier on one 84x84 frame '
                          'predicts an enemy death better (0.8 AUC on 8-1) than this model on four (0.7)')
+    ap.add_argument('--prev', action='store_true',
+                    help='tell the model the action before its frames: whether A is already held')
     ap.add_argument('--transform', action='store_true',
                     help="train W and the per-step waste through MuZero's value transform")
     ap.add_argument('--out', default=os.path.join(RUNS, 'wm0'))
@@ -156,15 +165,16 @@ def main():
         % (len(data), len(data.frames), len(tr), len(va),
            ' '.join('%s %.2f%%' % (e, 100 * v) for e, v in zip(EVENTS,
                     [(data.out == 1).float().mean(), (data.out == 2).float().mean(), data.forced.mean()]))))
-    model = WorldModel().cuda()
+    model = WorldModel(prev=a.prev).cuda()
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     t0, hist = time.time(), []
     for step in range(1, a.steps + 1):
         model.train()
-        obs, acts, ev, tgt, r, valid, wt, wv = data.batch(rng.choice(tr, a.batch), 'cuda')
+        obs, acts, ev, tgt, r, valid, wt, wv, prev, tprev = data.batch(rng.choice(tr, a.batch), 'cuda')
         with torch.autocast('cuda', dtype=torch.bfloat16):
             loss, le, lc, rmae = losses(model, obs, acts, ev, tgt, r, valid, wt, wv, w_cons=a.w_cons,
-                                        w_event=a.w_event, transform=a.transform)
+                                        w_event=a.w_event, transform=a.transform,
+                                        prev=prev, tgt_prev=tprev)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
