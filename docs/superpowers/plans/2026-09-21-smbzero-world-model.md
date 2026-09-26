@@ -445,6 +445,29 @@ the world model and the game stepped only by the moves played; replayed in stabl
 frame matched (docs/media/smbzero_latent_1-1.mp4). 4-1 from four starts reaches 34, 34, 34 and
 23% of the level (before the trained prior it wandered at ~10%).
 
+**Stage B gate (the stage A and C protocol: 8 levels x 4 starts, 1000 simulations; wm13, net
+at the root, distilled head below): 3/32.**
+
+| level | won | mean progress | what stops it |
+|---|---|---|---|
+| 1-1 | 3/4 (35.3-35.7 s, all three verified in stable-retro) | 77% | one start stalls |
+| 1-2 | 0/4 | 15% | |
+| 4-1 | 0/4 | 31% | a Piranha Plant (three of four starts, x ~ 1850) |
+| 4-2 | 0/4 | 26% | |
+| 8-1 | 0/4 | 7% | a Piranha Plant |
+| 8-2 | 0/4 | 10% | |
+| 8-3 | 0/4 | 14% | |
+| 8-4 | 0/4 | 1% | the castle's first hazard |
+
+Against the same 32 games: the emulator-lookahead search with the learned value 26/32, stage
+C's teacher-free value 18/32. The first working search without the emulator, not yet a rival.
+
+Piranha Plants are the common wall. Branching from 8-1's deaths (wm14) taught those 8-1
+moments -- the fatal jump goes from 0.00 to 0.69 -- but not the concept: on 4-1's plant deaths,
+which it never saw, it gives 0.01-0.05. Next: the same thing from every level's deaths (the
+gate's lost games), retrain (wm15), and replay all eight levels on starts none of that data
+came from.
+
 **Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
 against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and
 spread in the data, and only two had both:
