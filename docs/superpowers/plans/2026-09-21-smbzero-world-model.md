@@ -348,6 +348,23 @@ the world model, with four frames, reaches ~0.7. The information is in the input
 model does not extract it. The target is how it learns death -- one of several losses on a
 48-channel latent unrolled twelve steps -- not what it sees.
 
+Two follow-ups narrowed that. The same test on 8-2 as a control: one-frame classifiers reach
+only 0.57-0.72 there, while the world model reaches ~0.88 -- so it does not under-extract in
+general; 8-1's failure is specific. And the killer is identified from RAM: **a line of three
+Goombas** walking toward Mario, 42/66/90 pixels ahead at decision 41, standing in front of the
+trees (the "trunk" pixels in the zoomed frames were the Goombas). The death head gives that
+collision 0.05 two steps before contact, against 0.01 for jumping.
+
+**Weighting the death loss 4x (wm8) makes it worse**, on identical states: 8-1 0.68 -> 0.59,
+8-2 0.85 -> 0.81, and by distance 1-2 steps 0.94 -> 0.95, 3-5 steps 0.83 -> 0.83, 6-10 steps
+0.74 -> 0.67. The loss-competition hypothesis is refuted; overweighting costs the long range.
+
+Across every model the pattern by distance is the same -- 0.94, 0.83, 0.74 -- a deterministic
+game, so a perfect model would score 1.0 at every distance: the unroll loses the hazard as it
+imagines forward. But these probes mostly measure deaths 6-10 steps out (122 of 174), while
+survival is decided in the last 1-3 steps, where a jump still saves it, and that bucket held
+five deaths. `deathprobe --near` closes in first and probes only the last three steps.
+
 **Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
 against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and
 spread in the data, and only two had both:
