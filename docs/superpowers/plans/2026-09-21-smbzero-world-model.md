@@ -388,6 +388,24 @@ change 2.6 against 3.7, three changes 3.8 against 7.4 (wm7 4.7); near-sibling ag
 and 96% (wm7 93% and 97%); death AUC 8-1 0.67, overall enemy 0.75 (wm7 0.68, 0.77). A real
 negative this time.
 
+**Collision data (world_app, 8000 trajectories, 39% die; wm10)** gives the sharpest death
+head yet -- close-in enemy deaths 0.94 overall, 0.95 on 8-1, mean p 0.52 against 0.05 for
+survivals -- and it sees the Goomba trio (walking 0.10 two steps out against 0.01 for
+jumping). In play it dies earlier: 8-1 mean 3%, nearly every game at 2%.
+
+**Why: a held A does not jump.** The 2% death is a Buzzy Beetle, reached after twenty moves
+of holding run + jump. In Super Mario Bros a jump fires only when A is newly pressed; checked
+in the emulator from that state, holding run + jump never leaves the ground, while releasing
+for one step and pressing again jumps. The model is told nothing about the button before its
+four frames, so it assumes every press jumps. Separated cleanly: running into the Beetle with
+no A pressed, wm10 sees the collision (0.45 then 0.76 at the steps it dies); holding A, it
+predicts 0.01-0.04 -- it believes Mario is in the air. Perception was never the problem.
+
+`--prev` (wm11) adds the previous action to the latent at the root: used (it moves the
+latent 4-6% between A held and released) but too weak -- the same Beetle at 0.01 holding A,
+8-1 mean 4%. `--edge` (wm12) gives the dynamics the previous action as planes at every
+step of the imagined line, so "A newly pressed" is in its input rather than inferred.
+
 **Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
 against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and
 spread in the data, and only two had both:
