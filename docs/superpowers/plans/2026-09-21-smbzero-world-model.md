@@ -294,7 +294,13 @@ a compressed good end predicts: among twelve candidate moves whose true W all li
 few frames, the model's ordering is noise and the agent random-walks.
 
 The reason for `wmdata --siblings` was that every trajectory gave one action per state, so
-the model was never shown the comparison the search makes. **That was the wrong diagnosis.**
+the model was never shown the comparison the search makes. **Correction, 2026-09-25 evening:
+this experiment was invalid, not negative.** A sibling handed out on a later loop iteration
+took the level drawn afresh at the top of that iteration, so its W targets were computed
+against another level's route: in world_sib, 98% of the 1310 sibling groups carry mixed level
+tags and at least 57% of their trajectories were labelled against the wrong level (the data is
+kept in data_archive/world_sib_wrong_level_labels). What follows describes a model trained on
+that, and says nothing about siblings. What was written at the time:
 wm6, trained on 8000 sibling trajectories on top of everything else, is worse on both
 measurements: near-sibling agreement on 8-1 falls from 91% to 82% (flip1) and 92% to 88%
 (flip3), and the bounded latent search dies after 84 and 83 decisions where wm5 reached 197.

@@ -7,6 +7,10 @@ delay, or a random point along the route -- and is played by one of:
   sticky   a random action held for a few decisions (how a body moves)
   random   independent random actions (deaths, walls, the game's ugly corners)
   agent    the agent's own MCTS play -- the states a search inside the model will really see
+  approach walk or run right into whatever is ahead, jumping at a random moment: with
+           --siblings N, N lines from one start that differ only in when they jump -- the
+           world model walked into three Goombas on 8-1 rating the collision p = 0.05 two steps
+           out, so it is shown, many times over, the one decision that separates the two
 
 With --siblings N, a start is emitted N times with a different first action each, the rest
 played the same way. The search always compares several actions from one state, and nothing
@@ -44,6 +48,16 @@ def rollout(s, seg, rng, mode, length):
     else:
         acts = rng.integers(0, 12, length).astype(np.uint8)
     return start, acts
+
+
+def approach(length, rng, jump_at=None):
+    """Right (walk or run), a jump of 1-4 steps at jump_at (None: random, sometimes never)."""
+    base = int(rng.choice([1, 3]))
+    acts = np.full(length, base, np.uint8)
+    j = int(rng.integers(0, length + length // 4)) if jump_at is None else jump_at
+    if j < length:
+        acts[j:j + int(rng.integers(1, 5))] = int(rng.choice([2, 4]))
+    return acts
 
 
 def start_state(s, seg, rng):
@@ -107,8 +121,16 @@ def main():
     while done < a.trajectories:
         lvl = levels[int(rng.integers(len(levels)))]
         mode = modes[int(rng.integers(len(modes)))]
-        if sibs:
-            start, action = sibs.pop()
+        if sibs:                          # a sibling carries its own level: lvl above was redrawn,
+            lvl, mode, start, action = sibs.pop()     # and progress against another level's
+        elif mode == 'approach':                      # route is garbage (it was, for world_sib)
+            opt = segs[lvl]['opt']
+            t = int(rng.integers(0, max(len(opt) - 8, 1)))
+            _, start = s.replay(segs[lvl]['start'], opt[:t])
+            n = max(a.siblings, 1)
+            times = rng.choice(a.length + a.length // 4, min(n, a.length), replace=False)
+            sibs = [(lvl, mode, start, approach(a.length, rng, int(j))) for j in times]
+            lvl, mode, start, action = sibs.pop()
         elif mode == 'agent':
             if not queue:
                 queue = agent_rollouts(s, player, segs, levels, rng, a.length,
@@ -122,8 +144,8 @@ def main():
                 sibs = []
                 for b in rng.choice(12, min(a.siblings, 12), replace=False):
                     alt = action.copy(); alt[0] = b
-                    sibs.append((start, alt))
-                start, action = sibs.pop()
+                    sibs.append((lvl, mode, start, alt))
+                lvl, mode, start, action = sibs.pop()
         out, n = s.classify_along(start, ROUTE, action)
         if n <= 1:
             continue
