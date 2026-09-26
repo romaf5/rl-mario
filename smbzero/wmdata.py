@@ -7,6 +7,10 @@ delay, or a random point along the route -- and is played by one of:
   sticky   a random action held for a few decisions (how a body moves)
   random   independent random actions (deaths, walls, the game's ugly corners)
   agent    the agent's own MCTS play -- the states a search inside the model will really see
+  failures the agent's own lost games (--failures 'runs/*.json'): replayed to 1-15 steps
+           before they ended and branched there, so the model sees, many times over, the
+           exact situations the search inside it failed in -- the data that never contained
+           them was the emulator agent's, which does not jump into Piranha Plants
   approach walk or run right into whatever is ahead, jumping at a random moment: with
            --siblings N, N lines from one start that differ only in when they jump -- the
            world model walked into three Goombas on 8-1 rating the collision p = 0.05 two steps
@@ -96,6 +100,7 @@ def main():
     ap.add_argument('--agent-relvalue', help="learned value for the 'agent' mode")
     ap.add_argument('--agent-sims', type=int, default=200)
     ap.add_argument('--agent-games', type=int, default=16)
+    ap.add_argument('--failures', help="glob of latent --out JSON files (level in the name, e.g. _8-1.json)")
     ap.add_argument('--siblings', type=int, default=0,
                     help='emit each start this many times, differing in the first action')
     a = ap.parse_args()
@@ -108,6 +113,18 @@ def main():
     modes = a.modes.split(',')
     rng = np.random.default_rng(a.seed)
     player, queue, sibs = None, [], []
+    lost = []                                   # (level, start, actions) of games that ended in a death
+    if a.failures:
+        import glob as _glob, json as _json, re as _re
+        for f in sorted(_glob.glob(a.failures)):
+            m_ = _re.search(r'_(\d-\d)\.json$', f)
+            if not m_ or m_.group(1) not in segs:
+                continue
+            for g in _json.load(open(f)):
+                if str(g.get('reason', '')).startswith('dead') and len(g.get('actions', [])) > 2:
+                    lost.append((m_.group(1), s.frames(segs[m_.group(1)]['start'], g['delay']),
+                                 np.array(g['actions'], np.uint8)))
+        print('[wmdata] %d lost games to branch from' % len(lost), flush=True)
     if 'agent' in modes:
         from .net import RelEvaluator, load as load_net
         from .play import Player
@@ -123,6 +140,24 @@ def main():
         mode = modes[int(rng.integers(len(modes)))]
         if sibs:                          # a sibling carries its own level: lvl above was redrawn,
             lvl, mode, start, action = sibs.pop()     # and progress against another level's
+        elif mode == 'failures':
+            lvl, st0, lacts = lost[int(rng.integers(len(lost)))]
+            back = int(rng.integers(2, min(16, len(lacts)) + 1))     # a death one step out is dropped below
+            _, start = s.replay(st0, lacts[:len(lacts) - back])
+            played = lacts[len(lacts) - back:]
+            sibs = []
+            for _ in range(max(a.siblings, 1)):
+                kind = int(rng.integers(4))
+                if kind == 0:                     # as the agent played it, then anything
+                    line = np.concatenate([played, rng.integers(0, 12, max(a.length - len(played), 0)).astype(np.uint8)])
+                elif kind == 1:
+                    line = approach(a.length, rng)
+                elif kind == 2:
+                    line = np.full(a.length, rng.integers(0, 12), np.uint8)
+                else:
+                    line = rng.integers(0, 12, a.length).astype(np.uint8)
+                sibs.append((lvl, mode, start, line[:a.length]))
+            lvl, mode, start, action = sibs.pop()
         elif mode == 'approach':                      # route is garbage (it was, for world_sib)
             opt = segs[lvl]['opt']
             t = int(rng.integers(0, max(len(opt) - 8, 1)))
