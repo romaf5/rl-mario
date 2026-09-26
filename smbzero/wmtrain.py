@@ -147,6 +147,8 @@ def main():
     ap.add_argument('--w-event', type=float, default=1.0,
                     help='weight on the goal/dead/forced heads: a classifier on one 84x84 frame '
                          'predicts an enemy death better (0.8 AUC on 8-1) than this model on four (0.7)')
+    ap.add_argument('--edge', action='store_true',
+                    help='the dynamics sees the previous action at every step: a jump is A newly pressed')
     ap.add_argument('--prev', action='store_true',
                     help='tell the model the action before its frames: whether A is already held')
     ap.add_argument('--transform', action='store_true',
@@ -165,7 +167,7 @@ def main():
         % (len(data), len(data.frames), len(tr), len(va),
            ' '.join('%s %.2f%%' % (e, 100 * v) for e, v in zip(EVENTS,
                     [(data.out == 1).float().mean(), (data.out == 2).float().mean(), data.forced.mean()]))))
-    model = WorldModel(prev=a.prev).cuda()
+    model = WorldModel(prev=a.prev, edge=a.edge).cuda()
     opt = torch.optim.AdamW(model.parameters(), lr=a.lr, weight_decay=1e-4)
     t0, hist = time.time(), []
     for step in range(1, a.steps + 1):

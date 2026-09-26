@@ -53,6 +53,7 @@ class LatentTree:
         self.child = np.full((max_nodes, 12), -1, np.int32)
         self.parent = np.full(max_nodes, -1, np.int32)
         self.depth = np.zeros(max_nodes, np.int32)
+        self.act_in = np.full(max_nodes, NO_PREV, np.int64)   # the move into each node (the root: the real one)
         self.term = np.zeros(max_nodes, np.uint8)         # 1 goal, 2 dead
         self.size = 0
 
@@ -62,6 +63,7 @@ class LatentTree:
         move played before it, which is what says whether A is already held."""
         self.child[:] = -1; self.parent[:] = -1; self.n[:] = 0; self.term[:] = 0
         self.depth[:] = 0
+        self.act_in[0] = prev
         x = torch.from_numpy(stack[None]).to(self.dev)
         with torch.autocast('cuda', dtype=torch.float16):
             s, pi, w = self.m.initial(x, torch.tensor([prev], device=self.dev))
@@ -124,6 +126,7 @@ class LatentTree:
                 self.child[x, a] = c
                 self.parent[c] = x
                 self.depth[c] = self.depth[x] + 1
+                self.act_in[c] = a
                 self.n[c] = 0
                 self.b[c] = self.w[c] = 0.0
                 picks.append((x, a, c))
@@ -135,7 +138,8 @@ class LatentTree:
             act = torch.tensor([p[1] for p in picks], device=self.dev)
             dep = torch.tensor([float(self.depth[p[2]]) for p in picks], device=self.dev)
             with torch.autocast('cuda', dtype=torch.float16):
-                s2, ev, _ = self.m.g(self.lat[src], act)
+                s2, ev, _ = self.m.g(self.lat[src], act,
+                                     torch.from_numpy(self.act_in[[q[0] for q in picks]]).to(self.dev))
                 pi, w = self.m.f(s2, self.root_lat.expand(len(picks), -1, -1, -1), dep)
             lg = ev.float().cpu().numpy()
             if self.calib is not None:        # a price is only fair if the probability is honest

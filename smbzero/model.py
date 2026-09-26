@@ -49,16 +49,26 @@ def norm_latent(s):
 
 
 class Dynamics(nn.Module):
-    def __init__(self, c=LATENT_C):
+    def __init__(self, c=LATENT_C, edge=False):
         super().__init__()
-        self.conv = nn.Conv2d(c + N_ACTIONS, c, 3, padding=1)
+        # edge: the previous action too, as a second set of planes. A jump is a function of the
+        # button now AND the button before (A newly pressed), at every step of an imagined line,
+        # so the transition is given both rather than left to infer the second from pixels.
+        self.edge = edge
+        self.conv = nn.Conv2d(c + N_ACTIONS + (N_ACTIONS + 1 if edge else 0), c, 3, padding=1)
         self.r1, self.r2 = _Res(c), _Res(c)
         self.out = nn.Sequential(nn.Flatten(), nn.Linear(c * 11 * 11, 256), nn.ReLU(), nn.Linear(256, 4))
 
-    def forward(self, s, a):
-        """(s, action) -> (next latent, event logits: goal, dead, forced; the step's waste r >= 0)"""
-        plane = F.one_hot(a.long(), N_ACTIONS).float()[:, :, None, None].expand(-1, -1, s.shape[2], s.shape[3])
-        h = self.r2(self.r1(self.conv(torch.cat([s, plane], 1))))
+    def forward(self, s, a, a_prev=None):
+        """(s, action, previous action) -> (next latent, event logits: goal, dead, forced; the
+        step's waste r >= 0)"""
+        size = (-1, -1, s.shape[2], s.shape[3])
+        planes = [s, F.one_hot(a.long(), N_ACTIONS).float()[:, :, None, None].expand(*size)]
+        if self.edge:
+            if a_prev is None:
+                a_prev = torch.full_like(a, NO_PREV)
+            planes.append(F.one_hot(a_prev.long(), N_ACTIONS + 1).float()[:, :, None, None].expand(*size))
+        h = self.r2(self.r1(self.conv(torch.cat(planes, 1))))
         o = self.out(h)
         return norm_latent(h), o[:, :3], F.softplus(o[:, 3]) * 4.0
 
@@ -96,11 +106,11 @@ class Projector(nn.Module):
 
 
 class WorldModel(nn.Module):
-    def __init__(self, latent=LATENT_C, prev=False):
+    def __init__(self, latent=LATENT_C, prev=False, edge=False):
         super().__init__()
         chans = (32, 48, latent) if latent >= 48 else (16, 32, latent)
         self.h = Representation(chans)
-        self.g = Dynamics(latent)
+        self.g = Dynamics(latent, edge)
         self.f = Prediction(latent)
         self.proj = Projector(latent)
         # A jump fires only when A is newly pressed: holding it after landing does nothing. So
@@ -139,7 +149,8 @@ class WorldModel(nn.Module):
         pi, w = self.f(s, s0, zero)
         pis.append(pi); ws.append(w)
         for k in range(actions.shape[1]):
-            s, ev, r = self.g(s, actions[:, k])
+            a_prev = (prev if prev is not None else None) if k == 0 else actions[:, k - 1]
+            s, ev, r = self.g(s, actions[:, k], a_prev)
             s = scale_grad(s, 0.5)                      # MuZero: halve the gradient along the unroll
             pi, w = self.f(s, s0, zero + (k + 1))
             lat.append(s); evs.append(ev); rs.append(r); pis.append(pi); ws.append(w)
@@ -166,6 +177,7 @@ def save(model, path, **meta):
 def load(path, device='cuda'):
     ck = torch.load(path, map_location=device, weights_only=False)
     latent = ck['state']['g.conv.weight'].shape[0]      # read the size the checkpoint was trained at
-    m = WorldModel(latent, prev='prev.weight' in ck['state'])
+    edge = ck['state']['g.conv.weight'].shape[1] > latent + N_ACTIONS
+    m = WorldModel(latent, prev='prev.weight' in ck['state'], edge=edge)
     m.load_state_dict(ck['state'])
     return m.to(device), ck
