@@ -227,6 +227,10 @@ def main():
     ap.add_argument('--raw', action='store_true', help='ignore the checkpoint calibration')
     ap.add_argument('--cap', type=float, default=2.5, help='most decisions, as a multiple of the route')
     ap.add_argument('--prior-net', help="the policy net whose prior the root uses (the world model's head is untrained)")
+    ap.add_argument('--scale', type=float, default=32.0,
+                    help='frames of W that span the whole of q: at 32 a move 4 frames better gains 0.125, '
+                         'which the prior term outweighs -- two world models then play identical games')
+    ap.add_argument('--c-puct', type=float, default=1.5)
     ap.add_argument('--deep-prior', default='uniform', choices=('uniform', 'model'),
                     help="with --prior-net, the prior below the root: uniform, or the world model's (distilled) head")
     ap.add_argument('--backup', default='self', choices=('self', 'children'),
@@ -248,6 +252,7 @@ def main():
     print('[latent] tree may grow %d deep (the model was trained to unroll %s)'
           % (md, ck.get('unroll', 'unknown')), flush=True)
     tree = LatentTree(model, max_nodes=a.max_nodes, death_cost=a.death_cost, calib=calib,
+                      scale=a.scale, c_puct=a.c_puct,
                       max_depth=md, backup=a.backup, prior_net=pn, deep_prior=a.deep_prior)
     cap = int(a.cap * len(segs[a.level]['opt']))
     opt, ref_start = segs[a.level]['opt'], segs[a.level]['start']
