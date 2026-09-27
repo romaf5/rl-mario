@@ -91,6 +91,8 @@ def main():
                          "(training-time only -- the value still learns from the search's verdicts)")
     ap.add_argument('--levels', default=','.join(ROUTE))
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--gate', type=float, default=0.15,
+                    help='go back to the best policy when a round wins this much less than it (0: off)')
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     logf = open(os.path.join(a.out, 'loop.log'), 'a')
@@ -115,6 +117,7 @@ def main():
     opt_v = torch.optim.AdamW(rel.parameters(), lr=a.lr, weight_decay=1e-4)
     t_end = time.time() + a.hours * 3600
     it = 0
+    best_rate, best_state = -1.0, None
     while time.time() < t_end:
         it += 1
         t0 = time.time()
@@ -159,6 +162,20 @@ def main():
                 os.makedirs(os.path.join(a.out, 'games'), exist_ok=True)
                 np.savez(os.path.join(a.out, 'games', 'it%04d_d%02d%s.npz' % (it, g.tag[1], '_won' if g.won else '')),
                          start='FullGame', lead_frames=g.tag[1], actions=np.array(g.actions, np.uint8))
+        # The evaluator. This round's games were played by the policy the last round trained, so
+        # they judge it for free. One that wins clearly fewer of its level games than the best so
+        # far is not trained on further: the loop goes back to the best. Without this zpol1 fell
+        # from 57% of its own games at round 4 to 14% at round 14 and cost the gate 5 levels.
+        lw = [w for k, v in won.items() if k != 'game' for w in v]
+        rate = float(np.mean(lw)) if lw else 0.0
+        if rate >= best_rate:
+            best_rate = rate
+            best_state = {k: v.detach().clone() for k, v in net.state_dict().items()}
+            save_net(net, os.path.join(a.out, 'net_best.pt'), it=it, rate=rate)
+        elif a.gate and rate < best_rate - a.gate:
+            net.load_state_dict(best_state)
+            log('[zero] it %d: won %.0f%% of its level games against the best %.0f%% -- back to the best policy'
+                % (it, 100 * rate, 100 * best_rate))
         # train the prior on the visits and the value on the search's own backed-up values
         net.train(); rel.train()
         lp = lv = torch.zeros(())
