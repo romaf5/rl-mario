@@ -45,6 +45,7 @@ def main():
     ap.add_argument('--levels', default=','.join(ROUTE))
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--spine-tries', type=int, default=6, help='attempts per level before giving up on it')
+    ap.add_argument('--seed-lines', help="glob of JSON winning lines (level in the name, _4-2.json) to start the pool with")
     ap.add_argument('--spine-sims', type=int, default=0, help='simulations for a spine (0: same as --sims); '
                     'a winning line is rare and is branched from many times, so it is worth more search')
     a = ap.parse_args()
@@ -75,6 +76,17 @@ def main():
     tries = {l: 0 for l in levels}                  # so it is kept and branched from many times
     made = {l: 0 for l in levels}                   # roots kept per level: keep the mix even
     bwin = {l: [0, 0] for l in levels}              # branches won / tried: keep them hard enough
+    if a.seed_lines:                                # first ways the agent cannot find (Go-Explore)
+        import glob as _glob, json as _json, re as _re
+        for f in sorted(_glob.glob(a.seed_lines)):
+            m_ = _re.search(r'_(\d-\d)\.json$', f)
+            if m_ and m_.group(1) in levels:
+                for g in _json.load(open(f)):
+                    if g.get('won'):
+                        pool.append((m_.group(1), s.frames(segs[m_.group(1)]['start'], g['delay']),
+                                     np.array(g['actions'], np.uint8), len(g['actions'])))
+        print('[mcdata] %d seeded lines: %s' % (len(pool), ','.join(sorted({q[0] for q in pool}))), flush=True)
+    n_seed = len(pool)
     while total < a.pairs:
         # A pool that fills with the easy levels never tries the hard ones again, and the
         # value then goes into the gate never having seen them. Ask for what is missing.
@@ -108,9 +120,9 @@ def main():
         pw = np.array([1.0 / (1 + made[q[0]]) for q in pool])
         for gi in rng.choice(len(pool), max(1, a.games // nb), p=pw / pw.sum()):
             l, st0, acts, T = pool[int(gi)]
-            groups.append((l, st0, acts, T, int(rng.integers(0, max(T - 8, 1)))))
+            groups.append((l, st0, acts, T, int(rng.integers(0, max(T - 8, 1))), int(gi)))
         bstarts, bcaps, prefixes, owner, root_states = [], [], [], [], []
-        for gi, (l, st0, acts, T, t) in enumerate(groups):
+        for gi, (l, st0, acts, T, t, pidx) in enumerate(groups):
             _, root_state = s.replay(st0, acts[:t])
             root_states.append(root_state)
             won_, tried_ = bwin[l]
@@ -133,7 +145,7 @@ def main():
         jroot = {}                       # one stored root per group, shared by all its branches
         for bg in branches:
             b = bg.tag
-            l, st0, acts, T, t = groups[owner[b]]
+            l, st0, acts, T, t, pidx = groups[owner[b]]
             stats['branch_wins'] += bool(bg.won)
             bwin[l][1] += 1; bwin[l][0] += bool(bg.won)
             if bg.won and len(pool) < 200:      # a branch that finished is a line of its own
@@ -159,6 +171,21 @@ def main():
                 leaves.append(frames[d:d + 4])                 # the stack ending at that step
                 ridx.append(j); depth.append(d); dval.append(r_leaf - r_root)
                 total += 1
+        # A seeded line's own continuation, as one more sibling. From a root before the vine the
+        # agent's branches almost never bump the hidden block -- that is why it needed seeding --
+        # so without this the value would never see, at equal depth, the one line that does.
+        for gi, (l, st0, acts, T, t, pidx) in enumerate(groups):
+            if pidx >= n_seed or gi not in jroot:
+                continue
+            j, root_state = jroot[gi]
+            cont = acts[t:]
+            obs, _, _ = s.replay_obs(root_state, cont[:a.depth])
+            frames = np.concatenate([roots[j], obs])
+            for d in range(1, min(a.depth, len(cont)) + 1):
+                leaves.append(frames[d:d + 4]); ridx.append(j); depth.append(d)
+                dval.append(4.0 * (len(cont) - d) - 4.0 * (T - t))     # the line itself: nothing lost
+                total += 1
+            stats['seeded'] = stats.get('seeded', 0) + 1
         if len(leaves) >= a.shard:
             flush()
             print('[mcdata] %d pairs, %d shards (%.0f s) | spines %d/%d won, branches %d/%d won' % (
