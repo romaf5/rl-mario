@@ -333,6 +333,15 @@ first ways as from its own lines, and from a root on one the line's own continua
 a sibling, so the value sees the hidden way beside the agent's lines that miss it. Measured
 against the 20/32 recipe with one change: mc2 + mc3 + the seeded 4-2 / 8-4 data (mc5).
 
+**Result: 15/32, and still 0/4 on both 4-2 and 8-4** -- every game on them wanders to the cap
+rather than dying -- while the rest slips (1-1 2/4, 8-2 1/4; the baseline had 20/24 there).
+The policy in the gate (zero8) was trained on the search's routes, vine included, and clears
+4-2 4/4 with relv3; so the policy knows the way and the teacher-free value, even given 4-2
+data, steers it off. Go-Explore's first ways are long and wandering (549-745 decisions on
+4-2 against the polished 359), and a value that learns W relative to them may not separate
+the right warp pipe, or the right maze pipe, from the wrong ones. Next: where one 4-2 game
+actually gets lost.
+
 **Stage B, the depth bound (wm5: unroll 12, calibrated).** The search's lookahead was
 measured rather than assumed, after two wrong assertions that it was too shallow. At 1000
 simulations the line it believes in is **31 steps long** and the tree reaches 33, against a
