@@ -342,6 +342,26 @@ data, steers it off. Go-Explore's first ways are long and wandering (549-745 dec
 the right warp pipe, or the right maze pipe, from the wrong ones. Next: where one 4-2 game
 actually gets lost.
 
+**Where 4-2 gets lost: the hidden block.** The route bumps it at decision 131 (x=1031) and the
+vine spawns; the seeded value's game (897 decisions) never spawns it, wandering at x 1057-1150.
+Started from the route's own states before the block (8 games each, 1000 simulations, 80
+decisions, tools/vinetest.py), the teacher's value (relv3) bumps it 8/8 from 71 decisions out
+and 6/8 from 11; the seeded one (relv_mc235) 0/8, 0/8, 0/8 and 1/8. Scoring 73 twelve-step
+lines from 11 decisions out, it rates the lines that spawn the vine 109-141 frames lost and
+random wandering 89-114 (the teacher: 5-7 against 13-41) -- it has not learned that the vine
+is good. The data says why: branch wins in mc5 were 74%, nearly all from roots after the vine,
+because a won branch joins the pool as a line and the pool fills with post-vine lines. Before
+the vine there were only the three seed lines per level, and a root within one branch's depth
+(60) of the bump is a few percent of a 700-decision line.
+
+**Frontier roots (mcdata --frontier, Go-Explore's backward algorithm).** Per seed line, keep
+the earliest root a branch has won from; draw 75% of a seeded level's roots from the 60
+decisions before it. The frontier walks back through what the agent can already do and stops
+where it cannot (the vine, a maze pipe), so the data piles up there: the seed line's
+continuation over the bump beside the agent's branches that miss it. And --cap-by-line: a branch
+past (its line's remaining decisions + 128) is HOPELESS whatever it does, so it stops there.
+Run: mc6 (4-2, 8-4, 24k pairs), value on mc2 + mc3 + mc6 against the 20/32 recipe.
+
 **Stage B, the depth bound (wm5: unroll 12, calibrated).** The search's lookahead was
 measured rather than assumed, after two wrong assertions that it was too shallow. At 1000
 simulations the line it believes in is **31 steps long** and the tree reaches 33, against a

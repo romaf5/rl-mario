@@ -48,6 +48,12 @@ def main():
     ap.add_argument('--seed-lines', help="glob of JSON winning lines (level in the name, _4-2.json) to start the pool with")
     ap.add_argument('--spine-sims', type=int, default=0, help='simulations for a spine (0: same as --sims); '
                     'a winning line is rare and is branched from many times, so it is worth more search')
+    ap.add_argument('--frontier', type=float, default=0.0,
+                    help="share of a seeded level's roots taken from its seeded lines just before their frontier, "
+                         "the earliest root a branch has won from (Go-Explore's backward algorithm)")
+    ap.add_argument('--min-pool', type=int, help='play spines while the pool is smaller than this (default: --games)')
+    ap.add_argument('--cap-by-line', action='store_true', help="stop a branch once it cannot beat its line by "
+                    "less than HOPELESS: its label is HOPELESS either way")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     s = Search(threads=THREADS)
@@ -87,12 +93,14 @@ def main():
                                      np.array(g['actions'], np.uint8), len(g['actions'])))
         print('[mcdata] %d seeded lines: %s' % (len(pool), ','.join(sorted({q[0] for q in pool}))), flush=True)
     n_seed = len(pool)
+    front = [q[3] - 8 for q in pool]               # per seeded line: earliest root a branch won from
+    min_pool = a.games if a.min_pool is None else a.min_pool
     while total < a.pairs:
         # A pool that fills with the easy levels never tries the hard ones again, and the
         # value then goes into the gate never having seen them. Ask for what is missing.
         have = {q[0] for q in pool}
         want = [l for l in levels if l not in have and tries[l] < a.spine_tries]
-        if len(pool) < a.games or want:
+        if len(pool) < min_pool or want:
             lv = rng.choice(want if want else levels, a.games)
             for l in set(lv.tolist()):            # one round, not one game, per attempt
                 tries[l] += 1
@@ -119,8 +127,18 @@ def main():
         # value then has almost nothing of the hard levels. Favour what we have least of.
         pw = np.array([1.0 / (1 + made[q[0]]) for q in pool])
         for gi in rng.choice(len(pool), max(1, a.games // nb), p=pw / pw.sum()):
-            l, st0, acts, T = pool[int(gi)]
-            groups.append((l, st0, acts, T, int(rng.integers(0, max(T - 8, 1))), int(gi)))
+            gi = int(gi)
+            seeded = [k for k in range(n_seed) if pool[k][0] == pool[gi][0]]
+            if seeded and rng.random() < a.frontier:
+                # Where the agent's own branches stop winning is where the level is hard (the
+                # hidden vine, a maze pipe). Roots just before it: the seeded line's continuation
+                # there shows the way within one branch's depth, beside the agent's lines that miss it.
+                gi = int(rng.choice(seeded))
+                t = int(rng.integers(max(front[gi] - a.depth, 0), max(front[gi], 1)))
+            else:
+                t = int(rng.integers(0, max(pool[gi][3] - 8, 1)))
+            l, st0, acts, T = pool[gi]
+            groups.append((l, st0, acts, T, t, gi))
         bstarts, bcaps, prefixes, owner, root_states = [], [], [], [], []
         for gi, (l, st0, acts, T, t, pidx) in enumerate(groups):
             _, root_state = s.replay(st0, acts[:t])
@@ -138,7 +156,10 @@ def main():
                 pre = pre[:n - 1] if n and out[n - 1] else pre[:n]
                 prefixes.append(pre)
                 _, after = s.replay(root_state, pre)
-                bstarts.append(after); bcaps.append(int(2.0 * len(segs[l]['opt']))); owner.append(gi)
+                cap = int(2.0 * len(segs[l]['opt']))
+                if a.cap_by_line:                  # W = 4 (prefix + agent) - 4 (T - t) >= HOPELESS past this
+                    cap = max(1, min(cap, (T - t) + int(HOPELESS // 4) + 1 - len(pre)))
+                bstarts.append(after); bcaps.append(cap); owner.append(gi)
         branches = play_batch(player, bstarts, bcaps, a.sims, rng) if bstarts else []
         stats['branches'] += len(branches)
 
@@ -147,6 +168,8 @@ def main():
             b = bg.tag
             l, st0, acts, T, t, pidx = groups[owner[b]]
             stats['branch_wins'] += bool(bg.won)
+            if bg.won and pidx < n_seed:
+                front[pidx] = min(front[pidx], t)
             bwin[l][1] += 1; bwin[l][0] += bool(bg.won)
             if bg.won and len(pool) < 200:      # a branch that finished is a line of its own
                 pool.append((l, bstarts[b], np.array(bg.actions, np.uint8), len(bg.actions)))
@@ -188,9 +211,11 @@ def main():
             stats['seeded'] = stats.get('seeded', 0) + 1
         if len(leaves) >= a.shard:
             flush()
-            print('[mcdata] %d pairs, %d shards (%.0f s) | spines %d/%d won, branches %d/%d won' % (
+            print('[mcdata] %d pairs, %d shards (%.0f s) | spines %d/%d won, branches %d/%d won%s' % (
                 total, files, time.time() - t0, stats['spine_wins'], stats['spines'],
-                stats['branch_wins'], stats['branches']), flush=True)
+                stats['branch_wins'], stats['branches'],
+                (' | frontiers %s' % ' '.join('%s:%d/%d' % (pool[k][0], front[k], pool[k][3]) for k in range(n_seed)))
+                if a.frontier else ''), flush=True)
     flush()
     print('[mcdata] done: %d pairs in %d shards' % (total, files))
 
