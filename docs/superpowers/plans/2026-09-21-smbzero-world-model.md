@@ -240,7 +240,7 @@ two heads are complementary rather than one dominating:
 The split head takes world 1 and loses world 8, in the order of how much death there is in
 each level's labels, which is what an over-weighted death probability would do. Picking the
 better head per level would give 19/32. Where it wins it is also fast: 1-1 in 33.1 s against
-the search's own 31.7 s, 1-2 in 31.7 s against 32.4 s.
+the search's own 31.7 s, 1-2 in 31.7 s against 23.1 s (see the correction below).
 
 **Death charged as a price (`--split --dead-cost 128`): 18/32**, the best teacher-free
 result. Tonight's progression is 9 -> 15 -> 16 -> 18, all of it from how the data is
@@ -249,7 +249,7 @@ collected and how a death enters the score; the labels and the training budget n
 | level | mc 9/32 | plain 15/32 | mixture 16/32 | price 18/32 |
 |---|---|---|---|---|
 | 1-1 | 1/4 | 2/4 | 4/4 | 4/4, 34.6-36.7 s |
-| 1-2 | 0/4 | 0/4 | 2/4 | 2/4, 27.8 s (the search: 32.4 s) |
+| 1-2 | 0/4 | 0/4 | 2/4 | 2/4, 27.8 s (the search: 23.1 s) |
 | 4-1 | 4/4 | 4/4 | 4/4 | 4/4 |
 | 4-2 | 0/4 | 0/4 | 0/4 | 0/4 |
 | 8-1 | 0/4 | 2/4 | 0/4 | 1/4 |
@@ -262,6 +262,11 @@ whole-tree ranking rises to 86.7% (8-1 alone from 67% to 80%). What is left is 4
 which no variant has ever won: both need something a random prefix essentially never
 produces -- the hidden vine, the right way through the maze -- so the spine pool never holds
 a line that reaches them, and no amount of branching from the wrong place will make one.
+
+**Correction (timing):** the search's per-level table in the README (1-2: 32.4 s) includes
+1-2's automatic walk into the intro pipe; measured the way SMBZero's games are, from first
+control to the next level, the search's 1-2 route is 23.1 s (1-1 is 31.7 s either way). So
+SMBZero's 1-2 clears (24.6-31.7 s) are slower than the search, not faster as first written.
 
 The price itself, swept: **64 -> 16/32, 128 -> 18/32, 256 -> 18/32.** Below 128 the value no
 longer fears death enough and loses 1-2 and 8-1; 128 and 256 tie, trading 8-1 (1/4 against
