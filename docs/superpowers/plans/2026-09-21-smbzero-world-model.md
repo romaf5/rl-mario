@@ -549,6 +549,21 @@ it has and stage B does not: before playing a move it checks in the real game th
 survives 24 steps, and takes the next candidate if not. Next: that veto, from the world
 model's own death head -- strong close in (0.95), which is where a veto works.
 
+**The veto (`latent --safety 12`): no change.** wm13 and wm15 with it: survives 81%, danger
+14% -- the prior's numbers exactly. The calibrated death head passes 0.5 on only about half of
+the real deaths at this horizon, so the veto seldom fires; and most danger states are lost
+already (the emulator itself saves 21%), which leaves little for a veto to rescue.
+
+**Where stage B stands.** Five separate attempts to make planning inside the world model beat
+its own prior at a single decision -- a learned W from the route, from the teacher-free value,
+from the best value; louder values; a death veto -- and none has: the search agrees with its
+prior, or does worse. The probes say the model knows a good deal (close-in deaths 0.95, the
+held A, the plant where it was shown); the decisions say that knowledge does not yet change a
+choice for the better. The emulator search's edge is exact futures. The principled remaining
+route is MuZero's own: train the model's policy and value on the latent search's own visit
+counts and returns, so value and dynamics are consistent with each other -- a new phase of
+work rather than another knob.
+
 **Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
 against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and
 spread in the data, and only two had both:
