@@ -38,6 +38,8 @@ def main():
     ap.add_argument('--sims', type=int, default=1000)
     ap.add_argument('--batch', type=int, default=16)
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--safety', type=int, default=0, help="the latent agent's model veto horizon (0: off)")
+    ap.add_argument('--safe-p', type=float, default=0.5)
     a = ap.parse_args()
     s = Search(threads=THREADS)
     segs = {g['level']: g for g in e2e_segments(s)}
@@ -85,8 +87,7 @@ def main():
         for k, (lvl, g, t) in enumerate(chunk):
             tree.reset(stacks[k], prevs[k])
             tree.run(a.sims)
-            n, b = tree.visits()
-            latent = int(np.lexsort((np.where(np.isinf(b), 1e9, b), -n))[0]) if n.sum() else int(prior[k])
+            latent = tree.choose(a.safety, a.safe_p)
             ev = emu_visits.get(k, np.zeros(12))
             share = ev / ev.sum() if ev.sum() else np.full(12, 1 / 12)
             emu = int(games[k].actions[0]) if games[k].actions else int(np.argmax(ev))
@@ -107,7 +108,8 @@ def main():
                  100 * np.mean([r['prior'] == r['emu'] for r in rs]), 100 * np.mean([r['latent'] == r['emu'] for r in rs])))
     report('all', rows)
     report('danger (some move dies)', [r for r in rows if r['danger']])
-    json.dump(rows, open(a.model.replace('wm.pt', 'agree.json'), 'w'), indent=1)
+    json.dump(rows, open(a.model.replace('wm.pt', 'agree%s.json' % ('_safe%d' % a.safety if a.safety else '')), 'w'),
+              indent=1)
 
 
 if __name__ == '__main__':

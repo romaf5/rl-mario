@@ -179,13 +179,54 @@ class LatentTree:
                 return d, int(self.depth[:self.size].max())
             x = int(kids[np.argmin(self.b[kids])]); d += 1
 
+    @torch.no_grad()
+    def safe(self, cands, horizon=12, thresh=0.5):
+        """For each candidate move at the root: can some held input after it last `horizon` steps
+        without the model's calibrated p(dead) reaching `thresh`? The emulator agent vetoes a
+        move the real game shows dying within 24 steps and takes the next candidate; this is that
+        veto with the world model's own death head, which is strong close in."""
+        if not len(cands):
+            return []
+        lines = torch.tensor([[a] + [c] * (horizon - 1) for a in cands for c in range(12)], device=self.dev)
+        L = len(lines)
+        z = self.lat[0:1].expand(L, -1, -1, -1).contiguous()
+        prev = torch.full((L,), int(self.act_in[0]), device=self.dev)
+        pmax = torch.zeros(L, device=self.dev)
+        for k in range(horizon):
+            with torch.autocast('cuda', dtype=torch.float16):
+                z, ev, _ = self.m.g(z, lines[:, k], prev)
+            lg = ev.float()[:, 1]
+            if self.calib is not None:
+                kk = min(k, len(self.calib) - 1)
+                lg = lg / float(self.calib[kk, 1, 0]) + float(self.calib[kk, 1, 1])
+            pmax = torch.maximum(pmax, torch.sigmoid(lg))
+            prev = lines[:, k]
+        return (pmax < thresh).view(len(cands), 12).any(1).tolist()
+
+    def choose(self, safety=0, thresh=0.5):
+        """The move to play: most visited (ties to the best cost); with safety > 0, the first of
+        the favourites the model does not see dying, else any move it does not, else the favourite."""
+        n, b = self.visits()
+        if not n.sum():
+            return 1
+        order = np.lexsort((np.where(np.isinf(b), 1e9, b), -n))
+        a = int(order[0])
+        if not safety or self.safe([a], safety, thresh)[0]:
+            return a
+        cand = [int(x) for x in order[1:4] if n[x] > 0]
+        pick = next((c for c, o in zip(cand, self.safe(cand, safety, thresh)) if o), None)
+        if pick is None:
+            rest = [int(x) for x in order[4:]] + [int(x) for x in order[1:4] if n[x] == 0]
+            pick = next((c for c, o in zip(rest, self.safe(rest, safety, thresh)) if o), a)
+        return pick
+
     def visits(self):
         kids = self.child[0]
         return np.array([self.n[c] if c >= 0 else 0 for c in kids]), \
                np.array([self.b[c] if c >= 0 else np.inf for c in kids])
 
 
-def play(search_engine, tree, start, route, sims, max_decisions, per_wave=32):
+def play(search_engine, tree, start, route, sims, max_decisions, per_wave=32, safety=0, safe_p=0.5):
     """One game. The game is stepped only by the move chosen -- nothing else."""
     s = search_engine
     state = start
@@ -198,8 +239,7 @@ def play(search_engine, tree, start, route, sims, max_decisions, per_wave=32):
         tree.run(sims, per_wave)
         p, m = tree.pv()
         pvd.append(p); maxd.append(m)
-        n, b = tree.visits()
-        a = int(np.lexsort((np.where(np.isinf(b), 1e9, b), -n))[0]) if n.sum() else 1
+        a = tree.choose(safety, safe_p)
         obs, tr, state = s.replay_obs(state, np.array([a], np.uint8))
         acts.append(a)
         stack = np.concatenate([stack[1:], obs])
@@ -227,6 +267,9 @@ def main():
     ap.add_argument('--raw', action='store_true', help='ignore the checkpoint calibration')
     ap.add_argument('--cap', type=float, default=2.5, help='most decisions, as a multiple of the route')
     ap.add_argument('--prior-net', help="the policy net whose prior the root uses (the world model's head is untrained)")
+    ap.add_argument('--safety', type=int, default=0,
+                    help="veto a move the world model sees dying within this many steps (0: off; 12 = its horizon)")
+    ap.add_argument('--safe-p', type=float, default=0.5, help='calibrated p(dead) at which a line counts as dying')
     ap.add_argument('--scale', type=float, default=32.0,
                     help='frames of W that span the whole of q: at 32 a move 4 frames better gains 0.125, '
                          'which the prior term outweighs -- two world models then play identical games')
@@ -261,7 +304,8 @@ def main():
     for d in [int(x) for x in a.delays.split(',')]:
         t0 = time.time()
         start = s.frames(segs[a.level]['start'], d)
-        acts, reason, won, (pvd, maxd) = play(s, tree, start, ROUTE, a.sims, cap, a.per_wave)
+        acts, reason, won, (pvd, maxd) = play(s, tree, start, ROUTE, a.sims, cap, a.per_wave,
+                                              safety=a.safety, safe_p=a.safe_p)
         res.append(dict(delay=d, won=won, reason=reason, decisions=len(acts), actions=[int(x) for x in acts],
                         seconds=round((d + 4 * len(acts)) / FPS, 1), wall=round(time.time() - t0)))
         res[-1].update(pv=round(float(np.mean(pvd)), 1), max_depth=int(np.max(maxd)) if maxd else 0)
