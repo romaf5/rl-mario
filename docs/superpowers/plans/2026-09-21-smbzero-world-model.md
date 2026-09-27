@@ -309,6 +309,15 @@ after self-training, in both runs). The same search scores 26/32 on relv3 and 17
 teacher-free value -- **stage C's bottleneck is the value**, and self-improvement of the policy
 waits on it.
 
+**The teacher-free value on both teacher-free datasets (mc2 + mc3, 240k pairs, 50k steps):
+20/32**, the best without a teacher -- 1-1 4/4, 1-2 4/4, 4-1 4/4, 4-2 0/4, 8-1 2/4, 8-2 3/4,
+8-3 3/4, 8-4 0/4. Against relv3 (route-trained, 26/32) level by level: on the six levels it has
+data for, **20 of 24 against the teacher's 21 of 24** (and 8-1 2/4 against 1/4). The whole
+remaining gap is 4-2 and 8-4 (0 of 8 against 5 of 8), the two levels no teacher-free player has
+ever finished, so no teacher-free data exists for them. What stage C still lacks is not a
+better value but first solutions to learn from -- exploration, which the search engine's
+Go-Explore already does without a teacher.
+
 **Stage B, the depth bound (wm5: unroll 12, calibrated).** The search's lookahead was
 measured rather than assumed, after two wrong assertions that it was too shallow. At 1000
 simulations the line it believes in is **31 steps long** and the tree reaches 33, against a
