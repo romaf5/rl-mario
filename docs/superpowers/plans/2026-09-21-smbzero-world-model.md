@@ -282,6 +282,14 @@ well and near-identical siblings barely, which is what play needs -- but it is a
 `relvalue --split` exists: a sixth of the branches die and every one is labelled 512, so the
 few frames between two live lines vanish beside them and the W error never falls below ~130.
 
+**Stage C, iteration 1 (the data's player on the teacher-free value, not the teacher's): 17/32**
+against 18/32 -- within noise: 1-1 2/4 (was 4/4), 1-2 3/4 (was 2/4), 4-1 4/4, 4-2 0/4, 8-1 1/4,
+8-2 3/4, 8-3 4/4, 8-4 0/4. The value's player no longer needs the teacher, and its value ranks
+true siblings better (63.8% against 57%). What it cannot do is learn a level it cannot finish:
+mc3 holds no 4-2 or 8-4 at all, because no teacher-free player has ever won either. Those two
+need first solutions found (the search engine's Go-Explore does this), not better training.
+The policy prior is the part still descended from the teacher.
+
 **Stage B, the depth bound (wm5: unroll 12, calibrated).** The search's lookahead was
 measured rather than assumed, after two wrong assertions that it was too shallow. At 1000
 simulations the line it believes in is **31 steps long** and the tree reaches 33, against a
@@ -531,6 +539,15 @@ can only be as good as the value it learns from, and that value orders near-iden
 siblings at 57%. wm17 learns W from relv3 instead, the best value there is (26/32 in the
 emulator search, 94% on its ranking test): if its choices then beat the prior's, the idea is
 right and the teacher was the problem.
+
+**wm17 (W learned from relv3):** decision quality identical to the prior -- survives 81% and
+81%, danger states 14% and 14%, emulator visit share 0.33 and 0.33. Three sources of W, one
+pattern: the route (wm13) and the best value (wm17) make the latent search agree with its
+prior; a noisy value (wm16) makes it worse; none makes it better. The value is not what
+stage B lacks. The emulator agent's edge in danger states (21% against 14%) is partly a veto
+it has and stage B does not: before playing a move it checks in the real game that it
+survives 24 steps, and takes the next candidate if not. Next: that veto, from the world
+model's own death head -- strong close in (0.95), which is where a veto works.
 
 **Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
 against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and
