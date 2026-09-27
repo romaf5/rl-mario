@@ -299,6 +299,16 @@ Plain expert iteration has nothing to stop that; AlphaGo Zero's evaluator does -
 replaces the old only if it beats it. The loop now keeps every round's checkpoint (this run
 kept only the last, so its round-4 peak is lost).
 
+**With an evaluator (`zeroloop --gate 0.15`, zpol2): 15/32** -- the collapse is gone (12 -> 15)
+but the original policy still wins (17). The best round was 9 (64% of its own games); after it,
+every round trained from that best policy came out worse (36-43%) and was sent back, four in a
+row. Training on this search's visits does not just add noise, it pulls the policy down: a
+search is only as good as its value, and on some levels the teacher-free value makes a weaker
+search than the one the original policy learned from (8-3: 4/4 with the original policy, 1/4
+after self-training, in both runs). The same search scores 26/32 on relv3 and 17/32 on the
+teacher-free value -- **stage C's bottleneck is the value**, and self-improvement of the policy
+waits on it.
+
 **Stage B, the depth bound (wm5: unroll 12, calibrated).** The search's lookahead was
 measured rather than assumed, after two wrong assertions that it was too shallow. At 1000
 simulations the line it believes in is **31 steps long** and the tree reaches 33, against a
