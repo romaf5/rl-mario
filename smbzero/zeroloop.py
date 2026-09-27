@@ -183,6 +183,9 @@ def main():
             % (it, ' '.join('%s %d/%d' % (k, sum(v), len(v)) for k, v in sorted(won.items())),
                t1 - t0, time.time() - t1, lp.item(), lv.item(), len(buf.pol_x), len(buf.val_w)))
         save_net(net, os.path.join(a.out, 'net.pt'), it=it)
+        # every round kept: a loop that improves for four rounds and then drifts (zpol1: 57% of its
+        # own games won at round 4, 14% at round 14) must be recoverable from its best round
+        save_net(net, os.path.join(a.out, 'net_it%02d.pt' % it), it=it)
         torch.save(dict(state=rel.state_dict(), it=it, fusion=rel.fusion),
                    os.path.join(a.out, 'relvalue.pt'))
 

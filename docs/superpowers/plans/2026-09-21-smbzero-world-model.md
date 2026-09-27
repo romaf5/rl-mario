@@ -290,6 +290,15 @@ mc3 holds no 4-2 or 8-4 at all, because no teacher-free player has ever won eith
 need first solutions found (the search engine's Go-Explore does this), not better training.
 The policy prior is the part still descended from the teacher.
 
+**Closing the policy loop (zeroloop --train policy, 4 h, on the teacher-free value): 12/32, a
+regression from 17/32.** 1-2 improves (4/4) but 8-3 falls to 1/4, 8-1 to 0/4, and 8-2's clears
+slow from ~48 s to 77-79 s. The loop's own games show why -- 57% won in rounds 1-4, then 36%,
+29%, and 21% and 14% in rounds 13-14, the policy loss hardly moving (0.74 -> 0.72): the policy
+drifted rather than learned, chasing the visit counts of a search barely stronger than itself.
+Plain expert iteration has nothing to stop that; AlphaGo Zero's evaluator does -- a new policy
+replaces the old only if it beats it. The loop now keeps every round's checkpoint (this run
+kept only the last, so its round-4 peak is lost).
+
 **Stage B, the depth bound (wm5: unroll 12, calibrated).** The search's lookahead was
 measured rather than assumed, after two wrong assertions that it was too shallow. At 1000
 simulations the line it believes in is **31 steps long** and the tree reaches 33, against a
