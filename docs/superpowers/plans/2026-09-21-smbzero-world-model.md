@@ -316,7 +316,9 @@ data for, **20 of 24 against the teacher's 21 of 24** (and 8-1 2/4 against 1/4).
 remaining gap is 4-2 and 8-4 (0 of 8 against 5 of 8), the two levels no teacher-free player has
 ever finished, so no teacher-free data exists for them. What stage C still lacks is not a
 better value but first solutions to learn from -- exploration, which the search engine's
-Go-Explore already does without a teacher.
+Go-Explore already does without a teacher. To be exact about what is teacher-free here: every label; the player that gathered mc3
+(its own teacher-free value); not the player that gathered mc2 (relv3), and not the policy prior
+(zero8), which still descends from the teacher.
 
 **Stage B, the depth bound (wm5: unroll 12, calibrated).** The search's lookahead was
 measured rather than assumed, after two wrong assertions that it was too shallow. At 1000

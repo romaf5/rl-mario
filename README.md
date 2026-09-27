@@ -35,10 +35,11 @@ the absolute time left in the level -- which a cropped screen does not show anyw
 value head ranked positions at chance, 49%). The net instead reads *how much time a position
 has thrown away* against perfect play from where the search started, which is on the screen:
 94% of held-out pairs ordered correctly (two nodes of one search tree at equal depth). That was enough to drop the route at play
-time -- 26/32 level clears with it, 26/32 without -- and to win a whole game. With no teacher
-anywhere in its training -- labels from the agent racing itself, the data's player on its own
-value -- it clears 20/32: level for level with the route-trained value on the six levels it
-can finish (20 of 24 against 21), and nothing yet on 4-2 and 8-4, which it has never finished.
+time -- 26/32 level clears with it, 26/32 without -- and to win a whole game. With no teacher in
+its labels -- every one from the agent racing itself -- it clears 20/32: level for level with
+the route-trained value on the six levels it can finish (20 of 24 against 21), and nothing yet
+on 4-2 and 8-4, which it has never finished. (The policy prior, and the player behind half
+that data, still descend from the teacher.)
 
 The data that made it work is the part a search never shows you: the leaves it hands out are
 the ones its prior already liked, so only 0.04% of them were badly wasted. Walking into the
