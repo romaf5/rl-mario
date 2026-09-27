@@ -320,6 +320,19 @@ Go-Explore already does without a teacher. To be exact about what is teacher-fre
 (its own teacher-free value); not the player that gathered mc2 (relv3), and not the policy prior
 (zero8), which still descends from the teacher.
 
+**Iteration 2 (the 20/32 value as the data's player, mc4; value on mc2+3+4, 60k steps): 16/32**,
+four fewer -- 8-1 falls to 0/4, 1-1 and 1-2 to 3/4. More data from a slightly different player
+did not help. Its spines, at 2000 simulations and 8 rounds per level, finished neither 4-2 nor
+8-4 in 120+ attempts each.
+
+**Go-Explore's first ways (tools.firstways, 600 s per start, cells of area / position / camera /
+tiles, the level order its only other input):** 4-2 found from 3 of 3 starts (721, 745, 549
+decisions -- up the hidden vine to world 8), 8-4 from 3 of 3 (1039, 968, 869 -- through the maze
+to the axe). mcdata --seed-lines learns those levels from them: the agent branches from the
+first ways as from its own lines, and from a root on one the line's own continuation is kept as
+a sibling, so the value sees the hidden way beside the agent's lines that miss it. Measured
+against the 20/32 recipe with one change: mc2 + mc3 + the seeded 4-2 / 8-4 data (mc5).
+
 **Stage B, the depth bound (wm5: unroll 12, calibrated).** The search's lookahead was
 measured rather than assumed, after two wrong assertions that it was too shallow. At 1000
 simulations the line it believes in is **31 steps long** and the tree reaches 33, against a
