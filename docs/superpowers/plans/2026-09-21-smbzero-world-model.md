@@ -636,6 +636,18 @@ route is MuZero's own: train the model's policy and value on the latent search's
 counts and returns, so value and dynamics are consistent with each other -- a new phase of
 work rather than another knob.
 
+**A bug under every stage B result: the latent search expanded from latents it had not
+computed.** A wave picks up to 32 edges and imagines them in one call. A child created earlier
+in the same wave had no latent yet and b = 0 -- which reads as perfect -- so the next pick
+walked straight into it and expanded it from whatever the latent buffer held (zeros, or a
+previous decision's nodes). Measured on wm13 at three 1-1 states, 1000 simulations: **90% of
+all expansions** came from such a parent; the tree "reached depth 12" because each wave was one
+chain of garbage. Fixed: a node is pending until imagined, pending nodes cannot be picked, and a
+wave ends when every way down is blocked -- 0 stale expansions, ~12 picks per wave, the tree
+5-7 deep for real, the same ~1.1 s per decision. So every stage B verdict above, the gate's
+3/32 and "the search chooses no better than its prior" included, measured a broken search.
+Re-measuring from the gate.
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the

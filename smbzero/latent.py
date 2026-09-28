@@ -61,6 +61,10 @@ class LatentTree:
         self.depth = np.zeros(max_nodes, np.int32)
         self.act_in = np.full(max_nodes, NO_PREV, np.int64)   # the move into each node (the root: the real one)
         self.term = np.zeros(max_nodes, np.uint8)         # 1 goal, 2 dead
+        # Created this wave, not yet imagined: no latent, no value. A wave evaluates all its
+        # picks in one call, so a pick below a pending node would expand it from an empty latent
+        # -- and a pending node's b of 0 looks perfect, so without this 90% of picks did exactly that.
+        self.pend = np.zeros(max_nodes, bool)
         self.size = 0
 
     @torch.no_grad()
@@ -68,7 +72,7 @@ class LatentTree:
         """stack: (4, 84, 84) uint8 -- the real screen, encoded fresh every decision; prev: the
         move played before it, which is what says whether A is already held."""
         self.child[:] = -1; self.parent[:] = -1; self.n[:] = 0; self.term[:] = 0
-        self.depth[:] = 0
+        self.depth[:] = 0; self.pend[:] = False
         self.act_in[0] = prev
         x = torch.from_numpy(stack[None]).to(self.dev)
         with torch.autocast('cuda', dtype=torch.float16):
@@ -84,23 +88,30 @@ class LatentTree:
         self.size = 1
 
     def _select(self):
-        """Walk down by PUCT. Returns (node, action) for an edge to expand, or (None, c) for a
-        child already settled -- visiting it again is what lets PUCT divert to its brothers."""
+        """Walk down by PUCT. Returns (node, action) for an edge to expand, (None, c) for a
+        child already settled -- visiting it again is what lets PUCT divert to its brothers --
+        or (None, -1) when every way down runs into a node this wave has not imagined yet."""
         x = 0
         while True:
             if self.depth[x] >= self.max_depth:
                 return None, x             # as deep as the model is honest: widen, do not dream
             kids = self.child[x]
             made = kids >= 0
-            bstar = self.b[kids[made]].min() if made.any() else 0.0
+            pend = np.zeros(12, bool)
+            pend[made] = self.pend[kids[made]]
+            if pend.all():
+                return None, -1
+            ready = made & ~pend
+            bstar = self.b[kids[ready]].min() if ready.any() else 0.0
             q = np.full(12, self.fpu)
             nc = np.zeros(12)
-            if made.any():
-                bb = self.b[kids[made]]
-                q[made] = np.clip(1.0 - (bb - bstar) / self.scale, 0.0, 1.0)
-                q[made] = np.where(self.term[kids[made]] == 2, 0.0, q[made])
-                nc[made] = self.n[kids[made]]
+            if ready.any():
+                bb = self.b[kids[ready]]
+                q[ready] = np.clip(1.0 - (bb - bstar) / self.scale, 0.0, 1.0)
+                q[ready] = np.where(self.term[kids[ready]] == 2, 0.0, q[ready])
+            nc[made] = self.n[kids[made]]
             score = q + self.c_puct * self.prior[x].cpu().numpy() * np.sqrt(self.n[x]) / (1 + nc)
+            score[pend] = -np.inf
             a = int(np.argmax(score))
             c = self.child[x, a]
             if c < 0:
@@ -126,6 +137,8 @@ class LatentTree:
             picks, revisits = [], 0
             for _ in range(min(per_wave, sims - done)):
                 x, a = self._select()
+                if x is None and a < 0:        # blocked by this wave's own picks: evaluate them first
+                    break
                 if x is None:                  # a settled child: its visit raises the brothers' pull
                     self._backup(a)
                     done += 1; revisits += 1
@@ -138,6 +151,7 @@ class LatentTree:
                 self.act_in[c] = a
                 self.n[c] = 0
                 self.b[c] = self.w[c] = 0.0
+                self.pend[c] = True
                 picks.append((x, a, c))
             if not picks:
                 if not revisits:
@@ -158,6 +172,7 @@ class LatentTree:
             w = w.float().cpu().numpy()
             pri = torch.softmax(pi.float(), 1)
             for i, (x, a, c) in enumerate(picks):
+                self.pend[c] = False
                 self.lat[c] = s2[i].float()
                 self.prior[c] = pri[i] if (self.prior_net is None or self.deep_prior == 'model') else 1.0 / 12
                 if p_ev[i, 1] > self.dead_p:                       # certain enough to stop looking
@@ -280,7 +295,7 @@ def main():
                     help="'children': an expanded node is worth its best child, not min(itself, them)")
     ap.add_argument('--out')
     a = ap.parse_args()
-    s = Search(threads=THREADS)
+    s = Search(threads=4)                  # only the moves played step the game: the search is the GPU
     segs = {g['level']: g for g in e2e_segments(s)}
     model, ck = load_model(a.model)
     model.eval()
