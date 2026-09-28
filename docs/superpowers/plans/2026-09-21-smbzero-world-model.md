@@ -688,6 +688,23 @@ lost to 'self' in play -- but under the stale-latent bug, and with the model's ~
 death probability x 512 on every live line making it retreat. Re-measuring stage B with
 'children' (300 and 1000 simulations, death cost 512 and 128) and the oracles at 300.
 
+**Factorization, first half (blatent, 32 games, 'children' backup):**
+
+| search | won |
+|---|---|
+| model only, 300 / 1000 simulations / 1000 at death cost 128 | 3 / 2 / 3 |
+| real events (the engine's death rule), model value, 300 | 3 |
+| real events (old rule) + relv3 on the real screens, 300 | 4 (1-1 4/4 only) |
+
+Knowing the deaths inside the tree changes nothing. In the real-events games, the last state
+from which some held input survives 24 steps came a median 4 decisions before the death
+registered (3-7; 7% earlier than 6): the fatal commit is inside the tree's reach for the line
+played, but the doomed move's other lines take up to 24 steps to die -- past a tree 5-7 deep --
+so the move looks alive unless the value itself knows doom. Stage A has the check that catches
+exactly this: before committing, some held input must survive 24 steps in the real game. Duplicate
+pruning (the C++ search's other rule) never fires in play: every action writes its own joypad
+byte. Next: the same oracles with stage A's veto and with the net's prior below the root.
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the
