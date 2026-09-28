@@ -748,6 +748,24 @@ level), the wins slow (63-69 s against stage A's ~40). **wm17 re-gated** (W lear
 judged earlier under the stale-latent bug; model only, 1000 simulations, 2.5x): **4/32**, the
 best model-only stage B -- 1-1 3/4 and 8-3 in 41.7 s.
 
+**The factorization, complete (blatent, 32 games, 300 simulations, 'children', 2.5x cap):**
+
+| latent search | won |
+|---|---|
+| model only (wm13) | 3 |
+| model + stage A's veto | 5 (6 at 1000 simulations) |
+| real events + relv3 on the real screens + veto | 7 |
+| + the net's prior below the root, on the real screens | **11** |
+| stage A: the C++ search, same value and prior, 1000 new simulations on a kept tree, veto | 26 |
+
+Re-gated world models (model only, 1000 simulations): wm12 0, wm14 0, wm15 3, wm16 2, wm17 4.
+Reading it: the veto turns deaths into slowness (+2-3); the prior below the root is worth +4 --
+the model's distilled head, which agrees with the net's top move 64% of the time, is a real
+weakness; and even with every part of the model replaced by the real game, 11 of stage A's 26
+remain: the rest is the search's budget and shape (stage A's 1000 simulations are added to a
+subtree kept from the last decision, which the real game makes exact). The four 8-1 "deaths"
+are the level timer, 1500 decisions in -- slowness again.
+
 **The veto, learned (`smbzero/survival.py`).** Stage B may not ask the game, so a net reads the
 real screen and the move before it and says, per move, whether some held input then survives
 24 steps; trained on emulator labels at 60k states of the latent agents' own games (and short
