@@ -772,6 +772,21 @@ real screen and the move before it and says, per move, whether some held input t
 random branches off them, the last 30 decisions before a death drawn half the time), used by
 blatent --veto-net exactly as the real veto is used.
 
+**surv0 (60k states, 15 minutes to label): AUC 0.985, 92.8% of the dying moves caught, 2.3% of
+good ones refused -- and in play nothing: wm13 2/32, wm17 3/32, dying as without it.** At the
+fatal commits of wm17's games -- the played move dies, another would have lived -- surv0 let
+9 of 10 through, several at p = 1.00. Its held-out score came from the easy states: 74% of
+states are safe whatever the move, 20% lost whatever the move, and the screen alone says which;
+only 6.1% (3685) are mixed, where the move decides, and that is the veto's whole job. Next:
+half of every batch from mixed states, scored on held-out mixed states only (surv1).
+Also: many 8-1 and 8-2 games were already past saving eight decisions before the end (no held
+input survives 24 steps from any move) -- no veto of this kind helps there.
+
+**wm13's and wm17's policy heads agree with the net's top move ~50% of the time at depth 0**
+-- where the latent is encoded from the real screen -- and 40-58% down to depth 12. The loss is
+the head (one linear layer on the latent, distillation weight 1.0), not imagination; and the
+factorization puts the net's prior below the root at +4 of 32.
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the

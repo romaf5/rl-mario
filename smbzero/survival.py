@@ -111,7 +111,16 @@ def train(a):
     rng = np.random.default_rng(0)
     idx = rng.permutation(len(x)); nv = max(len(x) // 20, 1)
     va, tr = idx[:nv], idx[nv:]
-    print('[survival] %d states (%d held out), %.1f%% of moves die' % (len(x), nv, 100 * (1 - y.mean())), flush=True)
+    # Most states are fine whatever the move, or lost whatever the move -- the screen alone says
+    # which. The veto's work is the few where one move dies and another lives: there a net that
+    # learned "danger" but not "which move" lets the fatal one through (9 of 10 in play, surv0).
+    s = y.sum(1)
+    mixed = (s > 0) & (s < 12)
+    tr_mixed = tr[mixed[tr]]
+    va = va[mixed[va]] if a.eval_mixed else va
+    nv = len(va)
+    print('[survival] %d states (%d held out%s), %.1f%% of moves die, %.1f%% of states mixed'
+          % (len(x), nv, ', mixed only' if a.eval_mixed else '', 100 * (1 - y.mean()), 100 * mixed.mean()), flush=True)
     net = SurvNet().cuda()
     opt = torch.optim.AdamW(net.parameters(), lr=a.lr, weight_decay=1e-4)
     live = float((y[tr] > 0.5).mean())
@@ -140,7 +149,9 @@ def train(a):
 
     t0 = time.time()
     for step in range(1, a.steps + 1):
-        b = torch.from_numpy(rng.choice(tr, a.batch))
+        nm = int(a.batch * a.mixed_frac) if len(tr_mixed) else 0
+        b = torch.from_numpy(np.concatenate([rng.choice(tr_mixed, nm), rng.choice(tr, a.batch - nm)]) if nm
+                             else rng.choice(tr, a.batch))
         xb, pb, yb = X[b].cuda(non_blocking=True), PV[b].cuda(), Y[b].cuda()
         with torch.autocast('cuda', dtype=torch.float16):
             logit = net(xb, pb).float()
@@ -173,6 +184,9 @@ def main():
     t.add_argument('--steps', type=int, default=20000)
     t.add_argument('--batch', type=int, default=256)
     t.add_argument('--lr', type=float, default=3e-4)
+    t.add_argument('--mixed-frac', type=float, default=0.0, help='share of each batch from states where some '
+                   'moves die and some live')
+    t.add_argument('--eval-mixed', action='store_true', help='report on held-out mixed states only')
     t.add_argument('--out', default=os.path.join(RUNS, 'surv0'))
     a = ap.parse_args()
     make(a) if a.cmd == 'make' else train(a)
