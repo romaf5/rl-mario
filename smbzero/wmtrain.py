@@ -172,6 +172,8 @@ def main():
                     help='weight on the goal/dead/forced heads: a classifier on one 84x84 frame '
                          'predicts an enemy death better (0.8 AUC on 8-1) than this model on four (0.7)')
     ap.add_argument('--distill', help="policy net whose prior the world model's policy head learns")
+    ap.add_argument('--w-policy', type=float, default=1.0, help='weight of the distillation loss')
+    ap.add_argument('--pi-mlp', action='store_true', help='a policy head with its own features and two layers')
     ap.add_argument('--value-teacher', help="relative value net (stage C) whose W the model's W head learns, instead of the route")
     ap.add_argument('--edge', action='store_true',
                     help='the dynamics sees the previous action at every step: a jump is A newly pressed')
@@ -193,7 +195,7 @@ def main():
         % (len(data), len(data.frames), len(tr), len(va),
            ' '.join('%s %.2f%%' % (e, 100 * v) for e, v in zip(EVENTS,
                     [(data.out == 1).float().mean(), (data.out == 2).float().mean(), data.forced.mean()]))))
-    model = WorldModel(prev=a.prev, edge=a.edge).cuda()
+    model = WorldModel(prev=a.prev, edge=a.edge, pi_mlp=a.pi_mlp).cuda()
     value_teacher = None
     if a.value_teacher:
         from .relvalue import load as load_rel
@@ -210,7 +212,7 @@ def main():
         with torch.autocast('cuda', dtype=torch.bfloat16):
             loss, le, lc, rmae = losses(model, obs, acts, ev, tgt, r, valid, wt, wv, w_cons=a.w_cons,
                                         w_event=a.w_event, transform=a.transform,
-                                        prev=prev, tgt_prev=tprev, teacher=teacher,
+                                        prev=prev, tgt_prev=tprev, teacher=teacher, w_policy=a.w_policy,
                                         value_teacher=value_teacher)
         opt.zero_grad(set_to_none=True)
         loss.backward()

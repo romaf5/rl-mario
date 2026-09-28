@@ -74,10 +74,17 @@ class Dynamics(nn.Module):
 
 
 class Prediction(nn.Module):
-    def __init__(self, c=LATENT_C, hidden=256):
+    def __init__(self, c=LATENT_C, hidden=256, pi_mlp=False):
         super().__init__()
         self.fc = nn.Linear(c * 11 * 11, hidden)
-        self.pi = nn.Linear(hidden, N_ACTIONS)
+        # pi_mlp: the policy gets its own features and two layers. One linear layer on the
+        # value's features agreed with the net's top move ~50% of the time, even at the root.
+        self.pi_mlp = pi_mlp
+        if pi_mlp:
+            self.pfc = nn.Linear(c * 11 * 11, hidden)
+            self.pi = nn.Sequential(nn.ReLU(), nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, N_ACTIONS))
+        else:
+            self.pi = nn.Linear(hidden, N_ACTIONS)
         self.w1 = nn.Linear(3 * hidden + 2, hidden)
         self.w2 = nn.Linear(hidden, 1)
 
@@ -86,7 +93,8 @@ class Prediction(nn.Module):
         e, e0 = F.relu(self.fc(s.flatten(1))), F.relu(self.fc(s0.flatten(1)))
         d = depth.float().unsqueeze(1) if depth.dim() == 1 else depth.float()
         z = torch.cat([e, e0, e - e0, d / 32, (d / 32) ** 2], 1)
-        return self.pi(e), self.w2(F.relu(self.w1(z))).squeeze(1) * 16.0
+        pi = self.pi(self.pfc(s.flatten(1))) if self.pi_mlp else self.pi(e)
+        return pi, self.w2(F.relu(self.w1(z))).squeeze(1) * 16.0
 
 
 class Projector(nn.Module):
@@ -106,12 +114,12 @@ class Projector(nn.Module):
 
 
 class WorldModel(nn.Module):
-    def __init__(self, latent=LATENT_C, prev=False, edge=False):
+    def __init__(self, latent=LATENT_C, prev=False, edge=False, pi_mlp=False):
         super().__init__()
         chans = (32, 48, latent) if latent >= 48 else (16, 32, latent)
         self.h = Representation(chans)
         self.g = Dynamics(latent, edge)
-        self.f = Prediction(latent)
+        self.f = Prediction(latent, pi_mlp=pi_mlp)
         self.proj = Projector(latent)
         # A jump fires only when A is newly pressed: holding it after landing does nothing. So
         # what a press of A does depends on the input before it, which four frames do not show,
@@ -178,6 +186,6 @@ def load(path, device='cuda'):
     ck = torch.load(path, map_location=device, weights_only=False)
     latent = ck['state']['g.conv.weight'].shape[0]      # read the size the checkpoint was trained at
     edge = ck['state']['g.conv.weight'].shape[1] > latent + N_ACTIONS
-    m = WorldModel(latent, prev='prev.weight' in ck['state'], edge=edge)
+    m = WorldModel(latent, prev='prev.weight' in ck['state'], edge=edge, pi_mlp='f.pfc.weight' in ck['state'])
     m.load_state_dict(ck['state'])
     return m.to(device), ck
