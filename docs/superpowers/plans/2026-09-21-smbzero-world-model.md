@@ -658,6 +658,17 @@ value on the real screens, not the value head), or both -- which also tests, for
 time, whether the latent search's own rules (PUCT on W, scale 32, fpu 0.5, self backup) can
 win with a perfect model.
 
+**With a perfect model the default rules die anyway -- the 'self' backup.** Both oracles (real
+events, relv3 on the real screens), 8-2 from delay 20: dead at decision 28, the same place the
+model-only search dies. The trace: at 27 the chosen move's subtree (769 visits, 3 deep) held
+all twelve next moves, every one a real death -- and the move still cost 1 frame, because
+'self' backs up b = min(own estimate, best child): a node's first guess hides whatever is found
+below it, so only good news travels up. The same game with `--backup children` (b = best
+child, as the C++ search does): alive and at x=1363 after 140 decisions. Earlier, 'children'
+lost to 'self' in play -- but under the stale-latent bug, and with the model's ~0.15 far-future
+death probability x 512 on every live line making it retreat. Re-measuring stage B with
+'children' (300 and 1000 simulations, death cost 512 and 128) and the oracles at 300.
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the
