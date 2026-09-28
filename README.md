@@ -12,6 +12,7 @@ Above: the last 26 seconds at real speed; click for the whole run
 
 | video (real speed, 50 fps, replayed in stable-retro) | |
 |---|---|
+| [**4-2 with no teacher**](docs/media/smbzero_teacherfree_4-2.mp4) | the hidden vine and the warp zone to world 8, with **no teacher in the value**: its labels come from the agent racing itself, starting from a first way Go-Explore found (61.5 s; the search below: 38.1 s) |
 | [**1-1, planning inside its world model**](docs/media/smbzero_latent_1-1.mp4) | the first level cleared with **no emulator in the search**: every line it considers is imagined by a learned world model, and the game is stepped only by the moves it plays (35.7 s) |
 | [**1-1 to the axe, on a learned value**](docs/media/smbzero_learned_win.mp4) | the whole game in **5:48.4** with **no route at play time**: the net alone says how much time a position has thrown away (2500 simulations per move) |
 | [1-1 to the axe](docs/media/smbzero_win.mp4) | the whole game in **5:37.0** (the search below: 5:26.4), scored by progress along the search's route, 2000 simulations per move |
@@ -37,9 +38,11 @@ has thrown away* against perfect play from where the search started, which is on
 94% of held-out pairs ordered correctly (two nodes of one search tree at equal depth). That was enough to drop the route at play
 time -- 26/32 level clears with it, 26/32 without -- and to win a whole game. With no teacher in
 its labels -- every one from the agent racing itself -- it clears 20/32: level for level with
-the route-trained value on the six levels it can finish (20 of 24 against 21), and nothing yet
-on 4-2 and 8-4, which it has never finished. (The policy prior, and the player behind half
-that data, still descend from the teacher.)
+the route-trained value on the six levels it can finish (20 of 24 against 21). 4-2 it now
+finishes too (1 of 4 starts, verified in stable-retro): Go-Explore finds a first way up the
+vine, and the agent learns from branching off it just before the point where its own play
+stops winning. 8-4 not yet. (The policy prior, and the player behind half that data, still
+descend from the teacher.)
 
 The data that made it work is the part a search never shows you: the leaves it hands out are
 the ones its prior already liked, so only 0.04% of them were badly wasted. Walking into the

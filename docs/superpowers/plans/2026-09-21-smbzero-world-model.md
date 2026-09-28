@@ -797,6 +797,14 @@ the ~3500 mixed states it has. In play: 3/32, as without a veto.** More mixed st
 lines' frontiers now sit before their bumps** (275 against 281, 250 against 252) -- the agent's
 own branches win from before the hidden block. Round 1's frontiers never got there.
 
+**Round 2's value (relv_mc2367: mc2 + mc3 + mc6 + mc7): 20/32, and 4-2 won for the first time
+without a teacher** -- 1-1 4/4, 1-2 3/4, 4-1 4/4, **4-2 1/4 (61.5 s)**, 8-1 0/4, 8-2 4/4, 8-3
+4/4, 8-4 0/4. Replayed (delay 20, 764 decisions, the same 61.51 s) and **verified in
+stable-retro: all 3076 frames, ending in 8-1**. It bumps the hidden block itself at decision 171
+(x=1030, where the route does), wanders, climbs into the warp zone at 559 and takes world 8's
+pipe at 763 (docs/media/smbzero_teacherfree_4-2.mp4). Vine test 4/32 (from 3). 8-4 still 0/4
+(all too long), 8-1 fell from 2/4 to 0/4. Round 3 (mc8, the mc2367 value as the player) runs.
+
 **surv2 (60k boundary states added, half of each batch mixed): held-out mixed AUC 0.981, 93.9%
 of dying moves caught -- and 3/32 in play, dying as before; at the fatal-but-avoidable commits
 it let 8 of 10 through.** The held-out split was the flaw: states were drawn around one moment of
