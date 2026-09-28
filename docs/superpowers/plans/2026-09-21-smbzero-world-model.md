@@ -724,6 +724,25 @@ mattered little while stage B died; with the veto "too long" is the main ending,
 the factorization runs at 2.5x. Also different: stage A's 1000 simulations are new visits on
 top of the subtree it keeps from the last decision; the latent search starts fresh each time.
 
+| search (300 simulations, 'children', 2.5x cap) | won | how the rest end |
+|---|---|---|
+| model only | 3 | mostly dead (as at 1.5x) |
+| model only, tree reuse | 0 | dead, fast |
+| model + stage A's veto | 5 (1-1 3, 8-2 1, 8-3 1) | too long; 8-1 still dies 4/4 |
+
+With the veto, the model does about as well as the perfect value (5 against 6): dying is
+fixed by the veto, and the wall is progress. Where it stalls: 4-1 pushes right into a wall at
+x=1634 for a thousand decisions; 1-2 holds left+B at x=350 for four hundred. At the 1-2 spot the
+only way out is a running jump (x=354 is a wall); relv3 on the real screens does say so -- at
+depth 10 the jump lines cost 9 frames, everything else 30 -- but at depth 3-6, where this tree
+lives (5-7 deep at 300 simulations), the moves differ by 2-5 frames: 0.08 of q against a prior of
+0.76 on left+B. The latent search also floored W at 0, so here every root move tied at exactly
+0.0 (`--no-floor` keeps W below 0, as the C++ search does; it separates them, by 2.5 frames,
+and the prior still wins). The search needs depth. Tree reuse, the C++ search's way to depth,
+makes the model search worse (0/32): the kept subtree was imagined from the previous screen, and
+its accumulated visits hold the agent to a future that has already drifted -- MuZero does not
+reuse trees either. Next: 1000 simulations with the veto.
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the
