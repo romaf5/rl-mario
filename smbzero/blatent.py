@@ -11,7 +11,9 @@ Oracles, to find which part of the model fails (each node then also carries the 
 state, and every imagined step is also played for real):
   --real-events       deaths and finishes from the real game, not the event heads
   --real-value V.pt   W from the stage A/C value net on the real screens, not the value head
-Both together test the search's own rules with a perfect model.
+  --real-veto H       stage A's commit check: the move must survive H steps of some held input
+                      in the real game, else the next most visited
+Both oracles together test the search's own rules with a perfect model.
 
   CUDA_VISIBLE_DEVICES=1 venv_retro/bin/python -m smbzero.blatent --model smbzero/runs/wm13/wm.pt \
       --prior-net smbzero/runs/zero8/net.pt --deep-prior model --levels all --delays 5,20,35,50
@@ -271,7 +273,8 @@ class Forest:
                        self.death_cost, self.self_mode)
 
     def _play_picks(self, kk, par, act, ch):
-        """Play each imagined step for real: 0 running, 1 goal, 2 dead (play()'s rule)."""
+        """Play each imagined step for real: 0 running, 1 goal, 2 dead -- the search engine's rule
+        (emu.h dying()): the dying animation, a life lost, or below the screen while in control."""
         out = np.zeros(len(kk), np.int32)
 
         def step(i):
@@ -291,7 +294,8 @@ class Forest:
             if lvl != gp(L) or mode == 2:
                 j = ROUTE.index(L)
                 out[i] = 1 if (mode == 2 if j == len(ROUTE) - 1 else lvl == gp(ROUTE[j + 1])) else 2
-            elif tr[-1, 6] in (0x0B, 0x06) or tr[-1, 9] < self.lives0[k]:
+            elif (tr[-1, 6] in (0x0B, 0x06) or tr[-1, 9] < self.lives0[k]
+                  or (tr[-1, 6] == 0x08 and mode == 1 and tr[-1, 1] >= 512)):
                 out[i] = 2
         return out
 
@@ -327,7 +331,17 @@ class Forest:
         return np.array([self.n[k, c] if c >= 0 else 0 for c in kids], np.int32)
 
 
-def play(s, forest, starts, sims, caps, log=None):
+def survives(s, state, a, horizon):
+    """Does move a, then some held input, last `horizon` steps in the real game (search rule)?"""
+    for c in range(12):
+        acts = np.array([a] + [c] * (horizon - 1), np.uint8)
+        out, n = s.classify_along(state, ROUTE, acts)
+        if not n or np.asarray(out[:n])[-1] != 2:
+            return True
+    return False
+
+
+def play(s, forest, starts, sims, caps, log=None, veto=0):
     """Play every start to its end; K at a time, a finished game's tree goes to the next start.
     starts: [(level, delay, state)]; caps: max decisions per start. The real game is stepped
     only by the moves chosen. Returns one dict per start."""
@@ -356,10 +370,27 @@ def play(s, forest, starts, sims, caps, log=None):
                      [games[slot[k]]['actions'][-1] if games[slot[k]]['actions'] else NO_PREV for k in ks],
                      states=[state[slot[k]] for k in ks], levels=[games[slot[k]]['level'] for k in ks])
         forest.run(ks, sims)
+        picks = {k: forest.choose(k) for k in ks}
+        if veto:                                    # an oracle: stage A's commit check, in the real game
+            import threading
+            from concurrent.futures import ThreadPoolExecutor
+            if not hasattr(play, 'pool'):
+                play.pool, play.local = ThreadPoolExecutor(32), threading.local()
+
+            def check(k):
+                e = getattr(play.local, 'emu', None)
+                if e is None:
+                    e = play.local.emu = Search(threads=1)
+                n = forest.visits(k)
+                order = [int(x) for x in np.argsort(-n, kind='stable') if n[x] > 0]
+                order = [picks[k]] + [x for x in order if x != picks[k]]
+                order += [x for x in range(12) if x not in order]
+                return next((x for x in order if survives(e, state[slot[k]], x, veto)), picks[k])
+            picks = dict(zip(ks, play.pool.map(check, ks)))
         for k in ks:
             i = slot[k]
             g = games[i]
-            a = forest.choose(k)
+            a = picks[k]
             obs, tr, state[i] = s.replay_obs(state[i], np.array([a], np.uint8))
             g['actions'].append(a)
             stack[i] = np.concatenate([stack[i][1:], obs])
@@ -405,6 +436,7 @@ def main():
     ap.add_argument('--backup', default='self', choices=('self', 'children'))
     ap.add_argument('--real-events', action='store_true', help='oracle: deaths and finishes from the real game')
     ap.add_argument('--real-value', help='oracle: W from this relvalue.pt on the real screens')
+    ap.add_argument('--real-veto', type=int, default=0, help="oracle: stage A's commit check over this many steps")
     ap.add_argument('--out')
     a = ap.parse_args()
     s = Search(threads=4)
@@ -427,7 +459,7 @@ def main():
     starts = [(l, d, s.frames(segs[l]['start'], d)) for l in levels for d in delays]
     caps = [int(a.cap * len(segs[l]['opt'])) for l, _, _ in starts]
     t0 = time.time()
-    games = play(s, forest, starts, a.sims, caps, log=lambda m: print(m, flush=True))
+    games = play(s, forest, starts, a.sims, caps, log=lambda m: print(m, flush=True), veto=a.real_veto)
     for g in games:                                # how far through the level: the route is only the ruler
         seg = segs[g['level']]
         s.set_progress_route(ROUTE, seg['opt'], seg['start'])
