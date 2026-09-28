@@ -371,6 +371,9 @@ decisions out, all teacher-free values score every line 115-210 frames lost (the
 vine lines 7): nearly every branch from before the bump fails and is labelled 512, so the value
 learns that the region is bad whatever Mario does, and prefers the vine lines only weakly
 (mc236 0.68, mc235 0.83, the teacher 0.93). Its held-out sibling ranking on 4-2 is 53%.
+Gate: **19/32** -- 1-1, 1-2, 4-1, 8-3 4/4, 8-2 3/4, 8-1 0/4, 4-2 and 8-4 0/4 (4-2 all too
+long): the 20/32 recipe's level within noise, so the frontier data no longer costs the other
+levels (the first seeded data did: 15/32), and does not yet win 4-2 or 8-4.
 
 What teaches the contrast is a seed continuation that shows the vine within the search's
 horizon (~12) next to the agent's branches from the same root -- roots within ~12 decisions
