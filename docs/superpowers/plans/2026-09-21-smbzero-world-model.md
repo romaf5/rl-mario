@@ -743,6 +743,17 @@ makes the model search worse (0/32): the kept subtree was imagined from the prev
 its accumulated visits hold the agent to a future that has already drifted -- MuZero does not
 reuse trees either. Next: 1000 simulations with the veto.
 
+**1000 simulations with the veto: 6/32** (1-1 2, 4-1 1, 8-2 1, 8-3 2; 8-3 72% and 4-1 56% of the
+level), the wins slow (63-69 s against stage A's ~40). **wm17 re-gated** (W learned from relv3,
+judged earlier under the stale-latent bug; model only, 1000 simulations, 2.5x): **4/32**, the
+best model-only stage B -- 1-1 3/4 and 8-3 in 41.7 s.
+
+**The veto, learned (`smbzero/survival.py`).** Stage B may not ask the game, so a net reads the
+real screen and the move before it and says, per move, whether some held input then survives
+24 steps; trained on emulator labels at 60k states of the latent agents' own games (and short
+random branches off them, the last 30 decisions before a death drawn half the time), used by
+blatent --veto-net exactly as the real veto is used.
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the
