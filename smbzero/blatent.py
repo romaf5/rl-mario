@@ -135,7 +135,7 @@ def select_wave(active, budget, child, parent, depth, n, w, b, term, pend, prior
 
 @numba.njit(cache=True)
 def apply_wave(out, cnt, wv, p_dead, p_goal, pri, uniform, child, parent, n, w, b, term, pend, prior,
-               dead_p, goal_p, death_cost, self_mode, dup):
+               dead_p, goal_p, death_cost, self_mode, dup, floor):
     for i in range(cnt):
         k, c = out[i, 0], out[i, 3]
         pend[k, c] = False
@@ -152,7 +152,7 @@ def apply_wave(out, cnt, wv, p_dead, p_goal, pri, uniform, child, parent, n, w, 
             term[k, c] = 1
             w[k, c] = 0.0
         else:                                   # otherwise death is a price
-            w[k, c] = min(max(wv[i], np.float32(0.0)), np.float32(HOPELESS)) + p_dead[i] * death_cost
+            w[k, c] = min(max(wv[i], floor), np.float32(HOPELESS)) + p_dead[i] * death_cost
         b[k, c] = w[k, c]
     for i in range(cnt):                        # every pick imagined before any is backed up
         if not dup[i]:
@@ -209,10 +209,14 @@ class Forest:
     def __init__(self, model, K, max_nodes=2048, c_puct=1.5, scale=32.0, fpu=0.5, dead_p=0.95, goal_p=0.9,
                  death_cost=HOPELESS, calib=None, max_depth=12, backup='self', prior_net=None,
                  deep_prior='uniform', per_wave=32, device='cuda', emu=None, real_events=False, real_value=None,
-                 real_prior=False, dedup=False):
+                 real_prior=False, dedup=False, floor=0.0):
         self.m, self.dev, self.K, self.N = model, device, K, max_nodes
         self.emu, self.real_events, self.real_value, self.real_prior = emu, real_events, real_value, real_prior
         self.dedup = dedup
+        # W below 0 is a line doing better than the value expected from the root. latent.py
+        # floored it at 0 -- then every good line ties at 0 and the prior alone decides; the C++
+        # search keeps it ("relative: below 0 is progress"). -inf: no floor.
+        self.floor = np.float32(floor)
         self.keys = np.zeros((K, max_nodes), np.int64)
         if emu is not None:
             self.states = [[None] * max_nodes for _ in range(K)]
@@ -365,7 +369,7 @@ class Forest:
             apply_wave(self.out, cnt, w, np.ascontiguousarray(p_ev[:, 1]),
                        np.ascontiguousarray(p_ev[:, 0]), pri, self.uniform and not self.real_prior, self.child, self.parent, self.n,
                        self.w, self.b, self.term, self.pend, self.prior, self.dead_p, self.goal_p,
-                       self.death_cost, self.self_mode, dup)
+                       self.death_cost, self.self_mode, dup, self.floor)
 
     def _play_picks(self, kk, par, act, ch):
         """Play each imagined step for real: 0 running, 1 goal, 2 dead -- the search engine's rule
@@ -548,6 +552,7 @@ def main():
     ap.add_argument('--real-events', action='store_true', help='oracle: deaths and finishes from the real game')
     ap.add_argument('--real-value', help='oracle: W from this relvalue.pt on the real screens')
     ap.add_argument('--real-prior', action='store_true', help='oracle: the net prior on the real screens below the root')
+    ap.add_argument('--no-floor', action='store_true', help='keep W below 0 (the C++ search does)')
     ap.add_argument('--reuse', action='store_true', help="keep the played move's subtree (the C++ search does); "
                     '--sims then counts new visits')
     ap.add_argument('--dedup', action='store_true', help="oracle: prune a child whose real state equals a brother's")
@@ -568,7 +573,7 @@ def main():
                     death_cost=a.death_cost, calib=calib, max_depth=md, backup=a.backup, prior_net=pn,
                     deep_prior=a.deep_prior, per_wave=a.per_wave,
                     emu=s if (a.real_events or a.real_value or a.real_prior or a.dedup) else None, real_events=a.real_events,
-                    real_prior=a.real_prior, dedup=a.dedup,
+                    real_prior=a.real_prior, dedup=a.dedup, floor=-1e9 if a.no_floor else 0.0,
                     real_value=load_rel(a.real_value)[0].cuda().eval() if a.real_value else None)
     levels = ROUTE if a.levels == 'all' else a.levels.split(',')
     delays = [int(x) for x in a.delays.split(',')]
