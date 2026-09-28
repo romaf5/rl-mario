@@ -13,6 +13,8 @@ state, and every imagined step is also played for real):
   --real-value V.pt   W from the stage A/C value net on the real screens, not the value head
   --real-prior        the prior below the root from the policy net on the real screens, not the
                       model's distilled head (the root always has the net's)
+  --dedup             a child whose real state equals a brother's is never visited again (the C++
+                      search prunes these: in the air, B changes nothing)
   --real-veto H       stage A's commit check: the move must survive H steps of some held input
                       in the real game, else the next most visited
 Both oracles together test the search's own rules with a perfect model.
@@ -32,12 +34,12 @@ HOPELESS = 512.0
 
 
 @numba.njit(cache=True)
-def _backup_p(k, x, child, parent, b, w, n, self_mode):
+def _backup_p(k, x, child, parent, b, w, n, self_mode, term):
     while x >= 0:
         best, any_ = np.float32(1e30), False
         for a in range(12):
             c = child[k, x, a]
-            if c >= 0:
+            if c >= 0 and term[k, c] != 3:
                 any_ = True
                 if b[k, c] < best:
                     best = b[k, c]
@@ -71,7 +73,7 @@ def select_wave(active, budget, child, parent, depth, n, w, b, term, pend, prior
                     c = child[k, x, j]
                     if c < 0:
                         all_pend = False
-                    elif not pend[k, c]:
+                    elif not pend[k, c] and term[k, c] != 3:
                         all_pend = False
                         ready = True
                         if b[k, c] < bstar:
@@ -83,7 +85,7 @@ def select_wave(active, budget, child, parent, depth, n, w, b, term, pend, prior
                 best, a = np.float32(-1e30), -1
                 for j in range(12):
                     c = child[k, x, j]
-                    if c >= 0 and pend[k, c]:
+                    if c >= 0 and (pend[k, c] or term[k, c] == 3):
                         continue
                     q, nc = np.float32(fpu), np.float32(0.0)
                     if c >= 0:
@@ -107,7 +109,7 @@ def select_wave(active, budget, child, parent, depth, n, w, b, term, pend, prior
                 break
             budget[k] -= 1
             if revisit >= 0:
-                _backup_p(k, revisit, child, parent, b, w, n, self_mode)
+                _backup_p(k, revisit, child, parent, b, w, n, self_mode, term)
                 continue
             c = size[k]
             size[k] += 1
@@ -133,10 +135,14 @@ def select_wave(active, budget, child, parent, depth, n, w, b, term, pend, prior
 
 @numba.njit(cache=True)
 def apply_wave(out, cnt, wv, p_dead, p_goal, pri, uniform, child, parent, n, w, b, term, pend, prior,
-               dead_p, goal_p, death_cost, self_mode):
+               dead_p, goal_p, death_cost, self_mode, dup):
     for i in range(cnt):
         k, c = out[i, 0], out[i, 3]
         pend[k, c] = False
+        if dup[i]:                              # the same state as a brother: never again (term 3)
+            term[k, c] = 3
+            w[k, c] = b[k, c] = HOPELESS
+            continue
         for j in range(12):
             prior[k, c, j] = np.float32(1.0 / 12) if uniform else pri[i, j]
         if p_dead[i] > dead_p:                  # certain enough to stop looking
@@ -149,7 +155,8 @@ def apply_wave(out, cnt, wv, p_dead, p_goal, pri, uniform, child, parent, n, w, 
             w[k, c] = min(max(wv[i], np.float32(0.0)), np.float32(HOPELESS)) + p_dead[i] * death_cost
         b[k, c] = w[k, c]
     for i in range(cnt):                        # every pick imagined before any is backed up
-        _backup_p(out[i, 0], out[i, 3], child, parent, b, w, n, self_mode)
+        if not dup[i]:
+            _backup_p(out[i, 0], out[i, 3], child, parent, b, w, n, self_mode, term)
 
 
 class Forest:
@@ -157,9 +164,11 @@ class Forest:
     def __init__(self, model, K, max_nodes=2048, c_puct=1.5, scale=32.0, fpu=0.5, dead_p=0.95, goal_p=0.9,
                  death_cost=HOPELESS, calib=None, max_depth=12, backup='self', prior_net=None,
                  deep_prior='uniform', per_wave=32, device='cuda', emu=None, real_events=False, real_value=None,
-                 real_prior=False):
+                 real_prior=False, dedup=False):
         self.m, self.dev, self.K, self.N = model, device, K, max_nodes
         self.emu, self.real_events, self.real_value, self.real_prior = emu, real_events, real_value, real_prior
+        self.dedup = dedup
+        self.keys = np.zeros((K, max_nodes), np.int64)
         if emu is not None:
             self.states = [[None] * max_nodes for _ in range(K)]
             self.frames = (np.zeros((K, max_nodes, 84, 84), np.uint8)
@@ -264,8 +273,19 @@ class Forest:
             p_ev = (1.0 / (1.0 + np.exp(-np.clip(lg, -30.0, 30.0)))).astype(np.float32)
             pri = torch.softmax(pi.float(), 1).cpu().numpy().astype(np.float32)
             w = w.float().cpu().numpy().astype(np.float32)
+            dup = np.zeros(cnt, np.bool_)
             if self.emu is not None:
                 ev_real = self._play_picks(kk, par, act, ch)
+                if self.dedup:                  # the C++ search's rule: a brother already there wins
+                    seen = {}
+                    for i in range(cnt):
+                        k, x = int(kk[i]), int(par[i])
+                        if (k, x) not in seen:
+                            seen[(k, x)] = {int(self.keys[k, o]) for o in self.child[k, x]
+                                            if o >= 0 and not self.pend[k, o] and self.term[k, o] != 3}
+                        key = int(self.keys[k, ch[i]])
+                        dup[i] = key in seen[(k, x)]
+                        seen[(k, x)].add(key)
                 if self.real_events:
                     p_ev[:, 0] = ev_real == 1
                     p_ev[:, 1] = ev_real == 2
@@ -280,7 +300,7 @@ class Forest:
             apply_wave(self.out, cnt, w, np.ascontiguousarray(p_ev[:, 1]),
                        np.ascontiguousarray(p_ev[:, 0]), pri, self.uniform and not self.real_prior, self.child, self.parent, self.n,
                        self.w, self.b, self.term, self.pend, self.prior, self.dead_p, self.goal_p,
-                       self.death_cost, self.self_mode)
+                       self.death_cost, self.self_mode, dup)
 
     def _play_picks(self, kk, par, act, ch):
         """Play each imagined step for real: 0 running, 1 goal, 2 dead -- the search engine's rule
@@ -292,10 +312,18 @@ class Forest:
             if e is None:
                 e = self.local.emu = Search(threads=1)
             st, a = self.states[kk[i]][par[i]], np.array([act[i]], np.uint8)
-            return e.replay_obs(st, a) if self.frames is not None else (None,) + tuple(e.replay(st, a))
+            obs, tr, st2 = e.replay_obs(st, a) if self.frames is not None else (None,) + tuple(e.replay(st, a))
+            key = 0
+            if self.dedup:                      # emu.h exact_key: all game-state RAM
+                m = e.ram(st2)
+                m[0:8] = 0; m[9] = 0; m[0x100:0x300] = 0
+                m[0x7DD:0x7E3] = 0; m[0x7ED] = m[0x7EE] = 0; m[0x7F8:0x7FB] = 0
+                key = hash(m.tobytes())
+            return obs, tr, st2, key
 
-        for i, (obs, tr, st2) in enumerate(self.pool.map(step, range(len(kk)))):
+        for i, (obs, tr, st2, key) in enumerate(self.pool.map(step, range(len(kk)))):
             k = int(kk[i])
+            self.keys[k, ch[i]] = key
             if obs is not None:
                 self.frames[k, ch[i]] = obs[-1]
             self.states[k][ch[i]] = st2
@@ -451,6 +479,7 @@ def main():
     ap.add_argument('--real-events', action='store_true', help='oracle: deaths and finishes from the real game')
     ap.add_argument('--real-value', help='oracle: W from this relvalue.pt on the real screens')
     ap.add_argument('--real-prior', action='store_true', help='oracle: the net prior on the real screens below the root')
+    ap.add_argument('--dedup', action='store_true', help="oracle: prune a child whose real state equals a brother's")
     ap.add_argument('--real-veto', type=int, default=0, help="oracle: stage A's commit check over this many steps")
     ap.add_argument('--out')
     a = ap.parse_args()
@@ -467,8 +496,8 @@ def main():
     forest = Forest(model, a.parallel, max_nodes=a.sims + 2 * a.per_wave + 2, c_puct=a.c_puct, scale=a.scale,
                     death_cost=a.death_cost, calib=calib, max_depth=md, backup=a.backup, prior_net=pn,
                     deep_prior=a.deep_prior, per_wave=a.per_wave,
-                    emu=s if (a.real_events or a.real_value or a.real_prior) else None, real_events=a.real_events,
-                    real_prior=a.real_prior,
+                    emu=s if (a.real_events or a.real_value or a.real_prior or a.dedup) else None, real_events=a.real_events,
+                    real_prior=a.real_prior, dedup=a.dedup,
                     real_value=load_rel(a.real_value)[0].cuda().eval() if a.real_value else None)
     levels = ROUTE if a.levels == 'all' else a.levels.split(',')
     delays = [int(x) for x in a.delays.split(',')]
