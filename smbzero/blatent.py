@@ -11,6 +11,8 @@ Oracles, to find which part of the model fails (each node then also carries the 
 state, and every imagined step is also played for real):
   --real-events       deaths and finishes from the real game, not the event heads
   --real-value V.pt   W from the stage A/C value net on the real screens, not the value head
+  --real-prior        the prior below the root from the policy net on the real screens, not the
+                      model's distilled head (the root always has the net's)
   --real-veto H       stage A's commit check: the move must survive H steps of some held input
                       in the real game, else the next most visited
 Both oracles together test the search's own rules with a perfect model.
@@ -154,12 +156,14 @@ class Forest:
     """K latent trees. Node arrays on the CPU (numba walks them), latents on the GPU."""
     def __init__(self, model, K, max_nodes=2048, c_puct=1.5, scale=32.0, fpu=0.5, dead_p=0.95, goal_p=0.9,
                  death_cost=HOPELESS, calib=None, max_depth=12, backup='self', prior_net=None,
-                 deep_prior='uniform', per_wave=32, device='cuda', emu=None, real_events=False, real_value=None):
+                 deep_prior='uniform', per_wave=32, device='cuda', emu=None, real_events=False, real_value=None,
+                 real_prior=False):
         self.m, self.dev, self.K, self.N = model, device, K, max_nodes
-        self.emu, self.real_events, self.real_value = emu, real_events, real_value
+        self.emu, self.real_events, self.real_value, self.real_prior = emu, real_events, real_value, real_prior
         if emu is not None:
             self.states = [[None] * max_nodes for _ in range(K)]
-            self.frames = np.zeros((K, max_nodes, 84, 84), np.uint8) if real_value is not None else None
+            self.frames = (np.zeros((K, max_nodes, 84, 84), np.uint8)
+                           if (real_value is not None or real_prior) else None)
             self.root_stack = np.zeros((K, 4, 84, 84), np.uint8)
             self.lives0, self.level = np.zeros(K, np.int32), [None] * K
             self.root_e = {}
@@ -265,10 +269,16 @@ class Forest:
                 if self.real_events:
                     p_ev[:, 0] = ev_real == 1
                     p_ev[:, 1] = ev_real == 2
+                if self.real_value is not None or self.real_prior:
+                    leaf = self._leaf_stacks(kk, ch)
                 if self.real_value is not None:
-                    w = self._real_w(kk, ch, dep_np)
+                    w = self._real_w(kk, leaf, dep_np)
+                if self.real_prior:
+                    with torch.autocast('cuda', dtype=torch.float16):
+                        lg_pi, _ = self.prior_net(torch.from_numpy(leaf).to(self.dev))
+                    pri = torch.softmax(lg_pi.float(), 1).cpu().numpy().astype(np.float32)
             apply_wave(self.out, cnt, w, np.ascontiguousarray(p_ev[:, 1]),
-                       np.ascontiguousarray(p_ev[:, 0]), pri, self.uniform, self.child, self.parent, self.n,
+                       np.ascontiguousarray(p_ev[:, 0]), pri, self.uniform and not self.real_prior, self.child, self.parent, self.n,
                        self.w, self.b, self.term, self.pend, self.prior, self.dead_p, self.goal_p,
                        self.death_cost, self.self_mode)
 
@@ -299,9 +309,8 @@ class Forest:
                 out[i] = 2
         return out
 
-    @torch.no_grad()
-    def _real_w(self, kk, ch, dep):
-        """W of each new node from the value net on its real last four screens."""
+    def _leaf_stacks(self, kk, ch):
+        """Each new node's real last four screens."""
         leaf = np.zeros((len(kk), 4, 84, 84), np.uint8)
         for i in range(len(kk)):
             k, x, fr = int(kk[i]), int(ch[i]), []
@@ -310,6 +319,11 @@ class Forest:
                 x = int(self.parent[k, x])
             got = fr[::-1]
             leaf[i] = np.stack(list(self.root_stack[k][len(got):]) + got) if len(got) < 4 else np.stack(got)
+        return leaf
+
+    @torch.no_grad()
+    def _real_w(self, kk, leaf, dep):
+        """W of each new node from the value net on its real last four screens."""
         with torch.autocast('cuda', dtype=torch.float16):
             v = self.real_value
             e_root = torch.stack([self.root_e[int(k)] for k in kk])
@@ -436,6 +450,7 @@ def main():
     ap.add_argument('--backup', default='self', choices=('self', 'children'))
     ap.add_argument('--real-events', action='store_true', help='oracle: deaths and finishes from the real game')
     ap.add_argument('--real-value', help='oracle: W from this relvalue.pt on the real screens')
+    ap.add_argument('--real-prior', action='store_true', help='oracle: the net prior on the real screens below the root')
     ap.add_argument('--real-veto', type=int, default=0, help="oracle: stage A's commit check over this many steps")
     ap.add_argument('--out')
     a = ap.parse_args()
@@ -452,7 +467,8 @@ def main():
     forest = Forest(model, a.parallel, max_nodes=a.sims + 2 * a.per_wave + 2, c_puct=a.c_puct, scale=a.scale,
                     death_cost=a.death_cost, calib=calib, max_depth=md, backup=a.backup, prior_net=pn,
                     deep_prior=a.deep_prior, per_wave=a.per_wave,
-                    emu=s if (a.real_events or a.real_value) else None, real_events=a.real_events,
+                    emu=s if (a.real_events or a.real_value or a.real_prior) else None, real_events=a.real_events,
+                    real_prior=a.real_prior,
                     real_value=load_rel(a.real_value)[0].cuda().eval() if a.real_value else None)
     levels = ROUTE if a.levels == 'all' else a.levels.split(',')
     delays = [int(x) for x in a.delays.split(',')]
