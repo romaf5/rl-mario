@@ -452,7 +452,7 @@ def survives(s, state, a, horizon):
     return False
 
 
-def play(s, forest, starts, sims, caps, log=None, veto=0, reuse=False):
+def play(s, forest, starts, sims, caps, log=None, veto=0, reuse=False, veto_net=None, veto_p=0.5):
     """Play every start to its end; K at a time, a finished game's tree goes to the next start.
     starts: [(level, delay, state)]; caps: max decisions per start. The real game is stepped
     only by the moves chosen. Returns one dict per start."""
@@ -484,6 +484,17 @@ def play(s, forest, starts, sims, caps, log=None, veto=0, reuse=False):
                      keep=[kept[k] for k in ks])
         forest.run(ks, sims)
         picks = {k: forest.choose(k) for k in ks}
+        if veto_net is not None:                    # stage A's commit check, learned: no game touched
+            with torch.no_grad(), torch.autocast('cuda', dtype=torch.float16):
+                lp = veto_net(torch.from_numpy(np.stack([stack[slot[k]] for k in ks])).cuda(),
+                              torch.tensor([games[slot[k]]['actions'][-1] if games[slot[k]]['actions'] else NO_PREV
+                                            for k in ks]).cuda())
+            ps = torch.sigmoid(lp.float()).cpu().numpy()
+            for j, k in enumerate(ks):
+                n = forest.visits(k)
+                order = [picks[k]] + [int(x) for x in np.argsort(-n, kind='stable') if n[x] > 0 and x != picks[k]]
+                order += [x for x in range(12) if x not in order]
+                picks[k] = next((x for x in order if ps[j, x] >= veto_p), picks[k])
         if veto:                                    # an oracle: stage A's commit check, in the real game
             import threading
             from concurrent.futures import ThreadPoolExecutor
@@ -556,6 +567,8 @@ def main():
     ap.add_argument('--reuse', action='store_true', help="keep the played move's subtree (the C++ search does); "
                     '--sims then counts new visits')
     ap.add_argument('--dedup', action='store_true', help="oracle: prune a child whose real state equals a brother's")
+    ap.add_argument('--veto-net', help="a survival.py net: stage A's commit check, learned (no game touched)")
+    ap.add_argument('--veto-p', type=float, default=0.5, help='the veto net refuses a move below this')
     ap.add_argument('--real-veto', type=int, default=0, help="oracle: stage A's commit check over this many steps")
     ap.add_argument('--out')
     a = ap.parse_args()
@@ -580,8 +593,12 @@ def main():
     starts = [(l, d, s.frames(segs[l]['start'], d)) for l in levels for d in delays]
     caps = [int(a.cap * len(segs[l]['opt'])) for l, _, _ in starts]
     t0 = time.time()
+    vnet = None
+    if a.veto_net:
+        from .survival import load as load_surv
+        vnet = load_surv(a.veto_net)[0]
     games = play(s, forest, starts, a.sims, caps, log=lambda m: print(m, flush=True), veto=a.real_veto,
-                 reuse=a.reuse)
+                 reuse=a.reuse, veto_net=vnet, veto_p=a.veto_p)
     for g in games:                                # how far through the level: the route is only the ruler
         seg = segs[g['level']]
         s.set_progress_route(ROUTE, seg['opt'], seg['start'])
