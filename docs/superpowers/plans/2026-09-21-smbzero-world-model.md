@@ -705,6 +705,19 @@ exactly this: before committing, some held input must survive 24 steps in the re
 pruning (the C++ search's other rule) never fires in play: every action writes its own joypad
 byte. Next: the same oracles with stage A's veto and with the net's prior below the root.
 
+| search (300 simulations, 'children') | won | how the rest end |
+|---|---|---|
+| relv3 on the real screens, model events | 4 | mostly dead |
+| real events (engine rule) + relv3 | 4 | mostly dead (the same games as the old rule) |
+| real events + relv3 + stage A's 24-step veto | 6 | 1 dead, 25 too long |
+
+The veto nearly ends dying (4-1 32% -> 76% of the level, 8-2 13% -> 67%, 8-4 14% -> 32%) and
+exposes the next wall: the agent survives and does not get anywhere in time. So stage A's
+26/32 needs both the veto and something that drives progress, which the latent search with a
+perfect value does not have at 300 simulations. Candidates: the prior below the root (the
+model's distilled head against the net on the real screens -- measured next), tree reuse, and
+the simulation count.
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the
