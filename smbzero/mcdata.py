@@ -51,6 +51,8 @@ def main():
     ap.add_argument('--frontier', type=float, default=0.0,
                     help="share of a seeded level's roots taken from its seeded lines just before their frontier, "
                          "the earliest root a branch has won from (Go-Explore's backward algorithm)")
+    ap.add_argument('--frontier-init', help='comma list, one per seeded line in order: frontiers to start from '
+                    '(the last ones a previous run printed)')
     ap.add_argument('--min-pool', type=int, help='play spines while the pool is smaller than this (default: --games)')
     ap.add_argument('--cap-by-line', action='store_true', help="stop a branch once it cannot beat its line by "
                     "less than HOPELESS: its label is HOPELESS either way")
@@ -65,7 +67,8 @@ def main():
     player = Player(s, ev, a.games, per_tree=a.per_tree, value_mix=1.0, min_backup=True, relative=True)
     rng = np.random.default_rng(a.seed)
     roots, leaves, ridx, depth, dval, rval, rlvl = [], [], [], [], [], [], []
-    t0, total, files, stats = time.time(), 0, 0, dict(spines=0, spine_wins=0, branches=0, branch_wins=0)
+    import glob as _g                                # a second run into the same directory adds shards
+    t0, total, files, stats = time.time(), 0, len(_g.glob(os.path.join(a.out, 'mc*.npz'))), dict(spines=0, spine_wins=0, branches=0, branch_wins=0)
 
     def flush():
         nonlocal roots, leaves, ridx, depth, dval, rval, rlvl, files
@@ -94,6 +97,9 @@ def main():
         print('[mcdata] %d seeded lines: %s' % (len(pool), ','.join(sorted({q[0] for q in pool}))), flush=True)
     n_seed = len(pool)
     front = [q[3] - 8 for q in pool]               # per seeded line: earliest root a branch won from
+    if a.frontier_init:
+        front = [int(x) for x in a.frontier_init.split(',')]
+        assert len(front) == n_seed, (front, n_seed)
     min_pool = a.games if a.min_pool is None else a.min_pool
     while total < a.pairs:
         # A pool that fills with the easy levels never tries the hard ones again, and the
