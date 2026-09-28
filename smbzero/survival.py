@@ -55,9 +55,11 @@ def make(a):
     s = Search(threads=4)
     segs = {g['level']: g for g in e2e_segments(s)}
     games = []
-    for f in sorted(glob.glob(a.games)):
-        games += [g for g in json.load(open(f)) if len(g.get('actions', [])) > 8
-                  and (not a.dead_only or g['reason'].startswith('dead'))]
+    for fi, f in enumerate(sorted(glob.glob(a.games))):
+        for gi, g in enumerate(json.load(open(f))):
+            if len(g.get('actions', [])) > 8 and (not a.dead_only or g['reason'].startswith('dead')):
+                g['gid'] = (a.seed * 1000 + fi) * 1000 + gi
+                games.append(g)
     print('[survival] %d games from %s' % (len(games), a.games), flush=True)
     rng = np.random.default_rng(a.seed)
     local = threading.local()
@@ -95,7 +97,7 @@ def make(a):
             t = max(4, b - int(rng.integers(0, 7)) + 1)
             k = int(rng.integers(1, 5)) if rng.random() < 0.5 else 0
             pre = (rng.integers(0, 12, k) if rng.random() < 0.5 else np.full(k, rng.integers(0, 12))).astype(np.uint8)
-            jobs.append((g['level'], g['delay'], np.array(g['actions'][:t], np.uint8), pre))
+            jobs.append((g['level'], g['delay'], np.array(g['actions'][:t], np.uint8), pre, g['gid']))
     for _ in range(0 if a.boundary else a.states):
         g = games[int(rng.integers(len(games)))]
         n = len(g['actions'])
@@ -103,10 +105,10 @@ def make(a):
         t = int(rng.integers(max(4, n - a.near_window), n)) if near_end else int(rng.integers(4, n))
         k = int(rng.integers(1, 9)) if rng.random() < 0.5 else 0
         pre = (rng.integers(0, 12, k) if rng.random() < 0.5 else np.full(k, rng.integers(0, 12))).astype(np.uint8)
-        jobs.append((g['level'], g['delay'], np.array(g['actions'][:t], np.uint8), pre))
+        jobs.append((g['level'], g['delay'], np.array(g['actions'][:t], np.uint8), pre, g['gid']))
     def label(job):
         e = emu()
-        lvl, delay, acts, pre = job
+        lvl, delay, acts, pre, gid = job
         out, m = e.classify_along(e.frames(segs[lvl]['start'], delay), ROUTE, np.concatenate([acts, pre]))
         path = np.concatenate([acts, pre])[:m]
         if m and out[m - 1] != 0:                  # the branch ended the game: stop just before
@@ -116,23 +118,23 @@ def make(a):
         st0 = e.frames(segs[lvl]['start'], delay)
         _, before = e.replay(st0, path[:-4])
         obs, _, st = e.replay_obs(before, path[-4:])
-        return obs[-4:], int(path[-1]), np.array([survives(e, st, x, HORIZON) for x in range(12)], bool)
+        return obs[-4:], int(path[-1]), np.array([survives(e, st, x, HORIZON) for x in range(12)], bool), gid
 
     os.makedirs(a.out, exist_ok=True)
     t0 = time.time()
-    X, P, Y, shard = [], [], [], 0
+    X, P, Y, G, shard = [], [], [], [], 0
     with ThreadPoolExecutor(a.threads) as pool:
         for i, r in enumerate(pool.map(label, jobs)):
             if r is not None:
-                X.append(r[0]); P.append(r[1]); Y.append(r[2])
+                X.append(r[0]); P.append(r[1]); Y.append(r[2]); G.append(r[3])
             if len(X) >= a.shard or (i == len(jobs) - 1 and X):
                 np.savez_compressed(os.path.join(a.out, 'surv%04d.npz' % shard), x=np.stack(X),
-                                    prev=np.array(P, np.int64), y=np.stack(Y))
+                                    prev=np.array(P, np.int64), y=np.stack(Y), gid=np.array(G, np.int64))
                 y = np.stack(Y)
                 print('[survival] shard %d: %d states, %.1f%% of moves die, %.1f%% of states have one '
                       'that does (%.0f s)' % (shard, len(X), 100 * (1 - y.mean()), 100 * (~y).any(1).mean(),
                                                time.time() - t0), flush=True)
-                X, P, Y, shard = [], [], [], shard + 1
+                X, P, Y, G, shard = [], [], [], [], shard + 1
 
 
 def train(a):
@@ -141,8 +143,17 @@ def train(a):
     x = np.concatenate([z['x'] for z in zs]); pv = np.concatenate([z['prev'] for z in zs])
     y = np.concatenate([z['y'] for z in zs]).astype(np.float32)
     rng = np.random.default_rng(0)
-    idx = rng.permutation(len(x)); nv = max(len(x) // 20, 1)
-    va, tr = idx[:nv], idx[nv:]
+    if all('gid' in z for z in zs):
+        # Held-out states must come from games the net never saw: states drawn around one moment
+        # of one game are near twins, and a random split scored 94% where unseen games gave 43%.
+        gid = np.concatenate([z['gid'] for z in zs])
+        ug = rng.permutation(np.unique(gid))
+        vg = set(ug[:max(len(ug) // 10, 1)].tolist())
+        is_va = np.array([g in vg for g in gid])
+        va, tr = np.where(is_va)[0], np.where(~is_va)[0]
+    else:
+        idx = rng.permutation(len(x)); nv = max(len(x) // 20, 1)
+        va, tr = idx[:nv], idx[nv:]
     # Most states are fine whatever the move, or lost whatever the move -- the screen alone says
     # which. The veto's work is the few where one move dies and another lives: there a net that
     # learned "danger" but not "which move" lets the fatal one through (9 of 10 in play, surv0).

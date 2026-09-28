@@ -797,6 +797,16 @@ the ~3500 mixed states it has. In play: 3/32, as without a veto.** More mixed st
 lines' frontiers now sit before their bumps** (275 against 281, 250 against 252) -- the agent's
 own branches win from before the hidden block. Round 1's frontiers never got there.
 
+**surv2 (60k boundary states added, half of each batch mixed): held-out mixed AUC 0.981, 93.9%
+of dying moves caught -- and 3/32 in play, dying as before; at the fatal-but-avoidable commits
+it let 8 of 10 through.** The held-out split was the flaw: states were drawn around one moment of
+one game many times over, so a random split put near twins on both sides. On boundary states
+from games none of the nets saw (the surv2 gate's own games): AUC 0.63-0.68, 41-45% of the dying
+moves caught, ~20% of good ones refused -- all three nets memorised ~450 death situations rather
+than learning what kills. A learned veto needs thousands of distinct hazard encounters and an
+evaluation on whole held-out games (survival.py now stores game ids and splits by game). Paused:
+the CPU goes to stage C first.
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the
