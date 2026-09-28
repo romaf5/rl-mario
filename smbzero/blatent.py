@@ -7,6 +7,12 @@ picks from every tree are imagined in one call to the model. The rules are laten
 exactly -- PUCT on W, death as a price, calibrated event heads, the depth bound, pending nodes
 unselectable until imagined -- so a game played here is a game latent.py would play.
 
+Oracles, to find which part of the model fails (each node then also carries the real game's
+state, and every imagined step is also played for real):
+  --real-events       deaths and finishes from the real game, not the event heads
+  --real-value V.pt   W from the stage A/C value net on the real screens, not the value head
+Both together test the search's own rules with a perfect model.
+
   CUDA_VISIBLE_DEVICES=1 venv_retro/bin/python -m smbzero.blatent --model smbzero/runs/wm13/wm.pt \
       --prior-net smbzero/runs/zero8/net.pt --deep-prior model --levels all --delays 5,20,35,50
 """
@@ -16,6 +22,7 @@ import numba
 import torch
 from .common import FPS, ROUTE, RUNS, Search, e2e_segments, gp
 from .model import NO_PREV, load as load_model
+from .relvalue import load as load_rel
 
 HOPELESS = 512.0
 
@@ -145,8 +152,21 @@ class Forest:
     """K latent trees. Node arrays on the CPU (numba walks them), latents on the GPU."""
     def __init__(self, model, K, max_nodes=2048, c_puct=1.5, scale=32.0, fpu=0.5, dead_p=0.95, goal_p=0.9,
                  death_cost=HOPELESS, calib=None, max_depth=12, backup='self', prior_net=None,
-                 deep_prior='uniform', per_wave=32, device='cuda'):
+                 deep_prior='uniform', per_wave=32, device='cuda', emu=None, real_events=False, real_value=None):
         self.m, self.dev, self.K, self.N = model, device, K, max_nodes
+        self.emu, self.real_events, self.real_value = emu, real_events, real_value
+        if emu is not None:
+            self.states = [[None] * max_nodes for _ in range(K)]
+            self.frames = np.zeros((K, max_nodes, 84, 84), np.uint8) if real_value is not None else None
+            self.root_stack = np.zeros((K, 4, 84, 84), np.uint8)
+            self.lives0, self.level = np.zeros(K, np.int32), [None] * K
+            self.root_e = {}
+            import threading
+            from concurrent.futures import ThreadPoolExecutor
+            # ctypes releases the GIL, so the steps run in parallel -- but a context steps with its
+            # one emulator, so every worker gets a context of its own (states are portable bytes)
+            self.local = threading.local()
+            self.pool = ThreadPoolExecutor(32)
         self.calib = None if calib is None else np.asarray(calib, np.float32)
         self.prior_net, self.uniform = prior_net, (prior_net is not None and deep_prior == 'uniform')
         self.params = dict(c_puct=np.float32(c_puct), scale=np.float32(scale), fpu=np.float32(fpu))
@@ -169,9 +189,21 @@ class Forest:
         self.out = np.zeros((K * per_wave, 4), np.int32)
 
     @torch.no_grad()
-    def reset(self, ks, stacks, prevs):
-        """Fresh trees ks from the real screens (len(ks), 4, 84, 84) and the moves before them."""
+    def reset(self, ks, stacks, prevs, states=None, levels=None):
+        """Fresh trees ks from the real screens (len(ks), 4, 84, 84) and the moves before them
+        (with an oracle, also the real states and level names)."""
         ks = np.asarray(ks)
+        if self.emu is not None:
+            for i, k in enumerate(ks):
+                self.states[k][0] = states[i]
+                self.root_stack[k] = stacks[i]
+                self.lives0[k] = int(self.emu.ram(states[i])[0x75A])
+                self.level[k] = levels[i]
+            if self.real_value is not None:
+                with torch.autocast('cuda', dtype=torch.float16):
+                    e = self.real_value.embed(torch.from_numpy(np.ascontiguousarray(stacks)).to(self.dev))
+                for i, k in enumerate(ks):
+                    self.root_e[int(k)] = e[i]
         x = torch.from_numpy(np.ascontiguousarray(stacks)).to(self.dev)
         pv = torch.as_tensor(np.asarray(prevs, np.int64), device=self.dev)
         with torch.autocast('cuda', dtype=torch.float16):
@@ -225,10 +257,61 @@ class Forest:
                 lg = lg / self.calib[ki, :, 0] + self.calib[ki, :, 1]
             p_ev = (1.0 / (1.0 + np.exp(-np.clip(lg, -30.0, 30.0)))).astype(np.float32)
             pri = torch.softmax(pi.float(), 1).cpu().numpy().astype(np.float32)
-            apply_wave(self.out, cnt, w.float().cpu().numpy().astype(np.float32), np.ascontiguousarray(p_ev[:, 1]),
+            w = w.float().cpu().numpy().astype(np.float32)
+            if self.emu is not None:
+                ev_real = self._play_picks(kk, par, act, ch)
+                if self.real_events:
+                    p_ev[:, 0] = ev_real == 1
+                    p_ev[:, 1] = ev_real == 2
+                if self.real_value is not None:
+                    w = self._real_w(kk, ch, dep_np)
+            apply_wave(self.out, cnt, w, np.ascontiguousarray(p_ev[:, 1]),
                        np.ascontiguousarray(p_ev[:, 0]), pri, self.uniform, self.child, self.parent, self.n,
                        self.w, self.b, self.term, self.pend, self.prior, self.dead_p, self.goal_p,
                        self.death_cost, self.self_mode)
+
+    def _play_picks(self, kk, par, act, ch):
+        """Play each imagined step for real: 0 running, 1 goal, 2 dead (play()'s rule)."""
+        out = np.zeros(len(kk), np.int32)
+
+        def step(i):
+            e = getattr(self.local, 'emu', None)
+            if e is None:
+                e = self.local.emu = Search(threads=1)
+            st, a = self.states[kk[i]][par[i]], np.array([act[i]], np.uint8)
+            return e.replay_obs(st, a) if self.frames is not None else (None,) + tuple(e.replay(st, a))
+
+        for i, (obs, tr, st2) in enumerate(self.pool.map(step, range(len(kk)))):
+            k = int(kk[i])
+            if obs is not None:
+                self.frames[k, ch[i]] = obs[-1]
+            self.states[k][ch[i]] = st2
+            L = self.level[k]
+            lvl, mode = int(tr[-1, 2]), int(tr[-1, 7])
+            if lvl != gp(L) or mode == 2:
+                j = ROUTE.index(L)
+                out[i] = 1 if (mode == 2 if j == len(ROUTE) - 1 else lvl == gp(ROUTE[j + 1])) else 2
+            elif tr[-1, 6] in (0x0B, 0x06) or tr[-1, 9] < self.lives0[k]:
+                out[i] = 2
+        return out
+
+    @torch.no_grad()
+    def _real_w(self, kk, ch, dep):
+        """W of each new node from the value net on its real last four screens."""
+        leaf = np.zeros((len(kk), 4, 84, 84), np.uint8)
+        for i in range(len(kk)):
+            k, x, fr = int(kk[i]), int(ch[i]), []
+            while x != 0 and len(fr) < 4:
+                fr.append(self.frames[k, x])
+                x = int(self.parent[k, x])
+            got = fr[::-1]
+            leaf[i] = np.stack(list(self.root_stack[k][len(got):]) + got) if len(got) < 4 else np.stack(got)
+        with torch.autocast('cuda', dtype=torch.float16):
+            v = self.real_value
+            e_root = torch.stack([self.root_e[int(k)] for k in kk])
+            w = v.fold(v.head(v.embed(torch.from_numpy(leaf).to(self.dev)), e_root,
+                              torch.from_numpy(dep.astype(np.int64)).to(self.dev)))
+        return w.float().cpu().numpy().astype(np.float32)
 
     def choose(self, k):
         """Most visited root move, ties to the best cost (latent.py's choose without the veto)."""
@@ -270,7 +353,8 @@ def play(s, forest, starts, sims, caps, log=None):
     while any(x is not None for x in slot):
         ks = [k for k in range(K) if slot[k] is not None]
         forest.reset(ks, np.stack([stack[slot[k]] for k in ks]),
-                     [games[slot[k]]['actions'][-1] if games[slot[k]]['actions'] else NO_PREV for k in ks])
+                     [games[slot[k]]['actions'][-1] if games[slot[k]]['actions'] else NO_PREV for k in ks],
+                     states=[state[slot[k]] for k in ks], levels=[games[slot[k]]['level'] for k in ks])
         forest.run(ks, sims)
         for k in ks:
             i = slot[k]
@@ -319,6 +403,8 @@ def main():
     ap.add_argument('--scale', type=float, default=32.0)
     ap.add_argument('--c-puct', type=float, default=1.5)
     ap.add_argument('--backup', default='self', choices=('self', 'children'))
+    ap.add_argument('--real-events', action='store_true', help='oracle: deaths and finishes from the real game')
+    ap.add_argument('--real-value', help='oracle: W from this relvalue.pt on the real screens')
     ap.add_argument('--out')
     a = ap.parse_args()
     s = Search(threads=4)
@@ -333,7 +419,9 @@ def main():
         pn = load_net(a.prior_net)[0].eval()
     forest = Forest(model, a.parallel, max_nodes=a.sims + 2 * a.per_wave + 2, c_puct=a.c_puct, scale=a.scale,
                     death_cost=a.death_cost, calib=calib, max_depth=md, backup=a.backup, prior_net=pn,
-                    deep_prior=a.deep_prior, per_wave=a.per_wave)
+                    deep_prior=a.deep_prior, per_wave=a.per_wave,
+                    emu=s if (a.real_events or a.real_value) else None, real_events=a.real_events,
+                    real_value=load_rel(a.real_value)[0].cuda().eval() if a.real_value else None)
     levels = ROUTE if a.levels == 'all' else a.levels.split(',')
     delays = [int(x) for x in a.delays.split(',')]
     starts = [(l, d, s.frames(segs[l]['start'], d)) for l in levels for d in delays]

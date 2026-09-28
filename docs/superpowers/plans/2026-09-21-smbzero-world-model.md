@@ -648,6 +648,16 @@ wave ends when every way down is blocked -- 0 stale expansions, ~12 picks per wa
 3/32 and "the search chooses no better than its prior" included, measured a broken search.
 Re-measuring from the gate.
 
+**Re-measured (blatent: 32 games at once, same rules, identical visits to the fixed latent.py,
+15 ms per decision against 1.1 s -- the gate in 6.5 minutes): 2/32.** 1-1 2/4 (34.2 s, 34.9 s),
+the rest 0/4, progress per level where it was (1-1 65%, 4-1 31%, 4-2 26%, 8-1 7%). The bug was
+real and not the reason: stage B is weak with a sound search too. To find which part of the
+model fails, blatent can take the real game as an oracle for one part at a time: `--real-events`
+(deaths and finishes from the game, not the event heads), `--real-value` (W from the stage A
+value on the real screens, not the value head), or both -- which also tests, for the first
+time, whether the latent search's own rules (PUCT on W, scale 32, fpu 0.5, self backup) can
+win with a perfect model.
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the
