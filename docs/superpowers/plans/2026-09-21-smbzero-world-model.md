@@ -807,6 +807,12 @@ than learning what kills. A learned veto needs thousands of distinct hazard enco
 evaluation on whole held-out games (survival.py now stores game ids and splits by game). Paused:
 the CPU goes to stage C first.
 
+**wm18 (wm17's recipe, the policy head with its own features and two layers, distillation weight
+4): agreement with the net's top move 46-54% -> 53-62% at every depth (60% at the root); gate
+4/32 (1-1 3/4, 4-1 once in 40.0 s -- stage B's first 4-1 without an oracle; 4-1 45% of the level
+against wm17's 25%).** Better, and far from the net's own prior that the factorization credits
+with +4.
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the
