@@ -718,6 +718,12 @@ perfect value does not have at 300 simulations. Candidates: the prior below the 
 model's distilled head against the net on the real screens -- measured next), tree reuse, and
 the simulation count.
 
+**And a ruler that was never the same.** The stage A and C gates (tools.levels -> eval) give a
+game 2.5x the route's decisions; every stage B gate, latent.py's and blatent's, gave 1.5x. It
+mattered little while stage B died; with the veto "too long" is the main ending, so the rest of
+the factorization runs at 2.5x. Also different: stage A's 1000 simulations are new visits on
+top of the subtree it keeps from the last decision; the latent search starts fresh each time.
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the
