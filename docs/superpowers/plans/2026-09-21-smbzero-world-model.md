@@ -787,6 +787,16 @@ input survives 24 steps from any move) -- no veto of this kind helps there.
 the head (one linear layer on the latent, distillation weight 1.0), not imagination; and the
 factorization puts the net's prior below the root at +4 of 32.
 
+**surv1 (half of each batch mixed): on held-out mixed states AUC 0.867 (surv0's recipe 0.862),
+72% of dying moves caught, 10.6% of good ones refused (15%); train loss 0.002 -- it memorises
+the ~3500 mixed states it has. In play: 3/32, as without a veto.** More mixed states:
+`survival make --boundary` finds each lost game's last savable decision and samples around it
+(23.5% mixed against 6%); 60k of them next (surv2).
+
+**Frontier round 2 (mc7, player relv_mc236, window 15, seed copies 4), 18k pairs in: both vine
+lines' frontiers now sit before their bumps** (275 against 281, 250 against 252) -- the agent's
+own branches win from before the hidden block. Round 1's frontiers never got there.
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the
