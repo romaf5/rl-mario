@@ -636,6 +636,16 @@ route is MuZero's own: train the model's policy and value on the latent search's
 counts and returns, so value and dynamics are consistent with each other -- a new phase of
 work rather than another knob.
 
+**The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
+wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
+ranks the route against random, held and flipped lines correctly where the real game says the
+route is better (97-100%, 87.5% against one flipped action). Scored on the real screen at the
+end of the same line, encoded, it says 2-4 frames for everything and agrees 20-37% -- chance.
+f was only ever trained on unrolled latents; the consistency loss aligns their projections,
+not the latents themselves. So "the emulator's futures, the model's judgement" cannot be asked
+by encoding the emulator's leaves (agree --wm-value does that, and would measure only this
+mismatch); it needs the imagined latent along each real path.
+
 **Stage C gate, first attempt (relv_mc, 120k teacher-free pairs, 1000 simulations): 9/32**
 against relv3's 26/32. The failures are not spread evenly -- a level needs both volume and
 spread in the data, and only two had both:

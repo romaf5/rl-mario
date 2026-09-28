@@ -11,6 +11,9 @@ predicts for each. The route is a measuring stick here and nothing else: no grad
 hint, only a line we happen to know is good. If the model cannot tell it from noise, no
 search inside the model can either.
 
+Each line is scored twice: from the latent the model imagines by unrolling the line ('said'),
+and from the real screen at its end, encoded ('seen'). The gap is what imagination costs.
+
   CUDA_VISIBLE_DEVICES=1 venv_retro/bin/python -m smbzero.tools.wmprobe --model smbzero/runs/wm4/wm.pt
 """
 import argparse
@@ -58,6 +61,7 @@ def main():
     K, opt = a.depth, seg['opt']
 
     pred = {k: [] for k in LINES}
+    seen = {k: [] for k in LINES}
     true = {k: [] for k in LINES}
     for _ in range(a.states):
         t = int(rng.integers(4, max(len(opt) - K - 1, 5)))
@@ -71,21 +75,27 @@ def main():
                 _, _, _, _, ws = model.unroll(x, torch.from_numpy(acts.astype(np.int64))[None].cuda(),
                                               torch.tensor([int(opt[t - 1])]).cuda())
             pred[kind].append(float(ws[-1].float()[0]))
+            o, _, _ = s.replay_obs(state, acts)
+            leaf = np.concatenate([stack, o])[-4:]
+            with torch.no_grad(), torch.autocast('cuda', dtype=torch.float16):
+                z0 = model.encode(x, torch.tensor([int(opt[t - 1])]).cuda())
+                zl = model.encode(torch.from_numpy(leaf[None]).cuda(), torch.tensor([int(acts[-1])]).cuda())
+                seen[kind].append(float(model.f(zl, z0, torch.tensor([K]).cuda())[1].float()[0]))
             p = s.progress_along(state, ROUTE, opt, acts, ref_start=seg['start'])
             true[kind].append(float(np.clip(p[min(K, len(p) - 1)] - p[0] + 4.0 * K, 0, 512)))
 
     print('[wmprobe] %s, %d states, %d steps ahead' % (a.level, a.states, K))
-    print('  %-8s %9s %9s' % ('line', 'W said', 'W true'))
+    print('  %-8s %9s %9s %9s' % ('line', 'W said', 'W seen', 'W true'))
     for kind in LINES:
-        print('  %-8s %9.1f %9.1f' % (kind, np.mean(pred[kind]), np.mean(true[kind])))
+        print('  %-8s %9.1f %9.1f %9.1f' % (kind, np.mean(pred[kind]), np.mean(seen[kind]), np.mean(true[kind])))
     for other in ('random', 'sticky', 'flip1', 'flip3'):
-        pw = np.array(pred['route']) < np.array(pred[other])
         tw = np.array(true['route']) < np.array(true[other])
         both = tw.sum()
-        print('  route beats %-7s: the model says so %4.1f%% of the time, it is true %4.1f%%, '
-              'and where it is true the model agrees %4.1f%%'
-              % (other, 100 * pw.mean(), 100 * tw.mean(),
-                 100 * (pw & tw).sum() / max(both, 1)))
+        for name, src_ in (('imagined', pred), ('seen', seen)):
+            pw = np.array(src_['route']) < np.array(src_[other])
+            print('  route beats %-7s: %-8s says so %4.1f%% of the time, it is true %4.1f%%, '
+                  'and where it is true it agrees %4.1f%%'
+                  % (other, name, 100 * pw.mean(), 100 * tw.mean(), 100 * (pw & tw).sum() / max(both, 1)))
 
 
 if __name__ == '__main__':
