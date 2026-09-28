@@ -51,6 +51,10 @@ def main():
     ap.add_argument('--frontier', type=float, default=0.0,
                     help="share of a seeded level's roots taken from its seeded lines just before their frontier, "
                          "the earliest root a branch has won from (Go-Explore's backward algorithm)")
+    ap.add_argument('--frontier-window', type=int, help='frontier roots from this many decisions before it '
+                    '(default: --depth). The value learns the hard step from roots within the search\'s horizon of it')
+    ap.add_argument('--seed-copies', type=int, default=1, help="a seeded line's continuation this many times per root, "
+                    'to weigh as much as the agent branches beside it')
     ap.add_argument('--frontier-init', help='comma list, one per seeded line in order: frontiers to start from '
                     '(the last ones a previous run printed)')
     ap.add_argument('--min-pool', type=int, help='play spines while the pool is smaller than this (default: --games)')
@@ -140,7 +144,7 @@ def main():
                 # hidden vine, a maze pipe). Roots just before it: the seeded line's continuation
                 # there shows the way within one branch's depth, beside the agent's lines that miss it.
                 gi = int(rng.choice(seeded))
-                t = int(rng.integers(max(front[gi] - a.depth, 0), max(front[gi], 1)))
+                t = int(rng.integers(max(front[gi] - (a.frontier_window or a.depth), 0), max(front[gi], 1)))
             else:
                 t = int(rng.integers(0, max(pool[gi][3] - 8, 1)))
             l, st0, acts, T = pool[gi]
@@ -211,9 +215,10 @@ def main():
             obs, _, _ = s.replay_obs(root_state, cont[:a.depth])
             frames = np.concatenate([roots[j], obs])
             for d in range(1, min(a.depth, len(cont)) + 1):
-                leaves.append(frames[d:d + 4]); ridx.append(j); depth.append(d)
-                dval.append(4.0 * (len(cont) - d) - 4.0 * (T - t))     # the line itself: nothing lost
-                total += 1
+                for _ in range(a.seed_copies):
+                    leaves.append(frames[d:d + 4]); ridx.append(j); depth.append(d)
+                    dval.append(4.0 * (len(cont) - d) - 4.0 * (T - t))     # the line itself: nothing lost
+                    total += 1
             stats['seeded'] = stats.get('seeded', 0) + 1
         if len(leaves) >= a.shard:
             flush()

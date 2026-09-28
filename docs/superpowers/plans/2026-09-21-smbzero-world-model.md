@@ -362,6 +362,22 @@ continuation over the bump beside the agent's branches that miss it. And --cap-b
 past (its line's remaining decisions + 128) is HOPELESS whatever it does, so it stops there.
 Run: mc6 (4-2, 8-4, 24k pairs), value on mc2 + mc3 + mc6 against the 20/32 recipe.
 
+**Round 1 (mc6, 53k pairs; relv_mc236): the frontier worked, the value did not learn.** On
+the seed lines the vine spawns at decisions 281 and 252 (enemy slot 5 -- the first check
+looked at slots 0-4 only and misplaced it); the frontiers stopped at 284 and 264, just after
+each bump, as designed: nothing the agent played from before a bump ever won. Vine test 3/32
+bumps (1, 0, 1, 1 of 8), against 1/32 for relv_mc235 and 27/32 for the teacher. From 11
+decisions out, all teacher-free values score every line 115-210 frames lost (the teacher: the
+vine lines 7): nearly every branch from before the bump fails and is labelled 512, so the value
+learns that the region is bad whatever Mario does, and prefers the vine lines only weakly
+(mc236 0.68, mc235 0.83, the teacher 0.93). Its held-out sibling ranking on 4-2 is 53%.
+
+What teaches the contrast is a seed continuation that shows the vine within the search's
+horizon (~12) next to the agent's branches from the same root -- roots within ~12 decisions
+of the bump, a fifth of a 60-decision window, one continuation against four branches.
+Round 2: `--frontier-window 15 --seed-copies 4` (about 16x more of it), the mc236 value as
+the player, on mc2 + mc3 + mc6 + mc7.
+
 **Stage B, the depth bound (wm5: unroll 12, calibrated).** The search's lookahead was
 measured rather than assumed, after two wrong assertions that it was too shallow. At 1000
 simulations the line it believes in is **31 steps long** and the tree reaches 33, against a
