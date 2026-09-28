@@ -56,24 +56,56 @@ def make(a):
     segs = {g['level']: g for g in e2e_segments(s)}
     games = []
     for f in sorted(glob.glob(a.games)):
-        games += [g for g in json.load(open(f)) if len(g.get('actions', [])) > 8]
+        games += [g for g in json.load(open(f)) if len(g.get('actions', [])) > 8
+                  and (not a.dead_only or g['reason'].startswith('dead'))]
     print('[survival] %d games from %s' % (len(games), a.games), flush=True)
     rng = np.random.default_rng(a.seed)
-    jobs = []
-    for _ in range(a.states):
-        g = games[int(rng.integers(len(games)))]
-        n = len(g['actions'])
-        near_end = g['reason'].startswith('dead') and rng.random() < 0.5
-        t = int(rng.integers(max(4, n - 30), n)) if near_end else int(rng.integers(4, n))
-        k = int(rng.integers(1, 9)) if rng.random() < 0.5 else 0
-        pre = (rng.integers(0, 12, k) if rng.random() < 0.5 else np.full(k, rng.integers(0, 12))).astype(np.uint8)
-        jobs.append((g['level'], g['delay'], np.array(g['actions'][:t], np.uint8), pre))
     local = threading.local()
 
-    def label(job):
+    def emu():
         e = getattr(local, 'emu', None)
         if e is None:
             e = local.emu = Search(threads=1)
+        return e
+
+    def boundary(g):
+        """The last decision of a lost game from which some move still survives 24 steps: the
+        decisive states are here -- before it everything lives, after it everything dies."""
+        e, acts = emu(), np.array(g['actions'], np.uint8)
+        n, lo = len(acts), max(4, len(acts) - 40)
+        _, st = e.replay(e.frames(segs[g['level']]['start'], g['delay']), acts[:lo])
+        states = [st]
+        for t in range(lo, n - 1):
+            _, st = e.replay(st, acts[t:t + 1])
+            states.append(st)
+        for t in range(n - 1, lo - 1, -1):
+            if any(survives(e, states[t - lo], x, HORIZON) for x in range(12)):
+                return t
+        return None
+
+    jobs = []
+    if a.boundary:
+        dead = [g for g in games if g['reason'].startswith('dead')]
+        with ThreadPoolExecutor(a.threads) as pool:
+            bounds = list(pool.map(boundary, dead))
+        dead = [(g, b) for g, b in zip(dead, bounds) if b is not None]
+        print('[survival] %d lost games with a last savable decision' % len(dead), flush=True)
+        for _ in range(a.states):
+            g, b = dead[int(rng.integers(len(dead)))]
+            t = max(4, b - int(rng.integers(0, 7)) + 1)
+            k = int(rng.integers(1, 5)) if rng.random() < 0.5 else 0
+            pre = (rng.integers(0, 12, k) if rng.random() < 0.5 else np.full(k, rng.integers(0, 12))).astype(np.uint8)
+            jobs.append((g['level'], g['delay'], np.array(g['actions'][:t], np.uint8), pre))
+    for _ in range(0 if a.boundary else a.states):
+        g = games[int(rng.integers(len(games)))]
+        n = len(g['actions'])
+        near_end = g['reason'].startswith('dead') and rng.random() < a.near_frac
+        t = int(rng.integers(max(4, n - a.near_window), n)) if near_end else int(rng.integers(4, n))
+        k = int(rng.integers(1, 9)) if rng.random() < 0.5 else 0
+        pre = (rng.integers(0, 12, k) if rng.random() < 0.5 else np.full(k, rng.integers(0, 12))).astype(np.uint8)
+        jobs.append((g['level'], g['delay'], np.array(g['actions'][:t], np.uint8), pre))
+    def label(job):
+        e = emu()
         lvl, delay, acts, pre = job
         out, m = e.classify_along(e.frames(segs[lvl]['start'], delay), ROUTE, np.concatenate([acts, pre]))
         path = np.concatenate([acts, pre])[:m]
@@ -104,7 +136,7 @@ def make(a):
 
 
 def train(a):
-    files = sorted(glob.glob(os.path.join(a.data, '*.npz')))
+    files = sorted(f for d in a.data.split(',') for f in glob.glob(os.path.join(d, '*.npz')))
     zs = [np.load(f) for f in files]
     x = np.concatenate([z['x'] for z in zs]); pv = np.concatenate([z['prev'] for z in zs])
     y = np.concatenate([z['y'] for z in zs]).astype(np.float32)
@@ -178,6 +210,11 @@ def main():
     m.add_argument('--threads', type=int, default=32)
     m.add_argument('--shard', type=int, default=8192)
     m.add_argument('--seed', type=int, default=0)
+    m.add_argument('--near-frac', type=float, default=0.5, help="share of a dead game's states taken near its end")
+    m.add_argument('--near-window', type=int, default=30, help='how near: the last this many decisions')
+    m.add_argument('--boundary', action='store_true', help="states around each lost game's last savable decision")
+    m.add_argument('--dead-only', action='store_true', help='states from games that died only (where the '
+                   'decisive, mixed states are)')
     m.add_argument('--out', default=os.path.join(DATA, 'surv'))
     t = sub.add_parser('train')
     t.add_argument('--data', default=os.path.join(DATA, 'surv'))
