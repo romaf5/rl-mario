@@ -159,6 +159,51 @@ def apply_wave(out, cnt, wv, p_dead, p_goal, pri, uniform, child, parent, n, w, 
             _backup_p(out[i, 0], out[i, 3], child, parent, b, w, n, self_mode, term)
 
 
+@numba.njit(cache=True)
+def reroot(k, r, child, parent, depth, n, w, b, term, prior, act_in, keys, size, order):
+    """Keep node r's subtree as tree k, r first (breadth-first order, written to `order`: the
+    old index of each kept node). Costs move into r's frame: W from r = W from the old root
+    minus r's own W (a death stays a death). Returns the number kept."""
+    m = size[k]
+    order[0] = r
+    cnt, head = 1, 0
+    while head < cnt:
+        x = order[head]
+        head += 1
+        for a in range(12):
+            c = child[k, x, a]
+            if c >= 0:
+                order[cnt] = c
+                cnt += 1
+    new = np.full(m, -1, np.int32)
+    for i in range(cnt):
+        new[order[i]] = i
+    ch_t, par_t, dep_t = child[k, :m].copy(), parent[k, :m].copy(), depth[k, :m].copy()
+    n_t, w_t, b_t, term_t = n[k, :m].copy(), w[k, :m].copy(), b[k, :m].copy(), term[k, :m].copy()
+    pri_t, ai_t, key_t = prior[k, :m].copy(), act_in[k, :m].copy(), keys[k, :m].copy()
+    delta = w_t[r]
+    for i in range(cnt):
+        o = order[i]
+        for a in range(12):
+            c = ch_t[o, a]
+            child[k, i, a] = new[c] if c >= 0 else -1
+        parent[k, i] = new[par_t[o]] if i > 0 else -1
+        depth[k, i] = dep_t[o] - 1
+        n[k, i] = n_t[o]
+        term[k, i] = term_t[o]
+        if term_t[o] >= 2 or w_t[o] >= HOPELESS:
+            w[k, i] = w_t[o]
+        else:
+            w[k, i] = max(w_t[o] - delta, np.float32(0.0))
+        b[k, i] = b_t[o] if b_t[o] >= HOPELESS else max(b_t[o] - delta, np.float32(0.0))
+        for a in range(12):
+            prior[k, i, a] = pri_t[o, a]
+        act_in[k, i] = ai_t[o]
+        keys[k, i] = key_t[o]
+    size[k] = cnt
+    return cnt
+
+
 class Forest:
     """K latent trees. Node arrays on the CPU (numba walks them), latents on the GPU."""
     def __init__(self, model, K, max_nodes=2048, c_puct=1.5, scale=32.0, fpu=0.5, dead_p=0.95, goal_p=0.9,
@@ -204,10 +249,12 @@ class Forest:
         self.out = np.zeros((K * per_wave, 4), np.int32)
 
     @torch.no_grad()
-    def reset(self, ks, stacks, prevs, states=None, levels=None):
-        """Fresh trees ks from the real screens (len(ks), 4, 84, 84) and the moves before them
-        (with an oracle, also the real states and level names)."""
+    def reset(self, ks, stacks, prevs, states=None, levels=None, keep=None):
+        """Trees ks from the real screens (len(ks), 4, 84, 84) and the moves before them (with an
+        oracle, also the real states and level names). keep[i]: the tree was rerooted on this
+        move and keeps its subtree -- the root itself is still encoded fresh from the screen."""
         ks = np.asarray(ks)
+        keep = np.zeros(len(ks), bool) if keep is None else np.asarray(keep, bool)
         if self.emu is not None:
             for i, k in enumerate(ks):
                 self.states[k][0] = states[i]
@@ -229,16 +276,34 @@ class Forest:
         self.lat[torch.as_tensor(ks * self.N, device=self.dev)] = s.half()
         self.root_lat[torch.as_tensor(ks, device=self.dev)] = s.half()
         for i, k in enumerate(ks):
-            self.child[k, 0] = -1
+            if not keep[i]:
+                self.child[k, 0] = -1
+                self.n[k, 0] = 1
+                self.size[k] = 1
             self.parent[k, 0] = -1
             self.depth[k, 0] = 0
-            self.n[k, 0] = 1
+            self.n[k, 0] = max(self.n[k, 0], 1)
             self.w[k, 0] = self.b[k, 0] = 0.0
             self.term[k, 0] = 0
             self.pend[k, 0] = False
             self.prior[k, 0] = pri[i]
             self.act_in[k, 0] = prevs[i]
-            self.size[k] = 1
+
+    def advance(self, k, a):
+        """After move a: keep that child's subtree for the next decision (True), or nothing."""
+        c = int(self.child[k, 0, a])
+        if c < 0 or self.term[k, c] != 0 or self.pend[k, c]:
+            return False
+        order = np.zeros(self.size[k], np.int32)
+        cnt = reroot(k, c, self.child, self.parent, self.depth, self.n, self.w, self.b, self.term, self.prior,
+                     self.act_in, self.keys, self.size, order)
+        o = torch.from_numpy(order[:cnt].astype(np.int64) + k * self.N).to(self.dev)
+        self.lat[k * self.N: k * self.N + cnt] = self.lat[o].clone()
+        if self.emu is not None:
+            self.states[k][:cnt] = [self.states[k][x] for x in order[:cnt]]
+            if self.frames is not None:
+                self.frames[k, :cnt] = self.frames[k, order[:cnt]]
+        return True
 
     @torch.no_grad()
     def run(self, ks, sims):
@@ -383,7 +448,7 @@ def survives(s, state, a, horizon):
     return False
 
 
-def play(s, forest, starts, sims, caps, log=None, veto=0):
+def play(s, forest, starts, sims, caps, log=None, veto=0, reuse=False):
     """Play every start to its end; K at a time, a finished game's tree goes to the next start.
     starts: [(level, delay, state)]; caps: max decisions per start. The real game is stepped
     only by the moves chosen. Returns one dict per start."""
@@ -406,11 +471,13 @@ def play(s, forest, starts, sims, caps, log=None, veto=0):
 
     for k in range(K):
         admit(k)
+    kept = np.zeros(K, bool)                        # the tree keeps the played move's subtree
     while any(x is not None for x in slot):
         ks = [k for k in range(K) if slot[k] is not None]
         forest.reset(ks, np.stack([stack[slot[k]] for k in ks]),
                      [games[slot[k]]['actions'][-1] if games[slot[k]]['actions'] else NO_PREV for k in ks],
-                     states=[state[slot[k]] for k in ks], levels=[games[slot[k]]['level'] for k in ks])
+                     states=[state[slot[k]] for k in ks], levels=[games[slot[k]]['level'] for k in ks],
+                     keep=[kept[k] for k in ks])
         forest.run(ks, sims)
         picks = {k: forest.choose(k) for k in ks}
         if veto:                                    # an oracle: stage A's commit check, in the real game
@@ -433,6 +500,7 @@ def play(s, forest, starts, sims, caps, log=None, veto=0):
             i = slot[k]
             g = games[i]
             a = picks[k]
+            kept[k] = forest.advance(k, a) if reuse else False
             obs, tr, state[i] = s.replay_obs(state[i], np.array([a], np.uint8))
             g['actions'].append(a)
             stack[i] = np.concatenate([stack[i][1:], obs])
@@ -455,6 +523,7 @@ def play(s, forest, starts, sims, caps, log=None, veto=0):
                     log('[blatent] %s d=%02d %s: %d decisions, %.1f s game time (%.0f s wall)'
                         % (lvl0, g['delay'], 'WON' if g['won'] else g['reason'], g['decisions'], g['seconds'],
                            time.time() - t0))
+                kept[k] = False
                 admit(k)
     return games
 
@@ -479,6 +548,8 @@ def main():
     ap.add_argument('--real-events', action='store_true', help='oracle: deaths and finishes from the real game')
     ap.add_argument('--real-value', help='oracle: W from this relvalue.pt on the real screens')
     ap.add_argument('--real-prior', action='store_true', help='oracle: the net prior on the real screens below the root')
+    ap.add_argument('--reuse', action='store_true', help="keep the played move's subtree (the C++ search does); "
+                    '--sims then counts new visits')
     ap.add_argument('--dedup', action='store_true', help="oracle: prune a child whose real state equals a brother's")
     ap.add_argument('--real-veto', type=int, default=0, help="oracle: stage A's commit check over this many steps")
     ap.add_argument('--out')
@@ -493,7 +564,7 @@ def main():
     if a.prior_net:
         from .net import load as load_net
         pn = load_net(a.prior_net)[0].eval()
-    forest = Forest(model, a.parallel, max_nodes=a.sims + 2 * a.per_wave + 2, c_puct=a.c_puct, scale=a.scale,
+    forest = Forest(model, a.parallel, max_nodes=(3 if a.reuse else 1) * a.sims + 2 * a.per_wave + 2, c_puct=a.c_puct, scale=a.scale,
                     death_cost=a.death_cost, calib=calib, max_depth=md, backup=a.backup, prior_net=pn,
                     deep_prior=a.deep_prior, per_wave=a.per_wave,
                     emu=s if (a.real_events or a.real_value or a.real_prior or a.dedup) else None, real_events=a.real_events,
@@ -504,7 +575,8 @@ def main():
     starts = [(l, d, s.frames(segs[l]['start'], d)) for l in levels for d in delays]
     caps = [int(a.cap * len(segs[l]['opt'])) for l, _, _ in starts]
     t0 = time.time()
-    games = play(s, forest, starts, a.sims, caps, log=lambda m: print(m, flush=True), veto=a.real_veto)
+    games = play(s, forest, starts, a.sims, caps, log=lambda m: print(m, flush=True), veto=a.real_veto,
+                 reuse=a.reuse)
     for g in games:                                # how far through the level: the route is only the ruler
         seg = segs[g['level']]
         s.set_progress_route(ROUTE, seg['opt'], seg['start'])
