@@ -805,6 +805,11 @@ stable-retro: all 3076 frames, ending in 8-1**. It bumps the hidden block itself
 pipe at 763 (docs/media/smbzero_teacherfree_4-2.mp4). Vine test 4/32 (from 3). 8-4 still 0/4
 (all too long), 8-1 fell from 2/4 to 0/4. Round 3 (mc8, the mc2367 value as the player) runs.
 
+**Round 3 (mc8, player relv_mc2367; value relv_mc23678 on mc2 + 3 + 6 + 7 + 8): 21/32, the best
+teacher-free gate** -- 1-1 4/4, 1-2 4/4, 4-1 4/4, 8-1 2/4, 8-2 4/4, 8-3 3/4 -- **but 4-2 back to
+0/4** (all too long) and the vine test 0/32; 8-4 still 0/4. With one 4-2 win in four and none in
+the next four, the rate is noise-level; next: 4-2 from 16 starts for both values, then round 4.
+
 **surv2 (60k boundary states added, half of each batch mixed): held-out mixed AUC 0.981, 93.9%
 of dying moves caught -- and 3/32 in play, dying as before; at the fatal-but-avoidable commits
 it let 8 of 10 through.** The held-out split was the flaw: states were drawn around one moment of
@@ -820,6 +825,12 @@ the CPU goes to stage C first.
 4/32 (1-1 3/4, 4-1 once in 40.0 s -- stage B's first 4-1 without an oracle; 4-1 45% of the level
 against wm17's 25%).** Better, and far from the net's own prior that the factorization credits
 with +4.
+
+**wm19 (wm18 with W learned from the teacher-free value relv_mc2367 instead of relv3): 0/32**
+(1-1 0/4, 24% of the level; everything else dies early). The teacher-free value calls whole
+hard regions hopeless whatever Mario does (W 100-200 frames on every line near 4-2's vine), and
+a world model that copies it plans worse than one that copies the route-trained value. A
+teacher-free stage B needs a sharper teacher-free value first.
 
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
