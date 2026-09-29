@@ -74,9 +74,16 @@ class Dynamics(nn.Module):
 
 
 class Prediction(nn.Module):
-    def __init__(self, c=LATENT_C, hidden=256, pi_mlp=False):
+    def __init__(self, c=LATENT_C, hidden=256, pi_mlp=False, tg=False):
         super().__init__()
         self.fc = nn.Linear(c * 11 * 11, hidden)
+        # tg: frames to go from this latent -- MuZero's value, absolute and bootstrapped, so a
+        # consequence past the tree's reach (a Piranha Plant 24 steps out, the vine) can flow back
+        # to the root. The search then prices a leaf at W = tg(leaf) + 4 depth - tg(root).
+        self.has_tg = tg
+        if tg:
+            self.g1 = nn.Linear(hidden, hidden)
+            self.g2 = nn.Linear(hidden, 1)
         # pi_mlp: the policy gets its own features and two layers. One linear layer on the
         # value's features agreed with the net's top move ~50% of the time, even at the root.
         self.pi_mlp = pi_mlp
@@ -97,6 +104,12 @@ class Prediction(nn.Module):
         return pi, self.w2(F.relu(self.w1(z))).squeeze(1) * 16.0
 
 
+    def tgv(self, s):
+        """latent -> frames to go (>= 0)"""
+        e = F.relu(self.fc(s.flatten(1)))
+        return F.softplus(self.g2(F.relu(self.g1(e)))).squeeze(1) * 64.0
+
+
 class Projector(nn.Module):
     """SimSiam head for the consistency loss (EfficientZero)."""
     def __init__(self, c=LATENT_C, hidden=256):
@@ -114,12 +127,12 @@ class Projector(nn.Module):
 
 
 class WorldModel(nn.Module):
-    def __init__(self, latent=LATENT_C, prev=False, edge=False, pi_mlp=False):
+    def __init__(self, latent=LATENT_C, prev=False, edge=False, pi_mlp=False, tg=False):
         super().__init__()
         chans = (32, 48, latent) if latent >= 48 else (16, 32, latent)
         self.h = Representation(chans)
         self.g = Dynamics(latent, edge)
-        self.f = Prediction(latent, pi_mlp=pi_mlp)
+        self.f = Prediction(latent, pi_mlp=pi_mlp, tg=tg)
         self.proj = Projector(latent)
         # A jump fires only when A is newly pressed: holding it after landing does nothing. So
         # what a press of A does depends on the input before it, which four frames do not show,
@@ -186,6 +199,7 @@ def load(path, device='cuda'):
     ck = torch.load(path, map_location=device, weights_only=False)
     latent = ck['state']['g.conv.weight'].shape[0]      # read the size the checkpoint was trained at
     edge = ck['state']['g.conv.weight'].shape[1] > latent + N_ACTIONS
-    m = WorldModel(latent, prev='prev.weight' in ck['state'], edge=edge, pi_mlp='f.pfc.weight' in ck['state'])
+    m = WorldModel(latent, prev='prev.weight' in ck['state'], edge=edge, pi_mlp='f.pfc.weight' in ck['state'],
+                   tg='f.g1.weight' in ck['state'])
     m.load_state_dict(ck['state'])
     return m.to(device), ck
