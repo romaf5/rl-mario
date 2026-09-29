@@ -940,6 +940,27 @@ measure before any search: the policy net's top move and the value net's W on im
 against the real ones, by depth. (A 2000-step smoke run on a small slice: pixel error 13/255,
 agreement 46% at depth 1 and 26% at 12, W 4.7 frames at 1 and 21 at 12 -- early.)
 
+**Imagined frames, measured.** dec0 (decoder on frozen wm18, 20k steps): the policy net keeps its
+move on imagined stacks 60/43/34/32% at depths 1/3/6/12, W off by 3.1/5.4/13.1/17.5 frames -- worse
+than the latent head past depth 1 -- and at depth 0, the real screen encoded and drawn back, only
+59%: the latent never had to keep the sprites (27/255 error on the moving pixels, 6 overall).
+wm23 = wm18 trained jointly to draw its frames (Dreamer's reconstruction, moving pixels x5, 20k
+steps): 63/64/47/41/38% at depths 0/1/3/6/12, W 2.3 -> 13.1 frames. Better, still below the latent
+head (60/56/62/58/53) past depth 1. The search on drawn frames with the real nets: 1/32 (wm18 +
+dec0; wm18's own heads 4/32).
+
+**The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
+start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
+distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
+caught, 24% of good ones refused, train loss to ~0 -- "which move dies 24 steps from now", read off
+four 84x84 frames, does not generalise at this scale.
+
+**The world model barely overfits.** On 600 fresh trajectories (seed 77) wm18's W error is the same
+5.5 frames as on its training data; death twelve steps ahead P38/R91 (P34/R91 seen), one step
+P13/R67 (P16/R84). It is limited by accuracy, not data -- and it is tiny beside MuZero's (48
+channels, two transition blocks against 256 and sixteen). wm24: wm18's recipe and data at 96
+channels, six transition blocks, the convolutional policy head, from scratch.
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the
