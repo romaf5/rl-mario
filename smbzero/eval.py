@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(REPO, 'search', 'tools'))
 
 
 def run(net, delays, sims=None, budget_ms=None, parallel=1, per_tree=None, level=None, verify=False, out=None,
-        log=print, s=None, c_puct=1.5, value_mix=0.0, min_backup=False, relvalue=None):
+        log=print, s=None, c_puct=1.5, value_mix=0.0, min_backup=False, relvalue=None, safe_horizon=24):
     s = s or Search(threads=THREADS)
     segs = {g['level']: g for g in e2e_segments(s)}
     if level:
@@ -45,7 +45,7 @@ def run(net, delays, sims=None, budget_ms=None, parallel=1, per_tree=None, level
         games = [Game(s.frames(base, d), tag=d) for d in chunk]
         t = time.time()
         player.play(games, sims=sims, budget_s=budget_ms / 1000 if budget_ms else None, segment_limit=limit,
-                    max_decisions=cap)
+                    max_decisions=cap, safe_horizon=safe_horizon)
         for g in games:
             ds = np.array(g.decision_s) if g.decision_s else np.zeros(1)
             r = dict(delay=g.tag, won=g.won, reason=g.reason, decisions=len(g.actions),

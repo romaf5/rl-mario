@@ -16,6 +16,7 @@ def main():
     ap.add_argument('--relvalue', help='play on the learned value instead of the search route')
     ap.add_argument('--delays', default='5,20,35,50')
     ap.add_argument('--sims', type=int, default=1000)
+    ap.add_argument('--veto', type=int, default=24, help="the commit check's horizon (0: off)")
     ap.add_argument('--levels', default=','.join(ROUTE))
     ap.add_argument('--out')
     a = ap.parse_args()
@@ -30,7 +31,7 @@ def main():
     res, won, tot = {}, 0, 0
     for lvl in a.levels.split(','):
         summary, r = run(net, delays, sims=a.sims, parallel=len(delays), level=lvl, s=s, log=lambda m: None,
-                         value_mix=0.0, min_backup=True, relvalue=rv)
+                         value_mix=0.0, min_backup=True, relvalue=rv, safe_horizon=a.veto)
         res[lvl] = [(x['delay'], x['won'], x['reason'], round(x['seconds'], 1)) for x in r]
         won += summary['won']; tot += len(r)
         print('[levels] %-14s %s: won %d/%d  %s' % (tag, lvl, summary['won'], len(r),
