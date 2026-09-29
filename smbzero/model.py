@@ -116,6 +116,21 @@ class Prediction(nn.Module):
         return F.softplus(self.g2(F.relu(self.g1(e)))).squeeze(1) * 64.0
 
 
+class Decoder(nn.Module):
+    """latent (C x 11 x 11) -> the 84 x 84 frame it stands for, in [0, 255]"""
+    def __init__(self, c=LATENT_C):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(c, 96, 3, padding=1), nn.ReLU(), _Res(96),
+            nn.ConvTranspose2d(96, 64, 4, 2, 1), nn.ReLU(), _Res(64),        # 22
+            nn.ConvTranspose2d(64, 48, 4, 2, 1), nn.ReLU(), _Res(48),        # 44
+            nn.ConvTranspose2d(48, 32, 4, 2, 1), nn.ReLU(),                  # 88
+            nn.Conv2d(32, 1, 5))                                             # 84
+
+    def forward(self, s):
+        return torch.sigmoid(self.net(s.float())).squeeze(1) * 255.0
+
+
 class Projector(nn.Module):
     """SimSiam head for the consistency loss (EfficientZero)."""
     def __init__(self, c=LATENT_C, hidden=256):
@@ -133,13 +148,17 @@ class Projector(nn.Module):
 
 
 class WorldModel(nn.Module):
-    def __init__(self, latent=LATENT_C, prev=False, edge=False, pi_mlp=False, tg=False, pi_conv=False):
+    def __init__(self, latent=LATENT_C, prev=False, edge=False, pi_mlp=False, tg=False, pi_conv=False, dec=False):
         super().__init__()
         chans = (32, 48, latent) if latent >= 48 else (16, 32, latent)
         self.h = Representation(chans)
         self.g = Dynamics(latent, edge)
         self.f = Prediction(latent, pi_mlp=pi_mlp, tg=tg, pi_conv=pi_conv)
         self.proj = Projector(latent)
+        # dec: the model draws the frame each latent stands for (Dreamer's reconstruction), so the
+        # latent keeps the sprites the policy and value nets read -- a decoder on a latent never
+        # asked to keep them lost them (27/255 on the moving pixels; the net kept its move 60%)
+        self.dec = Decoder(latent) if dec else None
         # A jump fires only when A is newly pressed: holding it after landing does nothing. So
         # what a press of A does depends on the input before it, which four frames do not show,
         # and a model that is not told assumes every press jumps -- on 8-1 the search held run +
@@ -206,6 +225,7 @@ def load(path, device='cuda'):
     latent = ck['state']['g.conv.weight'].shape[0]      # read the size the checkpoint was trained at
     edge = ck['state']['g.conv.weight'].shape[1] > latent + N_ACTIONS
     m = WorldModel(latent, prev='prev.weight' in ck['state'], edge=edge, pi_mlp='f.pfc.weight' in ck['state'],
-                   tg='f.g1.weight' in ck['state'], pi_conv='f.pconv.0.weight' in ck['state'])
+                   tg='f.g1.weight' in ck['state'], pi_conv='f.pconv.0.weight' in ck['state'],
+                   dec='dec.net.0.weight' in ck['state'])
     m.load_state_dict(ck['state'])
     return m.to(device), ck

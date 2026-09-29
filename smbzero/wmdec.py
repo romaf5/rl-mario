@@ -18,26 +18,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .common import DATA, RUNS
-from .model import LATENT_C, load as load_model
-from .net import _Res
+from .model import Decoder, load as load_model
 from .wmtrain import Trajectories
 
 WORLD = ','.join(os.path.join(DATA, d, '*.npz') for d in ('world', 'world_agent', 'world_sib2', 'world_app'))
-
-
-class Decoder(nn.Module):
-    """latent (C x 11 x 11) -> the 84 x 84 frame it stands for, in [0, 255]"""
-    def __init__(self, c=LATENT_C):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(c, 96, 3, padding=1), nn.ReLU(), _Res(96),
-            nn.ConvTranspose2d(96, 64, 4, 2, 1), nn.ReLU(), _Res(64),        # 22
-            nn.ConvTranspose2d(64, 48, 4, 2, 1), nn.ReLU(), _Res(48),        # 44
-            nn.ConvTranspose2d(48, 32, 4, 2, 1), nn.ReLU(),                  # 88
-            nn.Conv2d(32, 1, 5))                                             # 84
-
-    def forward(self, s):
-        return torch.sigmoid(self.net(s.float())).squeeze(1) * 255.0
 
 
 def load(path, device='cuda'):

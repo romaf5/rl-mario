@@ -115,7 +115,7 @@ def h(x, eps=1e-3):
 
 def losses(model, obs, acts, ev, tgt_obs, r, valid, wt, wvalid,
            w_event=1.0, w_cons=1.0, w_waste=1.0, w_value=1.0, transform=False, prev=None, tgt_prev=None,
-           teacher=None, w_policy=1.0, value_teacher=None, mz=None, w_tg=1.0, w_tgdiff=0.0):
+           teacher=None, w_policy=1.0, value_teacher=None, mz=None, w_tg=1.0, w_tgdiff=0.0, w_rec=0.0):
     if value_teacher is not None:
         # W from the agent's own experience, not the route. Frames-to-go along the search's route
         # passes every hazard at a safe moment, so it is blind to danger that arrives late --
@@ -190,6 +190,18 @@ def losses(model, obs, acts, ev, tgt_obs, r, valid, wt, wvalid,
                 losses.tg_diff_mae = float(((pd - td).abs() * dm).sum() / dm.sum().clamp(min=1))
         with torch.no_grad():
             losses.tg_mae = float(((pred - tg_t).abs() * tg_m).sum() / tg_m.sum().clamp(min=1))
+    if w_rec and model.dec is not None:
+        # the frame each latent stands for; the pixels that moved since the frame before (sprites,
+        # scrolling edges -- what the policy net reads) weigh five times the still background
+        B, K = acts.shape
+        target = torch.cat([obs[:, -1:].float(), tgt_obs.view(B, K, 4, 84, 84)[:, :, -1].float()], 1)
+        before = torch.cat([obs[:, -2:-1].float(), target[:, :-1]], 1)
+        wpix = 1.0 + 4.0 * ((target - before).abs() > 10).float()
+        rec = torch.stack([model.dec(l) for l in lat], 1).float()
+        m = torch.cat([torch.ones(B, 1, device=obs.device), valid], 1)
+        lrec = (((rec - target).abs() * wpix).mean((2, 3)) * m).sum() / m.sum() / 255.0
+        total = total + w_rec * lrec
+        losses.rec = float(lrec) * 255.0
     return (total, le.item(), lc.item(), wmae.item())
 
 
@@ -239,6 +251,8 @@ def main():
     ap.add_argument('--tg', action='store_true', help="a frames-to-go head (MuZero's absolute value)")
     ap.add_argument('--w-tg', type=float, default=1.0)
     ap.add_argument('--w-tgdiff', type=float, default=0.0, help='weight on frames-to-go differences within an unroll')
+    ap.add_argument('--dec', action='store_true', help='the model draws its frames (reconstruction loss)')
+    ap.add_argument('--w-rec', type=float, default=0.0)
     ap.add_argument('--init', help='start from this checkpoint (new heads start fresh)')
     ap.add_argument('--sp-frac', type=float, default=0.0, help='share of each batch from self-play starts')
     ap.add_argument('--out', default=os.path.join(RUNS, 'wm0'))
@@ -255,7 +269,7 @@ def main():
         % (len(data), len(data.frames), len(tr), len(va),
            ' '.join('%s %.2f%%' % (e, 100 * v) for e, v in zip(EVENTS,
                     [(data.out == 1).float().mean(), (data.out == 2).float().mean(), data.forced.mean()]))))
-    model = WorldModel(prev=a.prev, edge=a.edge, pi_mlp=a.pi_mlp, tg=a.tg, pi_conv=a.pi_conv).cuda()
+    model = WorldModel(prev=a.prev, edge=a.edge, pi_mlp=a.pi_mlp, tg=a.tg, pi_conv=a.pi_conv, dec=a.dec).cuda()
     if a.init:
         ck0 = torch.load(a.init, map_location='cuda', weights_only=False)
         own = model.state_dict()                  # a head whose shape changed starts fresh too
@@ -287,7 +301,8 @@ def main():
             loss, le, lc, rmae = losses(model, obs, acts, ev, tgt, r, valid, wt, wv, w_cons=a.w_cons,
                                         w_event=a.w_event, transform=a.transform,
                                         prev=prev, tgt_prev=tprev, teacher=teacher, w_policy=a.w_policy,
-                                        value_teacher=value_teacher, mz=mz, w_tg=a.w_tg, w_tgdiff=a.w_tgdiff)
+                                        value_teacher=value_teacher, mz=mz, w_tg=a.w_tg, w_tgdiff=a.w_tgdiff,
+                                        w_rec=a.w_rec)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -300,7 +315,8 @@ def main():
                              precK=prec[-1].tolist(), recK=rec[-1].tolist()))
             log('[wm] step %5d event %.4f cons %.4f W error %.1f frames%s | 1 step ahead %s | %d steps ahead %s (%.0f s)'
                 % (step, le, lc, rmae, ((' TG error %.0f frames' % losses.tg_mae) if hasattr(losses, 'tg_mae') else '')
-                   + ((' (as W %.1f)' % losses.tg_diff_mae) if hasattr(losses, 'tg_diff_mae') else ''),
+                   + ((' (as W %.1f)' % losses.tg_diff_mae) if hasattr(losses, 'tg_diff_mae') else '')
+                   + ((' frame error %.1f/255' % losses.rec) if hasattr(losses, 'rec') else ''),
                    ' '.join('%s P%.0f/R%.0f' % (e, 100 * prec[0, i], 100 * rec[0, i]) for i, e in enumerate(EVENTS)),
                    a.unroll,
                    ' '.join('%s P%.0f/R%.0f' % (e, 100 * prec[-1, i], 100 * rec[-1, i]) for i, e in enumerate(EVENTS)),
