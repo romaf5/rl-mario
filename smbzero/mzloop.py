@@ -46,6 +46,7 @@ def main():
     ap.add_argument('--temp', type=float, default=0.5)
     ap.add_argument('--steps', type=int, default=3000)
     ap.add_argument('--lr', type=float, default=1e-4)
+    ap.add_argument('--w-tgdiff', type=float, default=4.0, help='frames-to-go differences within an unroll')
     ap.add_argument('--window', type=int, default=5, help='iterations of self-play kept for training')
     ap.add_argument('--out', default=os.path.join(RUNS, 'mz0'))
     a = ap.parse_args()
@@ -83,6 +84,7 @@ def main():
         cand = os.path.join(d, 'wm')
         run(['smbzero.wmtrain', '--data', WORLD + ',' + keep, '--steps', str(a.steps), '--lr', str(a.lr),
              '--unroll', '12', '--w-cons', '2.0', '--transform', '--edge', '--pi-mlp', '--tg',
+             '--w-tgdiff', str(a.w_tgdiff),
              '--distill', a.prior_net, '--w-policy', '4', '--sp-frac', '0.5', '--init', best, '--out', cand],
             os.path.join(d, 'train.log'))
         run(['smbzero.tools.wmcal', '--model', os.path.join(cand, 'wm.pt'), '--data', WORLD, '--unroll', '12',
