@@ -983,6 +983,22 @@ games)** -- not the gap. **wm24** (96 channels, six transition blocks, conv poli
 12-step death calibrated P99/R99): **1/32**. Next: 128 leaves a wave (the C++ player's), the
 breadth its virtual loss buys.
 
+**128 a wave alone changed nothing** (identical games): a wave ends where every way down is pending,
+~12 picks in. **The head to head was also unfair to the C++ search**: started fresh mid-game it had
+no history (its stack a repeated frame). Done fairly -- the C++ forest reset four decisions back and
+the played moves committed, so both see the real last four frames -- the two agreed on most moves;
+at 8-2's decision 121 the C++ tree proved a move dead that the latent tree, with the same 300
+simulations, left alive: its picks had piled into the high-prior brothers and left one unexpanded.
+The difference is the C++ search's **virtual loss** -- a simulation in flight counts on every node of
+its path as a visit with q = 0 (q x n/(n+pending), sqrt(n+pending+1)), so a wave fans out. With it
+(`--vloss --per-wave 128`) the latent search's visits match the C++ search's move for move, and it
+proves the same move dead. **All-oracle, no veto, virtual loss: 9/32** (from 4; 1-1 4/4 at 32-36 s,
+4-2 once in 30.6 s, 8-2 2/4, 4-1 2/4). wm18 with it: 4/32 (other games; the gate 6x faster). A fair
+head to head on a lost 8-3 game now agrees on every move but one -- including both playing a
+most-visited move already proven dead (4096). The rest of the 9-against-24 is in how games unfold
+(tree reuse, most likely), which a model cannot use. So the factorization again, on the matched
+search without reuse: all real / no real prior / no real events / no real value / the model.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
