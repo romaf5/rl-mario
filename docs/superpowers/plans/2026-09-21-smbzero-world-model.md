@@ -893,6 +893,17 @@ structural difference left, and with real states it is exact: all oracles + `--r
 ceiling. If it is the missing piece, the latent form is reuse with re-imagination -- keep the tree
 and its visits, re-imagine every kept latent from the fresh real screen.
 
+**Reuse: +2, not the missing piece.** All oracles + exact reuse (300 simulations): **13/32** against
+11 without (the first eight finished were all wins -- the fast ones). Reuse with re-imagination on
+the model (wm18, 1000 simulations; the kept tree's shape and visits, every latent, value, event and
+prior recomputed from the new screen): **0/32** against 4 without -- the visits a kept subtree
+carries hold the agent to its last plan even with fresh futures. Next: the C++ search at the same 300
+simulations, to see whether 13 against 26 is the budget.
+
+**mz1, iteration 0** (W search, from wm18): self-play 64 games -- 1 won, 56 dead, 7 at the cap; after
+3000 steps on them (half of each batch) with the world data, W error 1.5 frames; gate 4/32, 28% of
+the level (wm18: 4/32, 27%) -- kept, a tie.
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the
