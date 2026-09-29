@@ -215,6 +215,27 @@ def reroot(k, r, child, parent, depth, n, w, b, term, prior, act_in, keys, size,
     return cnt
 
 
+@numba.njit(cache=True)
+def rebackup(k, cnt, child, w, b, term, self_mode):
+    """b of nodes 0..cnt-1 of tree k from their (re-imagined) own values, leaves up: nodes are in
+    breadth-first order, so every child comes after its parent."""
+    for x in range(cnt - 1, -1, -1):
+        if term[k, x] != 0:
+            b[k, x] = w[k, x]
+            continue
+        best, any_ = np.float32(1e30), False
+        for a in range(12):
+            c = child[k, x, a]
+            if c >= 0 and term[k, c] != 3:
+                any_ = True
+                if b[k, c] < best:
+                    best = b[k, c]
+        if any_:
+            b[k, x] = min(w[k, x], best) if self_mode else best
+        else:
+            b[k, x] = w[k, x]
+
+
 class Forest:
     """K latent trees. Node arrays on the CPU (numba walks them), latents on the GPU."""
     def __init__(self, model, K, max_nodes=2048, c_puct=1.5, scale=32.0, fpu=0.5, dead_p=0.95, goal_p=0.9,
@@ -317,6 +338,51 @@ class Forest:
             self.prior[k, 0] = pri[i]
             self.act_in[k, 0] = prevs[i]
             self.allow[k, 0] = True
+
+    @torch.no_grad()
+    def reimagine(self, ks):
+        """Kept subtrees, imagined again from the new root's real screen: every node's latent
+        through the dynamics from its (re-imagined) parent, then its value, events and prior, and
+        the best costs leaves up. The tree's shape and visits stay -- that is the depth reuse buys;
+        the futures are the model's current ones, not those imagined from the last screen."""
+        ks = [k for k in ks if self.size[k] > 1]
+        if not ks:
+            return
+        dmax = max(int(self.depth[k, :self.size[k]].max()) for k in ks)
+        for d in range(1, dmax + 1):
+            kk, xx = [], []
+            for k in ks:
+                idx = np.nonzero(self.depth[k, :self.size[k]] == d)[0]
+                idx = idx[self.term[k, idx] != 3]
+                kk.append(np.full(len(idx), k)); xx.append(idx)
+            kk, xx = np.concatenate(kk).astype(np.int64), np.concatenate(xx).astype(np.int64)
+            if not len(xx):
+                continue
+            par = self.parent[kk, xx].astype(np.int64)
+            src = torch.from_numpy(kk * self.N + par).to(self.dev)
+            dst = torch.from_numpy(kk * self.N + xx).to(self.dev)
+            a_t = torch.from_numpy(self.act_in[kk, xx]).to(self.dev)
+            prev_t = torch.from_numpy(self.act_in[kk, par]).to(self.dev)
+            with torch.autocast('cuda', dtype=torch.float16):
+                s2, ev, _ = self.m.g(self.lat[src], a_t, prev_t)
+                pi, w = self.m.f(s2, self.root_lat[torch.from_numpy(kk).to(self.dev)],
+                                 torch.full((len(xx),), float(d), device=self.dev))
+                if self.value == 'tg':
+                    w = self.m.f.tgv(s2).float() + 4.0 * d - torch.from_numpy(self.tg_root[kk]).to(self.dev)
+            self.lat[dst] = s2.half()
+            lg = ev.float().cpu().numpy()
+            if self.calib is not None:
+                ki = min(d - 1, len(self.calib) - 1)
+                lg = lg / self.calib[ki, :, 0] + self.calib[ki, :, 1]
+            p = 1.0 / (1.0 + np.exp(-np.clip(lg, -30.0, 30.0)))
+            wv = np.clip(w.float().cpu().numpy(), self.floor, HOPELESS) + p[:, 1] * self.death_cost
+            pri = torch.softmax(pi.float(), 1).cpu().numpy()
+            dead, goal = p[:, 1] > self.dead_p, p[:, 0] > self.goal_p
+            self.term[kk, xx] = np.where(dead, 2, np.where(goal, 1, 0))
+            self.w[kk, xx] = np.where(dead, HOPELESS, np.where(goal, 0.0, wv)).astype(np.float32)
+            self.prior[kk, xx] = np.full(12, 1.0 / 12, np.float32) if self.uniform else pri
+        for k in ks:
+            rebackup(k, int(self.size[k]), self.child, self.w, self.b, self.term, self.self_mode)
 
     def advance(self, k, a):
         """After move a: keep that child's subtree for the next decision (True), or nothing."""
@@ -486,6 +552,7 @@ def survives(s, state, a, horizon):
 
 
 def play(s, forest, starts, sims, caps, log=None, veto=0, reuse=False, veto_net=None, veto_p=0.5,
+         reimagine=False,
          temp=0.0, record=False):
     """Play every start to its end; K at a time, a finished game's tree goes to the next start.
     starts: [(level, delay, state)]; caps: max decisions per start. The real game is stepped
@@ -516,6 +583,8 @@ def play(s, forest, starts, sims, caps, log=None, veto=0, reuse=False, veto_net=
                      [games[slot[k]]['actions'][-1] if games[slot[k]]['actions'] else NO_PREV for k in ks],
                      states=[state[slot[k]] for k in ks], levels=[games[slot[k]]['level'] for k in ks],
                      keep=[kept[k] for k in ks])
+        if reimagine:
+            forest.reimagine([k for k in ks if kept[k]])
         forest.run(ks, sims)
         picks = {k: forest.choose(k) for k in ks}
         if temp > 0:                                # self-play: a move drawn from the visit counts
@@ -616,6 +685,8 @@ def main():
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--topk', type=int, default=12, help='below the root, expand only the topk moves under the prior')
     ap.add_argument('--no-floor', action='store_true', help='keep W below 0 (the C++ search does)')
+    ap.add_argument('--reimagine', action='store_true', help='with --reuse: imagine the kept subtree again '
+                    'from the new real screen every decision (its visits kept, its futures fresh)')
     ap.add_argument('--reuse', action='store_true', help="keep the played move's subtree (the C++ search does); "
                     '--sims then counts new visits')
     ap.add_argument('--dedup', action='store_true', help="oracle: prune a child whose real state equals a brother's")
@@ -652,7 +723,7 @@ def main():
         from .survival import load as load_surv
         vnet = load_surv(a.veto_net)[0]
     games = play(s, forest, starts, a.sims, caps, log=lambda m: print(m, flush=True), veto=a.real_veto,
-                 reuse=a.reuse, veto_net=vnet, veto_p=a.veto_p, temp=a.temp, record=a.record)
+                 reuse=a.reuse, reimagine=a.reimagine, veto_net=vnet, veto_p=a.veto_p, temp=a.temp, record=a.record)
     for g in games:                                # how far through the level: the route is only the ruler
         seg = segs[g['level']]
         s.set_progress_route(ROUTE, seg['opt'], seg['start'])
