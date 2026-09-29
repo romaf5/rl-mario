@@ -948,6 +948,8 @@ wm23 = wm18 trained jointly to draw its frames (Dreamer's reconstruction, moving
 steps): 63/64/47/41/38% at depths 0/1/3/6/12, W 2.3 -> 13.1 frames. Better, still below the latent
 head (60/56/62/58/53) past depth 1. The search on drawn frames with the real nets: 1/32 (wm18 +
 dec0; wm18's own heads 4/32).
+wm23 gated: its own heads 3/32 (1-1 3/4, 88% of the level); on its drawn frames with the real
+nets 0 of 31 games before it was stopped. Imagined frames are set aside at this fidelity.
 
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
