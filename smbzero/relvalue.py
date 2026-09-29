@@ -105,7 +105,9 @@ class Data:
     def __init__(self, pattern, device='cpu'):
         roots, leaves, ridx, depth, d, lvl, shard = [], [], [], [], [], [], []
         off = 0
-        for i, p in enumerate(sorted(glob.glob(pattern)) if isinstance(pattern, str) else pattern):
+        files = (sorted(f for pat in pattern.split(',') for f in glob.glob(pat)) if isinstance(pattern, str)
+                 else pattern)                          # comma-separated globs
+        for i, p in enumerate(files):
             z = np.load(p)
             roots.append(z['roots']); leaves.append(z['leaves'])
             ridx.append(z['root_idx'] + off); depth.append(z['depth']); d.append(z['d'])
