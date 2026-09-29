@@ -951,6 +951,13 @@ dec0; wm18's own heads 4/32).
 wm23 gated: its own heads 3/32 (1-1 3/4, 88% of the level); on its drawn frames with the real
 nets 0 of 31 games before it was stopped. Imagined frames are set aside at this fidelity.
 
+**The C++ search without its veto: 24/32 at 300 simulations -- better than with it (19/32)**, and
+faster (1-2 22.7 s against 25; 4-2 4/4 against 3/4). The check "some held input survives 24 steps"
+is too conservative: it refuses moves the search had right. So the veto is not what makes the
+emulator search strong, stage B does not need a learned one -- and every oracle comparison above
+that carried it was handicapped. The clean question now: the latent search with every part real
+(events, value, prior, reuse, no depth bound) and no veto, against 24.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
