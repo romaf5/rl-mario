@@ -258,7 +258,7 @@ class Forest:
                  death_cost=HOPELESS, calib=None, max_depth=12, backup='self', prior_net=None,
                  deep_prior='uniform', per_wave=32, device='cuda', emu=None, real_events=False, real_value=None,
                  real_prior=False, dedup=False, floor=0.0, topk=12, value='w', noise=0.0, alpha=0.3, seed=0,
-                 imagine=False, v_death=4096.0, vloss=False):
+                 imagine=False, v_death=4096.0, vloss=False, real_doom=False):
         self.m, self.dev, self.K, self.N = model, device, K, max_nodes
         self.emu, self.real_events, self.real_value, self.real_prior = emu, real_events, real_value, real_prior
         self.dedup = dedup
@@ -306,6 +306,7 @@ class Forest:
         # worst living leaf -- the all-oracle search died 3/32 where the C++ search (4096) won 24.
         self.v_death = np.float32(v_death)
         self.use_vl = bool(vloss)
+        self.real_doom = real_doom
         self.vl = np.zeros((K, max_nodes), np.int32)
         self.max_depth, self.self_mode, self.per_wave = max_depth, backup == 'self', per_wave
         c = model.g.conv.out_channels
@@ -517,15 +518,19 @@ class Forest:
                 e = self.local.emu = Search(threads=1)
             st, a = self.states[kk[i]][par[i]], np.array([act[i]], np.uint8)
             obs, tr, st2 = e.replay_obs(st, a) if self.frames is not None else (None,) + tuple(e.replay(st, a))
+            doomed = False
+            if self.real_doom and not (tr[-1, 6] in (0x0B, 0x06)):
+                # doom, not death: the state is lost if no move then held input lasts 24 steps
+                doomed = not any(survives(e, st2, x, 24) for x in range(12))
             key = 0
             if self.dedup:                      # emu.h exact_key: all game-state RAM
                 m = e.ram(st2)
                 m[0:8] = 0; m[9] = 0; m[0x100:0x300] = 0
                 m[0x7DD:0x7E3] = 0; m[0x7ED] = m[0x7EE] = 0; m[0x7F8:0x7FB] = 0
                 key = hash(m.tobytes())
-            return obs, tr, st2, key
+            return obs, tr, st2, key, doomed
 
-        for i, (obs, tr, st2, key) in enumerate(self.pool.map(step, range(len(kk)))):
+        for i, (obs, tr, st2, key, doomed) in enumerate(self.pool.map(step, range(len(kk)))):
             k = int(kk[i])
             self.keys[k, ch[i]] = key
             if obs is not None:
@@ -537,7 +542,7 @@ class Forest:
                 j = ROUTE.index(L)
                 out[i] = 1 if (mode == 2 if j == len(ROUTE) - 1 else lvl == gp(ROUTE[j + 1])) else 2
             elif (tr[-1, 6] in (0x0B, 0x06) or tr[-1, 9] < self.lives0[k]
-                  or (tr[-1, 6] == 0x08 and mode == 1 and tr[-1, 1] >= 512)):
+                  or (tr[-1, 6] == 0x08 and mode == 1 and tr[-1, 1] >= 512) or doomed):
                 out[i] = 2
         return out
 
@@ -706,6 +711,8 @@ def main():
     ap.add_argument('--parallel', type=int, default=32, help='trees growing together')
     ap.add_argument('--per-wave', type=int, default=32)
     ap.add_argument('--death-cost', type=float, default=HOPELESS)
+    ap.add_argument('--real-doom', action='store_true', help="with --real-events: a node is dead once its state is "
+                    "doomed (no move then held input survives 24 steps), not when the death registers")
     ap.add_argument('--vloss', action='store_true', help="the C++ search's virtual loss: a simulation in flight "
                     "counts on its path (q x n/(n+pending)), so a wave fans out; use with --per-wave 128")
     ap.add_argument('--v-death', type=float, default=4096.0, help='what a node known to die costs (the C++ search: '
@@ -757,6 +764,7 @@ def main():
                     emu=s if (a.real_events or a.dedup or ((a.real_value or a.real_prior) and not a.imagine)) else None, real_events=a.real_events,
                     real_prior=a.real_prior, dedup=a.dedup, floor=-1e9 if a.no_floor else 0.0, topk=a.topk,
                     value=a.value, noise=a.noise, seed=a.seed, imagine=a.imagine, v_death=a.v_death, vloss=a.vloss,
+                    real_doom=a.real_doom,
                     real_value=load_rel(a.real_value)[0].cuda().eval() if a.real_value else None)
     levels = ROUTE if a.levels == 'all' else a.levels.split(',')
     delays = [int(x) for x in a.delays.split(',')]
