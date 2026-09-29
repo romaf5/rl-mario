@@ -904,6 +904,15 @@ simulations, to see whether 13 against 26 is the budget.
 3000 steps on them (half of each batch) with the world data, W error 1.5 frames; gate 4/32, 28% of
 the level (wm18: 4/32, 27%) -- kept, a tie.
 
+**The C++ search at the same 300 simulations: 19/32** (1-1 4, 1-2 2, 4-1 4, 4-2 3, 8-1 0, 8-2 1, 8-3 4,
+8-4 1) against the all-oracle latent search's 13 with reuse, 11 without -- so a gap remains at equal
+budget, widest on 4-2 (3/4 against 0/4, all too long) and 1-2. Rule by rule the two now match (min
+backup, q, the veto, the relative shift on reuse, the death rule, the move chosen) but for one: the
+latent tree may not grow past 12 (the model's training unroll -- its honesty bound), which the
+oracle inherited though the real game needs no such bound, and 4-2's approach is long. Measured
+next: the oracle at --max-depth 64, and the model at 24 (past its unroll). mz1 iteration 1: 4/32,
+29% (kept).
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the
