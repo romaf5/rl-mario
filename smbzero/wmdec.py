@@ -44,6 +44,7 @@ def evaluate(model, dec, data, rows, policy, value, device='cuda'):
     """Per depth: the policy net's top move and the value net's W, imagined stack against real."""
     K = data.unroll
     agree = np.zeros(K); cnt = np.zeros(K); werr = np.zeros(K); pix = np.zeros(K)
+    a0 = n0 = 0
     for i in range(0, len(rows), 128):
         b = data.batch(rows[i:i + 128], device)
         obs, acts, tgt, valid, prev = b[0], b[1], b[3], b[5], b[8]
@@ -63,8 +64,13 @@ def evaluate(model, dec, data, rows, policy, value, device='cuda'):
             wr = value(real.flatten(0, 1).to(torch.uint8), roots, deps).float().view(B, K)
             wi = value(imag.flatten(0, 1).to(torch.uint8), roots, deps).float().view(B, K)
         agree += ((pr == pi) & v).sum(0).cpu().numpy()
+        st0 = obs.clone()                  # depth 0: the real screen, encoded and drawn back
+        st0[:, -1] = d[:, 0].round().clamp(0, 255).to(torch.uint8)
+        with torch.autocast('cuda', dtype=torch.float16):
+            a0 += int((policy(obs)[0].argmax(1) == policy(st0)[0].argmax(1)).sum()); n0 += B
         werr += ((wr - wi).abs() * valid).sum(0).cpu().numpy()
         cnt += valid.sum(0).cpu().numpy()
+    evaluate.depth0 = a0 / max(n0, 1)
     return agree / cnt, werr / cnt, pix / cnt
 
 
@@ -78,6 +84,7 @@ def main():
     ap.add_argument('--lr', type=float, default=3e-4)
     ap.add_argument('--policy', default=os.path.join(RUNS, 'zero8', 'net.pt'))
     ap.add_argument('--value', default=os.path.join(RUNS, 'relv3', 'relvalue.pt'))
+    ap.add_argument('--eval', action='store_true', help="score the model's own decoder (trained jointly), no training")
     ap.add_argument('--out', default=os.path.join(RUNS, 'dec0'))
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -95,6 +102,13 @@ def main():
     rng = np.random.default_rng(0)
     perm = rng.permutation(len(data))
     va, tr = perm[:2048], perm[2048:]
+    if a.eval:
+        ag, we, px = evaluate(model, model.dec, data, va, policy, value)
+        print('[dec] %s: the policy net keeps its move on imagined stacks -- depth 0 %.0f%%, depth 1-12: %s'
+              % (a.model, 100 * evaluate.depth0, ' '.join('%.0f' % (100 * x) for x in ag)))
+        print('[dec] value net W, imagined against real, depth 1-12: %s frames; pixel error on the last '
+              'frame %s' % (' '.join('%.1f' % x for x in we), ' '.join('%.0f' % x for x in px)))
+        return
     dec = Decoder().cuda()
     opt = torch.optim.AdamW(dec.parameters(), lr=a.lr, weight_decay=1e-4)
     log('[dec] %s frozen; %d unroll starts' % (a.model, len(data)))

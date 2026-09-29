@@ -241,7 +241,8 @@ class Forest:
     def __init__(self, model, K, max_nodes=2048, c_puct=1.5, scale=32.0, fpu=0.5, dead_p=0.95, goal_p=0.9,
                  death_cost=HOPELESS, calib=None, max_depth=12, backup='self', prior_net=None,
                  deep_prior='uniform', per_wave=32, device='cuda', emu=None, real_events=False, real_value=None,
-                 real_prior=False, dedup=False, floor=0.0, topk=12, value='w', noise=0.0, alpha=0.3, seed=0):
+                 real_prior=False, dedup=False, floor=0.0, topk=12, value='w', noise=0.0, alpha=0.3, seed=0,
+                 imagine=False):
         self.m, self.dev, self.K, self.N = model, device, K, max_nodes
         self.emu, self.real_events, self.real_value, self.real_prior = emu, real_events, real_value, real_prior
         self.dedup = dedup
@@ -271,6 +272,14 @@ class Forest:
             # one emulator, so every worker gets a context of its own (states are portable bytes)
             self.local = threading.local()
             self.pool = ThreadPoolExecutor(32)
+        # imagine: every expansion's frame drawn by the model's decoder; --real-value / --real-prior
+        # then read imagined stacks (the real frames above the root, the drawn ones below it)
+        self.imagine = imagine
+        if imagine:
+            assert emu is None and model.dec is not None, 'imagined frames need a model with a decoder, no emulator'
+            self.frames = np.zeros((K, max_nodes, 84, 84), np.uint8)
+            self.root_stack = np.zeros((K, 4, 84, 84), np.uint8)
+            self.root_e = {}
         self.calib = None if calib is None else np.asarray(calib, np.float32)
         self.prior_net, self.uniform = prior_net, (prior_net is not None and deep_prior == 'uniform')
         self.params = dict(c_puct=np.float32(c_puct), scale=np.float32(scale), fpu=np.float32(fpu))
@@ -302,9 +311,11 @@ class Forest:
         if self.emu is not None:
             for i, k in enumerate(ks):
                 self.states[k][0] = states[i]
-                self.root_stack[k] = stacks[i]
                 self.lives0[k] = int(self.emu.ram(states[i])[0x75A])
                 self.level[k] = levels[i]
+        if self.emu is not None or self.imagine:
+            for i, k in enumerate(ks):
+                self.root_stack[k] = stacks[i]
             if self.real_value is not None:
                 with torch.autocast('cuda', dtype=torch.float16):
                     e = self.real_value.embed(torch.from_numpy(np.ascontiguousarray(stacks)).to(self.dev))
@@ -430,6 +441,10 @@ class Forest:
                     tgl = self.m.f.tgv(s2).float().cpu().numpy()
                 w = torch.from_numpy(tgl + 4.0 * dep_np.astype(np.float32) - self.tg_root[kk])
             self.lat[dst] = s2.half()
+            if self.imagine:
+                with torch.autocast('cuda', dtype=torch.float16):
+                    fr = self.m.dec(s2)
+                self.frames[kk, ch] = fr.float().round().clamp(0, 255).to(torch.uint8).cpu().numpy()
             lg = ev.float().cpu().numpy()
             if self.calib is not None:          # a price is only fair if the probability is honest
                 ki = np.clip(dep_np - 1, 0, len(self.calib) - 1)
@@ -453,6 +468,7 @@ class Forest:
                 if self.real_events:
                     p_ev[:, 0] = ev_real == 1
                     p_ev[:, 1] = ev_real == 2
+            if self.emu is not None or self.imagine:
                 if self.real_value is not None or self.real_prior:
                     leaf = self._leaf_stacks(kk, ch)
                 if self.real_value is not None:
@@ -692,6 +708,8 @@ def main():
     ap.add_argument('--dedup', action='store_true', help="oracle: prune a child whose real state equals a brother's")
     ap.add_argument('--veto-net', help="a survival.py net: stage A's commit check, learned (no game touched)")
     ap.add_argument('--veto-p', type=float, default=0.5, help='the veto net refuses a move below this')
+    ap.add_argument('--imagine', action='store_true', help="the model draws every expanded frame; "
+                    "--real-value / --real-prior then judge imagined stacks (no emulator)")
     ap.add_argument('--real-veto', type=int, default=0, help="oracle: stage A's commit check over this many steps")
     ap.add_argument('--out')
     a = ap.parse_args()
@@ -708,9 +726,9 @@ def main():
     forest = Forest(model, a.parallel, max_nodes=(3 if a.reuse else 1) * a.sims + 2 * a.per_wave + 2, c_puct=a.c_puct, scale=a.scale,
                     death_cost=a.death_cost, calib=calib, max_depth=md, backup=a.backup, prior_net=pn,
                     deep_prior=a.deep_prior, per_wave=a.per_wave,
-                    emu=s if (a.real_events or a.real_value or a.real_prior or a.dedup) else None, real_events=a.real_events,
+                    emu=s if (a.real_events or a.dedup or ((a.real_value or a.real_prior) and not a.imagine)) else None, real_events=a.real_events,
                     real_prior=a.real_prior, dedup=a.dedup, floor=-1e9 if a.no_floor else 0.0, topk=a.topk,
-                    value=a.value, noise=a.noise, seed=a.seed,
+                    value=a.value, noise=a.noise, seed=a.seed, imagine=a.imagine,
                     real_value=load_rel(a.real_value)[0].cuda().eval() if a.real_value else None)
     levels = ROUTE if a.levels == 'all' else a.levels.split(',')
     delays = [int(x) for x in a.delays.split(',')]
