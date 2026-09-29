@@ -925,6 +925,21 @@ the wins are.
 mz1: iteration 2 -- self-play 4/64, gate 3/32 23%, sent back; iteration 3 -- self-play 0/64, gate
 3/32 23%, sent back. Four iterations have not moved the gate (4, 4, 3, 3).
 
+**wm22 (wm18 + a convolutional policy head on the latent, 12k steps): agreement with the net 62-70%
+at depths 0-3 (wm18 56-62%), about the same deeper -- and the gate 0/32.** Near-identical models
+gate at 0-4 (wm17 4, wm18 4, wm20 2, wm21 0, wm22 0): the latent agent's wins are marginal, flipped by
+small differences. The loop is paused after four flat iterations (its best model kept, resumable).
+
+**Imagined frames (`wmdec`).** The factorization's biggest lever is the prior below the root (the
+policy net on the real screens: 7 -> 11 of 32), and every attempt to distil that net into a head on
+the latent stops at 60-70%. So invert it: the model draws the screen -- a decoder from the latent to
+the 84x84 frame, trained on a frozen wm18's unrolled latents against the frames each step really
+led to -- and the proven networks judge imagined stacks exactly as they judge real ones: the policy
+net for the prior, the value net for W. Stage B's rule holds: nothing past the root is played. The
+measure before any search: the policy net's top move and the value net's W on imagined stacks
+against the real ones, by depth. (A 2000-step smoke run on a small slice: pixel error 13/255,
+agreement 46% at depth 1 and 26% at 12, W 4.7 frames at 1 and 21 at 12 -- early.)
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the
