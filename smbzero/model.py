@@ -74,7 +74,7 @@ class Dynamics(nn.Module):
 
 
 class Prediction(nn.Module):
-    def __init__(self, c=LATENT_C, hidden=256, pi_mlp=False, tg=False):
+    def __init__(self, c=LATENT_C, hidden=256, pi_mlp=False, tg=False, pi_conv=False):
         super().__init__()
         self.fc = nn.Linear(c * 11 * 11, hidden)
         # tg: frames to go from this latent -- MuZero's value, absolute and bootstrapped, so a
@@ -86,8 +86,13 @@ class Prediction(nn.Module):
             self.g2 = nn.Linear(hidden, 1)
         # pi_mlp: the policy gets its own features and two layers. One linear layer on the
         # value's features agreed with the net's top move ~50% of the time, even at the root.
-        self.pi_mlp = pi_mlp
-        if pi_mlp:
+        self.pi_mlp, self.pi_conv = pi_mlp, pi_conv
+        if pi_conv:
+            # pi_conv: read the latent as the net reads its screen -- spatially, two residual
+            # blocks -- rather than flattened; the MLP head still agreed with the net only ~60%
+            self.pconv = nn.Sequential(nn.Conv2d(c, 64, 3, padding=1), _Res(64), _Res(64), nn.ReLU())
+            self.pi = nn.Sequential(nn.Flatten(), nn.Linear(64 * 11 * 11, hidden), nn.ReLU(), nn.Linear(hidden, N_ACTIONS))
+        elif pi_mlp:
             self.pfc = nn.Linear(c * 11 * 11, hidden)
             self.pi = nn.Sequential(nn.ReLU(), nn.Linear(hidden, hidden), nn.ReLU(), nn.Linear(hidden, N_ACTIONS))
         else:
@@ -100,7 +105,8 @@ class Prediction(nn.Module):
         e, e0 = F.relu(self.fc(s.flatten(1))), F.relu(self.fc(s0.flatten(1)))
         d = depth.float().unsqueeze(1) if depth.dim() == 1 else depth.float()
         z = torch.cat([e, e0, e - e0, d / 32, (d / 32) ** 2], 1)
-        pi = self.pi(self.pfc(s.flatten(1))) if self.pi_mlp else self.pi(e)
+        pi = (self.pi(self.pconv(s)) if self.pi_conv else
+              self.pi(self.pfc(s.flatten(1))) if self.pi_mlp else self.pi(e))
         return pi, self.w2(F.relu(self.w1(z))).squeeze(1) * 16.0
 
 
@@ -127,12 +133,12 @@ class Projector(nn.Module):
 
 
 class WorldModel(nn.Module):
-    def __init__(self, latent=LATENT_C, prev=False, edge=False, pi_mlp=False, tg=False):
+    def __init__(self, latent=LATENT_C, prev=False, edge=False, pi_mlp=False, tg=False, pi_conv=False):
         super().__init__()
         chans = (32, 48, latent) if latent >= 48 else (16, 32, latent)
         self.h = Representation(chans)
         self.g = Dynamics(latent, edge)
-        self.f = Prediction(latent, pi_mlp=pi_mlp, tg=tg)
+        self.f = Prediction(latent, pi_mlp=pi_mlp, tg=tg, pi_conv=pi_conv)
         self.proj = Projector(latent)
         # A jump fires only when A is newly pressed: holding it after landing does nothing. So
         # what a press of A does depends on the input before it, which four frames do not show,
@@ -200,6 +206,6 @@ def load(path, device='cuda'):
     latent = ck['state']['g.conv.weight'].shape[0]      # read the size the checkpoint was trained at
     edge = ck['state']['g.conv.weight'].shape[1] > latent + N_ACTIONS
     m = WorldModel(latent, prev='prev.weight' in ck['state'], edge=edge, pi_mlp='f.pfc.weight' in ck['state'],
-                   tg='f.g1.weight' in ck['state'])
+                   tg='f.g1.weight' in ck['state'], pi_conv='f.pconv.0.weight' in ck['state'])
     m.load_state_dict(ck['state'])
     return m.to(device), ck

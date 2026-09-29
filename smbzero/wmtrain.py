@@ -227,6 +227,7 @@ def main():
                          'predicts an enemy death better (0.8 AUC on 8-1) than this model on four (0.7)')
     ap.add_argument('--distill', help="policy net whose prior the world model's policy head learns")
     ap.add_argument('--w-policy', type=float, default=1.0, help='weight of the distillation loss')
+    ap.add_argument('--pi-conv', action='store_true', help='a convolutional policy head on the latent')
     ap.add_argument('--pi-mlp', action='store_true', help='a policy head with its own features and two layers')
     ap.add_argument('--value-teacher', help="relative value net (stage C) whose W the model's W head learns, instead of the route")
     ap.add_argument('--edge', action='store_true',
@@ -254,10 +255,12 @@ def main():
         % (len(data), len(data.frames), len(tr), len(va),
            ' '.join('%s %.2f%%' % (e, 100 * v) for e, v in zip(EVENTS,
                     [(data.out == 1).float().mean(), (data.out == 2).float().mean(), data.forced.mean()]))))
-    model = WorldModel(prev=a.prev, edge=a.edge, pi_mlp=a.pi_mlp, tg=a.tg).cuda()
+    model = WorldModel(prev=a.prev, edge=a.edge, pi_mlp=a.pi_mlp, tg=a.tg, pi_conv=a.pi_conv).cuda()
     if a.init:
         ck0 = torch.load(a.init, map_location='cuda', weights_only=False)
-        miss = model.load_state_dict(ck0['state'], strict=False)
+        own = model.state_dict()                  # a head whose shape changed starts fresh too
+        keep = {k: v for k, v in ck0['state'].items() if k in own and own[k].shape == v.shape}
+        miss = model.load_state_dict(keep, strict=False)
         log('[wm] from %s (fresh: %s)' % (a.init, ', '.join(miss.missing_keys) or 'nothing'))
     tr_sp, tr_w = tr[data.sp[tr]], tr[~data.sp[tr]]
     if a.sp_frac:
