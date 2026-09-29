@@ -46,6 +46,9 @@ def main():
     ap.add_argument('--temp', type=float, default=0.5)
     ap.add_argument('--steps', type=int, default=3000)
     ap.add_argument('--lr', type=float, default=1e-4)
+    ap.add_argument('--value-teacher', default=os.path.join(RUNS, 'relv3', 'relvalue.pt'),
+                    help="the W head's teacher on every row ('' for the route)")
+    ap.add_argument('--value', default='tg', choices=('w', 'tg'), help="the search's leaf price")
     ap.add_argument('--w-tgdiff', type=float, default=4.0, help='frames-to-go differences within an unroll')
     ap.add_argument('--window', type=int, default=5, help='iterations of self-play kept for training')
     ap.add_argument('--out', default=os.path.join(RUNS, 'mz0'))
@@ -54,7 +57,11 @@ def main():
     logf = open(os.path.join(a.out, 'loop.log'), 'a')
     log = lambda m: (print(m, flush=True), logf.write(m + '\n'), logf.flush())
     blat = ['smbzero.blatent', '--prior-net', a.prior_net, '--deep-prior', 'model', '--backup', 'children',
-            '--value', 'tg', '--sims', str(a.sims)]
+            '--value', a.value, '--sims', str(a.sims)]
+    # With the W search the root value is not frames to go, so self-play teaches the policy (the
+    # search's visit counts) and the dynamics and events (what really happened where the search
+    # goes) -- and the W and frames-to-go heads keep their route targets from the world data.
+    tg_w = ['--w-tg', '1', '--w-tgdiff', str(a.w_tgdiff)] if a.value == 'tg' else ['--w-tg', '0']
     best = os.path.join(a.out, 'best.pt')
     if not os.path.exists(best):
         shutil.copy(a.init, best)
@@ -83,9 +90,9 @@ def main():
                         for j in range(max(0, it - a.window + 1), it + 1))
         cand = os.path.join(d, 'wm')
         run(['smbzero.wmtrain', '--data', WORLD + ',' + keep, '--steps', str(a.steps), '--lr', str(a.lr),
-             '--unroll', '12', '--w-cons', '2.0', '--transform', '--edge', '--pi-mlp', '--tg',
-             '--w-tgdiff', str(a.w_tgdiff),
-             '--distill', a.prior_net, '--w-policy', '4', '--sp-frac', '0.5', '--init', best, '--out', cand],
+             '--unroll', '12', '--w-cons', '2.0', '--transform', '--edge', '--pi-mlp', '--tg'] + tg_w + [
+             '--distill', a.prior_net, '--w-policy', '4', '--sp-frac', '0.5', '--init', best, '--out', cand]
+            + (['--value-teacher', a.value_teacher] if a.value_teacher else []),
             os.path.join(d, 'train.log'))
         run(['smbzero.tools.wmcal', '--model', os.path.join(cand, 'wm.pt'), '--data', WORLD, '--unroll', '12',
              '--rows', '8192'], os.path.join(d, 'wmcal.log'))
