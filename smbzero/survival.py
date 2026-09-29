@@ -85,6 +85,33 @@ def make(a):
                 return t
         return None
 
+    if a.rollouts:
+        # Deaths from all over the game, not only where our agents died: a level, a start delay, a
+        # stretch of its route, then held inputs at random until Mario dies. Every rollout is a
+        # hazard met in its own situation -- the learned veto memorised the ~450 it had.
+        def rollout(i):
+            e, r = emu(), np.random.default_rng((a.seed, i))
+            lvl = ROUTE[int(r.integers(len(ROUTE)))]
+            opt, d = np.asarray(segs[lvl]['opt'], np.uint8), int(r.integers(0, 61))
+            t = int(r.integers(0, max(len(opt) - 10, 1)))
+            st = e.frames(segs[lvl]['start'], d)
+            out, m = e.classify_along(st, ROUTE, opt[:t])
+            if m < t or (m and out[m - 1] != 0):
+                return None                      # the route from another delay ran into trouble first
+            _, st = e.replay(st, opt[:t])
+            seq = []
+            while len(seq) < 150:
+                seq += [int(r.integers(0, 12))] * int(r.integers(1, 16))
+            seq = np.array(seq[:150], np.uint8)
+            out, m = e.classify_along(st, ROUTE, seq)
+            if not m or out[m - 1] != 2:
+                return None
+            return dict(level=lvl, delay=d, actions=[int(x) for x in np.concatenate([opt[:t], seq[:m]])],
+                        reason='dead at %s' % lvl, gid=(a.seed * 1000 + 999) * 1000000 + i)
+        with ThreadPoolExecutor(a.threads) as pool:
+            games = [g for g in pool.map(rollout, range(a.rollouts)) if g is not None]
+        print('[survival] %d of %d rollouts died' % (len(games), a.rollouts), flush=True)
+        a.boundary = True
     jobs = []
     if a.boundary:
         dead = [g for g in games if g['reason'].startswith('dead')]
@@ -223,6 +250,8 @@ def main():
     m.add_argument('--seed', type=int, default=0)
     m.add_argument('--near-frac', type=float, default=0.5, help="share of a dead game's states taken near its end")
     m.add_argument('--near-window', type=int, default=30, help='how near: the last this many decisions')
+    m.add_argument('--rollouts', type=int, default=0, help='deaths from random play off the routes of every '
+                   'level, this many rollouts (implies --boundary; --games is ignored)')
     m.add_argument('--boundary', action='store_true', help="states around each lost game's last savable decision")
     m.add_argument('--dead-only', action='store_true', help='states from games that died only (where the '
                    'decisive, mixed states are)')
