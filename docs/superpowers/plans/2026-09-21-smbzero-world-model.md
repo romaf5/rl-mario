@@ -824,6 +824,23 @@ not -- from further away the games still wander before the block or run past it 
 that leads off the route, a consequence hundreds of decisions away. Round 5 (mc10) queued, after
 4-2 from 16 starts at 1000 and 2000 simulations.
 
+4-2 from 16 starts with round 4's value at 1000 simulations: 0/16.
+
+**Why the frontier left the vine too early, and the fix.** A frontier moved back on any single
+win from a root before it. By round 4 two 4-2 frontiers sat at 50 and 186, far before the bumps
+(281, 252) -- one lucky branch each -- so the data stopped piling up on the vine while the value
+still bumped it only from close (0/8 from 21 decisions out). The backward algorithm moves the
+start back only once the agent succeeds there reliably: `mcdata --frontier-rate 0.5` moves a
+frontier back when the last 24 branches from its window win half the time, to the earliest root
+won from. Round 5 restarts 4-2's frontiers just past each vine (284, 255, 218) with it.
+
+**Priorities.** Stage C first: it is six levels solid and two short of a full game with no
+teacher in its value. Stage B is parked: every knob tried after the bug fixes (backup, reuse,
+top-k, simulations, learned veto, a teacher-free W) left it at 0-4/32, and the factorization says
+the gap is the search's shape more than the model; the principled next step is MuZero's own --
+training the model's policy and value on its own latent-search play, which blatent now makes
+fast enough -- once stage C has a full game.
+
 **surv2 (60k boundary states added, half of each batch mixed): held-out mixed AUC 0.981, 93.9%
 of dying moves caught -- and 3/32 in play, dying as before; at the fatal-but-avoidable commits
 it let 8 of 10 through.** The held-out split was the flaw: states were drawn around one moment of
