@@ -913,6 +913,18 @@ oracle inherited though the real game needs no such bound, and 4-2's approach is
 next: the oracle at --max-depth 64, and the model at 24 (past its unroll). mz1 iteration 1: 4/32,
 29% (kept).
 
+**Not the depth bound either.** The oracle at --max-depth 64 (reuse, 300 simulations): 12/32 (13 at
+12) -- 8-2 4/4 now, 1-2 and 4-2 still too long 4/4, 8-1 dead 4/4. The model at --max-depth 24: 4/32,
+the same games as at 12. (Checked that reuse was not starved of nodes by its 3x capacity: a reused
+tree gets 287 of 300 new nodes per decision on average, 953 of 1000.) With every part real the
+latent search stays 6-8 short of the C++ search at equal budget -- the rest is in mechanics (128
+leaves a wave with virtual loss against 32 without, forced decisions committed at once, the timer
+rule), none a clear lever -- and the model is far below that ceiling (4/32). The model is where
+the wins are.
+
+mz1: iteration 2 -- self-play 4/64, gate 3/32 23%, sent back; iteration 3 -- self-play 0/64, gate
+3/32 23%, sent back. Four iterations have not moved the gate (4, 4, 3, 3).
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the
