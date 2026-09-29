@@ -968,6 +968,21 @@ living leaf: the min backup walked into deaths. Every latent-search result so fa
 (model-only and oracle alike). Fixed (`--v-death`, default 4096); re-running the all-oracle search
 without the veto and wm18 on its own heads.
 
+**Re-run: identical, game for game** (all-oracle no veto 3/32, wm18 4/32): dead children already
+have q = 0, and a node whose children are all dead was too rare to matter. Correct, kept, not the gap.
+
+**Head to head (tools: the C++ player and the all-oracle latent search, fresh trees, 300 simulations,
+the states before a lost 8-2 game's fall).** The fall into the pit starts about decision 120 and
+Mario is below the screen by 127 (every move then a real death -- the rule is right; the game only
+takes the life at 174). Before it the two disagree at 109, 110, 112, 116-121 (at 109 the C++ search
+goes right, the latent one waits). Two differences show: the C++ search keeps W below zero (a
+child at -6, -3, -2: a line better than expected), the latent one floored it at 0 so good lines
+tied at 0-4; and the C++ search spreads its visits (every root child ~10+, 21/152/24/76/...) where
+the latent one pours 265 of 300 into one move. **No floor: all-oracle 4/32, wm18 4/32 (the same
+games)** -- not the gap. **wm24** (96 channels, six transition blocks, conv policy head; 40k steps;
+12-step death calibrated P99/R99): **1/32**. Next: 128 leaves a wave (the C++ player's), the
+breadth its virtual loss buys.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
