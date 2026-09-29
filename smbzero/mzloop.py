@@ -19,13 +19,18 @@ PY = sys.executable
 WORLD = ','.join(os.path.join(DATA, d, '*.npz') for d in ('world', 'world_agent', 'world_sib2', 'world_app'))
 
 
-def run(args, log):
+def run(args, log, tries=2):
+    """One step of an iteration; a failed step is tried once more a minute later (a CUDA out of
+    memory when another job briefly filled the GPU stopped the first loop at its first self-play)."""
     t = time.time()
-    with open(log, 'w') as f:
-        r = subprocess.run([PY, '-m'] + args, stdout=f, stderr=subprocess.STDOUT)
-    if r.returncode:
-        raise RuntimeError('%s failed (%s)' % (args[0], log))
-    return time.time() - t
+    for k in range(tries):
+        with open(log, 'w') as f:
+            r = subprocess.run([PY, '-m'] + args, stdout=f, stderr=subprocess.STDOUT)
+        if not r.returncode:
+            return time.time() - t
+        if k + 1 < tries:
+            time.sleep(60)
+    raise RuntimeError('%s failed (%s)' % (args[0], log))
 
 
 def score(path):
