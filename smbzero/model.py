@@ -49,7 +49,7 @@ def norm_latent(s):
 
 
 class Dynamics(nn.Module):
-    def __init__(self, c=LATENT_C, edge=False):
+    def __init__(self, c=LATENT_C, edge=False, blocks=2):
         super().__init__()
         # edge: the previous action too, as a second set of planes. A jump is a function of the
         # button now AND the button before (A newly pressed), at every step of an imagined line,
@@ -57,6 +57,7 @@ class Dynamics(nn.Module):
         self.edge = edge
         self.conv = nn.Conv2d(c + N_ACTIONS + (N_ACTIONS + 1 if edge else 0), c, 3, padding=1)
         self.r1, self.r2 = _Res(c), _Res(c)
+        self.more = nn.ModuleList([_Res(c) for _ in range(max(blocks - 2, 0))])   # a deeper transition
         self.out = nn.Sequential(nn.Flatten(), nn.Linear(c * 11 * 11, 256), nn.ReLU(), nn.Linear(256, 4))
 
     def forward(self, s, a, a_prev=None):
@@ -69,6 +70,8 @@ class Dynamics(nn.Module):
                 a_prev = torch.full_like(a, NO_PREV)
             planes.append(F.one_hot(a_prev.long(), N_ACTIONS + 1).float()[:, :, None, None].expand(*size))
         h = self.r2(self.r1(self.conv(torch.cat(planes, 1))))
+        for blk in self.more:
+            h = blk(h)
         o = self.out(h)
         return norm_latent(h), o[:, :3], F.softplus(o[:, 3]) * 4.0
 
@@ -148,11 +151,12 @@ class Projector(nn.Module):
 
 
 class WorldModel(nn.Module):
-    def __init__(self, latent=LATENT_C, prev=False, edge=False, pi_mlp=False, tg=False, pi_conv=False, dec=False):
+    def __init__(self, latent=LATENT_C, prev=False, edge=False, pi_mlp=False, tg=False, pi_conv=False, dec=False,
+                 dyn_blocks=2):
         super().__init__()
-        chans = (32, 48, latent) if latent >= 48 else (16, 32, latent)
+        chans = (32, 64, latent) if latent > 48 else (32, 48, latent) if latent >= 48 else (16, 32, latent)
         self.h = Representation(chans)
-        self.g = Dynamics(latent, edge)
+        self.g = Dynamics(latent, edge, dyn_blocks)
         self.f = Prediction(latent, pi_mlp=pi_mlp, tg=tg, pi_conv=pi_conv)
         self.proj = Projector(latent)
         # dec: the model draws the frame each latent stands for (Dreamer's reconstruction), so the
@@ -226,6 +230,7 @@ def load(path, device='cuda'):
     edge = ck['state']['g.conv.weight'].shape[1] > latent + N_ACTIONS
     m = WorldModel(latent, prev='prev.weight' in ck['state'], edge=edge, pi_mlp='f.pfc.weight' in ck['state'],
                    tg='f.g1.weight' in ck['state'], pi_conv='f.pconv.0.weight' in ck['state'],
-                   dec='dec.net.0.weight' in ck['state'])
+                   dec='dec.net.0.weight' in ck['state'],
+                   dyn_blocks=2 + len({k.split('.')[2] for k in ck['state'] if k.startswith('g.more.')}))
     m.load_state_dict(ck['state'])
     return m.to(device), ck

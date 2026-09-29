@@ -251,6 +251,8 @@ def main():
     ap.add_argument('--tg', action='store_true', help="a frames-to-go head (MuZero's absolute value)")
     ap.add_argument('--w-tg', type=float, default=1.0)
     ap.add_argument('--w-tgdiff', type=float, default=0.0, help='weight on frames-to-go differences within an unroll')
+    ap.add_argument('--latent', type=int, default=48, help='latent channels')
+    ap.add_argument('--dyn-blocks', type=int, default=2, help='residual blocks in the transition')
     ap.add_argument('--dec', action='store_true', help='the model draws its frames (reconstruction loss)')
     ap.add_argument('--w-rec', type=float, default=0.0)
     ap.add_argument('--init', help='start from this checkpoint (new heads start fresh)')
@@ -269,7 +271,8 @@ def main():
         % (len(data), len(data.frames), len(tr), len(va),
            ' '.join('%s %.2f%%' % (e, 100 * v) for e, v in zip(EVENTS,
                     [(data.out == 1).float().mean(), (data.out == 2).float().mean(), data.forced.mean()]))))
-    model = WorldModel(prev=a.prev, edge=a.edge, pi_mlp=a.pi_mlp, tg=a.tg, pi_conv=a.pi_conv, dec=a.dec).cuda()
+    model = WorldModel(a.latent, prev=a.prev, edge=a.edge, pi_mlp=a.pi_mlp, tg=a.tg, pi_conv=a.pi_conv, dec=a.dec,
+                       dyn_blocks=a.dyn_blocks).cuda()
     if a.init:
         ck0 = torch.load(a.init, map_location='cuda', weights_only=False)
         own = model.state_dict()                  # a head whose shape changed starts fresh too
