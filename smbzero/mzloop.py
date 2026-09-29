@@ -1,0 +1,104 @@
+"""MuZero's loop, in the world model: play with the search inside the model, learn from what
+the search chose and what really happened, keep the model only if it plays better.
+
+  per iteration:
+    self-play   blatent --value tg --noise --temp --record: 8 levels x 8 random start delays
+    data        mzdata: the real screens and outcomes, visit counts, n-step frames to go
+    train       wmtrain --init <best> --tg --sp-frac 0.5: self-play (the last few iterations)
+                with the world data for grounding
+    calibrate   tools.wmcal: the event heads' temperatures, which the search prices death with
+    gate        blatent --value tg, the 32 fixed games (8 levels x 5,20,35,50): wins, then progress
+
+  CUDA_VISIBLE_DEVICES=1 venv_retro/bin/python -m smbzero.mzloop --init smbzero/runs/wm20/wm.pt --out smbzero/runs/mz0
+"""
+import argparse, glob, json, os, shutil, subprocess, sys, time
+import numpy as np
+from .common import DATA, ROUTE, RUNS
+
+PY = sys.executable
+WORLD = ','.join(os.path.join(DATA, d, '*.npz') for d in ('world', 'world_agent', 'world_sib2', 'world_app'))
+
+
+def run(args, log):
+    t = time.time()
+    with open(log, 'w') as f:
+        r = subprocess.run([PY, '-m'] + args, stdout=f, stderr=subprocess.STDOUT)
+    if r.returncode:
+        raise RuntimeError('%s failed (%s)' % (args[0], log))
+    return time.time() - t
+
+
+def score(path):
+    games = json.load(open(path))
+    won = sum(g['won'] for g in games)
+    prog = float(np.nanmean([g.get('progress', np.nan) for g in games]))
+    return won, prog
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('--init', required=True, help='a world model with a frames-to-go head')
+    ap.add_argument('--prior-net', default=os.path.join(RUNS, 'zero8', 'net.pt'))
+    ap.add_argument('--iters', type=int, default=8)
+    ap.add_argument('--games-per-level', type=int, default=8)
+    ap.add_argument('--sims', type=int, default=1000)
+    ap.add_argument('--noise', type=float, default=0.25)
+    ap.add_argument('--temp', type=float, default=0.5)
+    ap.add_argument('--steps', type=int, default=3000)
+    ap.add_argument('--lr', type=float, default=1e-4)
+    ap.add_argument('--window', type=int, default=5, help='iterations of self-play kept for training')
+    ap.add_argument('--out', default=os.path.join(RUNS, 'mz0'))
+    a = ap.parse_args()
+    os.makedirs(a.out, exist_ok=True)
+    logf = open(os.path.join(a.out, 'loop.log'), 'a')
+    log = lambda m: (print(m, flush=True), logf.write(m + '\n'), logf.flush())
+    blat = ['smbzero.blatent', '--prior-net', a.prior_net, '--deep-prior', 'model', '--backup', 'children',
+            '--value', 'tg', '--sims', str(a.sims)]
+    best = os.path.join(a.out, 'best.pt')
+    if not os.path.exists(best):
+        shutil.copy(a.init, best)
+        dt = run(blat + ['--model', best, '--cap', '2.5', '--out', os.path.join(a.out, 'gate_init.json')],
+                 os.path.join(a.out, 'gate_init.log'))
+        w0, p0 = score(os.path.join(a.out, 'gate_init.json'))
+        log('[mz] start: %s -- gate %d/32, %.0f%% of the level (%.0f s)' % (a.init, w0, 100 * p0, dt))
+    best_score = score(os.path.join(a.out, 'gate_init.json'))
+    rng = np.random.default_rng(len(glob.glob(os.path.join(a.out, 'it*'))))
+    for it in range(a.iters):
+        d = os.path.join(a.out, 'it%02d' % it)
+        if os.path.exists(os.path.join(d, 'done')):
+            best_score = tuple(json.load(open(os.path.join(d, 'done')))['best'])
+            continue
+        os.makedirs(d, exist_ok=True)
+        t0 = time.time()
+        # self-play: every level, random start delays (the gate's own delays are not special)
+        delays = ','.join(str(x) for x in sorted(rng.choice(61, a.games_per_level, replace=False)))
+        sp = os.path.join(d, 'selfplay.json')
+        run(blat + ['--model', best, '--cap', '2.5', '--delays', delays, '--noise', str(a.noise), '--temp',
+                    str(a.temp), '--record', '--seed', str(it), '--out', sp], os.path.join(d, 'selfplay.log'))
+        spw, spp = score(sp)
+        shards = os.path.join(DATA, 'mz', os.path.basename(a.out), 'it%02d' % it)
+        run(['smbzero.mzdata', '--games', sp, '--out', shards], os.path.join(d, 'mzdata.log'))
+        keep = ','.join(os.path.join(DATA, 'mz', os.path.basename(a.out), 'it%02d' % j, '*.npz')
+                        for j in range(max(0, it - a.window + 1), it + 1))
+        cand = os.path.join(d, 'wm')
+        run(['smbzero.wmtrain', '--data', WORLD + ',' + keep, '--steps', str(a.steps), '--lr', str(a.lr),
+             '--unroll', '12', '--w-cons', '2.0', '--transform', '--edge', '--pi-mlp', '--tg',
+             '--distill', a.prior_net, '--w-policy', '4', '--sp-frac', '0.5', '--init', best, '--out', cand],
+            os.path.join(d, 'train.log'))
+        run(['smbzero.tools.wmcal', '--model', os.path.join(cand, 'wm.pt'), '--data', WORLD, '--unroll', '12',
+             '--rows', '8192'], os.path.join(d, 'wmcal.log'))
+        gate = os.path.join(d, 'gate.json')
+        run(blat + ['--model', os.path.join(cand, 'wm.pt'), '--cap', '2.5', '--out', gate], os.path.join(d, 'gate.log'))
+        sc = score(gate)
+        kept = sc >= best_score
+        if kept:
+            shutil.copy(os.path.join(cand, 'wm.pt'), best)
+            best_score = sc
+        log('[mz] it %02d: self-play %d/%d won, %.0f%% | gate %d/32, %.0f%% of the level -> %s (best %d/32, %.0f%%) (%.0f s)'
+            % (it, spw, 8 * a.games_per_level, 100 * spp, sc[0], 100 * sc[1], 'kept' if kept else 'sent back',
+               best_score[0], 100 * best_score[1], time.time() - t0))
+        json.dump(dict(score=list(sc), best=list(best_score), kept=kept), open(os.path.join(d, 'done'), 'w'))
+
+
+if __name__ == '__main__':
+    main()

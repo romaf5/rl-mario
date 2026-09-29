@@ -29,7 +29,7 @@ class Trajectories:
             sp = 'pi' in z.files
             PI.append(z['pi'].astype(np.float32) if sp else np.zeros((len(z['acts']), 12), np.float32))
             PM.append(np.full(len(z['acts']), sp, bool))
-            TG.append(z['tgt'].astype(np.float32) if sp else z['prog'].astype(np.float32))
+            TG.append(z["tgt"].astype(np.float32) if sp else np.maximum(z["prog"], 0).astype(np.float32))
             n_starts = len(z['acts'])
             SP.append(np.full(n_starts, sp, bool))
             offs, foffs = z['offs'], z['foffs']

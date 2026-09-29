@@ -220,7 +220,7 @@ class Forest:
     def __init__(self, model, K, max_nodes=2048, c_puct=1.5, scale=32.0, fpu=0.5, dead_p=0.95, goal_p=0.9,
                  death_cost=HOPELESS, calib=None, max_depth=12, backup='self', prior_net=None,
                  deep_prior='uniform', per_wave=32, device='cuda', emu=None, real_events=False, real_value=None,
-                 real_prior=False, dedup=False, floor=0.0, topk=12):
+                 real_prior=False, dedup=False, floor=0.0, topk=12, value='w', noise=0.0, alpha=0.3, seed=0):
         self.m, self.dev, self.K, self.N = model, device, K, max_nodes
         self.emu, self.real_events, self.real_value, self.real_prior = emu, real_events, real_value, real_prior
         self.dedup = dedup
@@ -231,6 +231,10 @@ class Forest:
         # topk < 12: below the root only each node's topk moves under the prior may be expanded --
         # twelve ways at every node kept a 1000-simulation tree 5-7 deep
         self.topk = int(topk)
+        # value 'tg': MuZero's absolute value -- a leaf costs W = tg(leaf) + 4 depth - tg(root)
+        self.value = value
+        self.tg_root = np.zeros(K, np.float32)
+        self.noise, self.alpha, self.rng = noise, alpha, np.random.default_rng(seed)
         self.allow = np.ones((K, max_nodes, 12), np.bool_)
         self.keys = np.zeros((K, max_nodes), np.int64)
         if emu is not None:
@@ -292,6 +296,11 @@ class Forest:
             if self.prior_net is not None:
                 pi, _ = self.prior_net(x)
         pri = torch.softmax(pi.float(), 1).cpu().numpy()
+        if self.noise:                      # self-play explores: Dirichlet noise on the root's prior
+            pri = (1 - self.noise) * pri + self.noise * self.rng.dirichlet([self.alpha] * 12, len(ks))
+        if self.value == 'tg':
+            with torch.autocast('cuda', dtype=torch.float16):
+                self.tg_root[ks] = self.m.f.tgv(s).float().cpu().numpy()
         self.lat[torch.as_tensor(ks * self.N, device=self.dev)] = s.half()
         self.root_lat[torch.as_tensor(ks, device=self.dev)] = s.half()
         for i, k in enumerate(ks):
@@ -350,6 +359,10 @@ class Forest:
                 s2, ev, _ = self.m.g(self.lat[src], a_t, prev_t)
                 pi, w = self.m.f(s2, self.root_lat[torch.from_numpy(kk).to(self.dev)],
                                  torch.from_numpy(dep_np.astype(np.float32)).to(self.dev))
+            if self.value == 'tg':
+                with torch.autocast('cuda', dtype=torch.float16):
+                    tgl = self.m.f.tgv(s2).float().cpu().numpy()
+                w = torch.from_numpy(tgl + 4.0 * dep_np.astype(np.float32) - self.tg_root[kk])
             self.lat[dst] = s2.half()
             lg = ev.float().cpu().numpy()
             if self.calib is not None:          # a price is only fair if the probability is honest
@@ -453,6 +466,10 @@ class Forest:
             return 1
         return int(np.lexsort((np.where(np.isinf(b), 1e9, b), -n))[0])
 
+    def root_value(self, k):
+        """The search's frames to go at the root: the model's own guess plus the best line found."""
+        return float(max(self.tg_root[k] + self.b[k, 0], 0.0))
+
     def visits(self, k):
         kids = self.child[k, 0]
         return np.array([self.n[k, c] if c >= 0 else 0 for c in kids], np.int32)
@@ -468,7 +485,8 @@ def survives(s, state, a, horizon):
     return False
 
 
-def play(s, forest, starts, sims, caps, log=None, veto=0, reuse=False, veto_net=None, veto_p=0.5):
+def play(s, forest, starts, sims, caps, log=None, veto=0, reuse=False, veto_net=None, veto_p=0.5,
+         temp=0.0, record=False):
     """Play every start to its end; K at a time, a finished game's tree goes to the next start.
     starts: [(level, delay, state)]; caps: max decisions per start. The real game is stepped
     only by the moves chosen. Returns one dict per start."""
@@ -500,6 +518,17 @@ def play(s, forest, starts, sims, caps, log=None, veto=0, reuse=False, veto_net=
                      keep=[kept[k] for k in ks])
         forest.run(ks, sims)
         picks = {k: forest.choose(k) for k in ks}
+        if temp > 0:                                # self-play: a move drawn from the visit counts
+            for k in ks:
+                n = forest.visits(k).astype(np.float64)
+                if n.sum() > 0:
+                    p = n ** (1.0 / temp); p /= p.sum()
+                    picks[k] = int(forest.rng.choice(12, p=p))
+        if record:
+            for k in ks:
+                g = games[slot[k]]
+                g.setdefault('visits', []).append(forest.visits(k).tolist())
+                g.setdefault('root_tg', []).append(round(forest.root_value(k), 1))
         if veto_net is not None:                    # stage A's commit check, learned: no game touched
             with torch.no_grad(), torch.autocast('cuda', dtype=torch.float16):
                 lp = veto_net(torch.from_numpy(np.stack([stack[slot[k]] for k in ks])).cuda(),
@@ -579,6 +608,12 @@ def main():
     ap.add_argument('--real-events', action='store_true', help='oracle: deaths and finishes from the real game')
     ap.add_argument('--real-value', help='oracle: W from this relvalue.pt on the real screens')
     ap.add_argument('--real-prior', action='store_true', help='oracle: the net prior on the real screens below the root')
+    ap.add_argument('--value', default='w', choices=('w', 'tg'), help="the leaf's price: the W head, or "
+                    "MuZero's frames to go (W = tg(leaf) + 4 depth - tg(root))")
+    ap.add_argument('--noise', type=float, default=0.0, help='self-play: Dirichlet noise share on the root prior')
+    ap.add_argument('--temp', type=float, default=0.0, help='self-play: draw moves from visits^(1/temp) (0: best)')
+    ap.add_argument('--record', action='store_true', help='keep each decision\'s visits and root value in --out')
+    ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--topk', type=int, default=12, help='below the root, expand only the topk moves under the prior')
     ap.add_argument('--no-floor', action='store_true', help='keep W below 0 (the C++ search does)')
     ap.add_argument('--reuse', action='store_true', help="keep the played move's subtree (the C++ search does); "
@@ -604,6 +639,7 @@ def main():
                     deep_prior=a.deep_prior, per_wave=a.per_wave,
                     emu=s if (a.real_events or a.real_value or a.real_prior or a.dedup) else None, real_events=a.real_events,
                     real_prior=a.real_prior, dedup=a.dedup, floor=-1e9 if a.no_floor else 0.0, topk=a.topk,
+                    value=a.value, noise=a.noise, seed=a.seed,
                     real_value=load_rel(a.real_value)[0].cuda().eval() if a.real_value else None)
     levels = ROUTE if a.levels == 'all' else a.levels.split(',')
     delays = [int(x) for x in a.delays.split(',')]
@@ -616,7 +652,7 @@ def main():
         from .survival import load as load_surv
         vnet = load_surv(a.veto_net)[0]
     games = play(s, forest, starts, a.sims, caps, log=lambda m: print(m, flush=True), veto=a.real_veto,
-                 reuse=a.reuse, veto_net=vnet, veto_p=a.veto_p)
+                 reuse=a.reuse, veto_net=vnet, veto_p=a.veto_p, temp=a.temp, record=a.record)
     for g in games:                                # how far through the level: the route is only the ruler
         seg = segs[g['level']]
         s.set_progress_route(ROUTE, seg['opt'], seg['start'])
