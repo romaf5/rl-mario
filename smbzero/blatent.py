@@ -51,7 +51,7 @@ def _backup_p(k, x, child, parent, b, w, n, self_mode, term):
 
 @numba.njit(cache=True)
 def select_wave(active, budget, child, parent, depth, n, w, b, term, pend, prior, act_in, size,
-                max_nodes, max_depth, fpu, c_puct, scale, per_wave, self_mode, out, allow):
+                max_nodes, max_depth, fpu, c_puct, scale, per_wave, self_mode, out, allow, vl, use_vl):
     """Up to per_wave picks per active tree. out[i] = (tree, parent node, action, new node).
     A pick into a settled node (terminal, or at the depth bound) is a revisit: backed up at once."""
     cnt = 0
@@ -83,7 +83,9 @@ def select_wave(active, budget, child, parent, depth, n, w, b, term, pend, prior
                 if all_pend:
                     blocked = True
                     break
-                sq = np.sqrt(np.float32(n[k, x]))
+                # use_vl: the C++ search's virtual loss -- a simulation in flight counts on every node
+                # of its path, as a visit with q = 0, so one wave fans out over the brothers
+                sq = np.sqrt(np.float32(n[k, x] + vl[k, x] + 1)) if use_vl else np.sqrt(np.float32(n[k, x]))
                 best, a = np.float32(-1e30), -1
                 for j in range(12):
                     c = child[k, x, j]
@@ -97,6 +99,9 @@ def select_wave(active, budget, child, parent, depth, n, w, b, term, pend, prior
                         else:
                             q = np.float32(1.0) - (b[k, c] - bstar) / scale
                             q = min(max(q, np.float32(0.0)), np.float32(1.0))
+                        if use_vl and vl[k, c] > 0:
+                            q = q * np.float32(n[k, c]) / np.float32(n[k, c] + vl[k, c])
+                            nc = np.float32(n[k, c] + vl[k, c])
                     s_ = q + c_puct * prior[k, x, j] * sq / (np.float32(1.0) + nc)
                     if s_ > best:
                         best, a = s_, j
@@ -126,6 +131,12 @@ def select_wave(active, budget, child, parent, depth, n, w, b, term, pend, prior
             for j in range(12):
                 child[k, c, j] = -1
             term[k, c] = 0
+            vl[k, c] = 0
+            if use_vl:
+                y = x
+                while y >= 0:
+                    vl[k, y] += 1
+                    y = parent[k, y]
             out[cnt, 0] = k
             out[cnt, 1] = x
             out[cnt, 2] = a
@@ -137,7 +148,7 @@ def select_wave(active, budget, child, parent, depth, n, w, b, term, pend, prior
 
 @numba.njit(cache=True)
 def apply_wave(out, cnt, wv, p_dead, p_goal, pri, uniform, child, parent, n, w, b, term, pend, prior,
-               dead_p, goal_p, death_cost, self_mode, dup, floor, allow, topk, v_death):
+               dead_p, goal_p, death_cost, self_mode, dup, floor, allow, topk, v_death, vl, use_vl):
     for i in range(cnt):
         k, c = out[i, 0], out[i, 3]
         pend[k, c] = False
@@ -168,6 +179,11 @@ def apply_wave(out, cnt, wv, p_dead, p_goal, pri, uniform, child, parent, n, w, 
     for i in range(cnt):                        # every pick imagined before any is backed up
         if not dup[i]:
             _backup_p(out[i, 0], out[i, 3], child, parent, b, w, n, self_mode, term)
+        if use_vl:                              # the simulation has landed: its path is no longer in flight
+            y = out[i, 1]
+            while y >= 0:
+                vl[out[i, 0], y] -= 1
+                y = parent[out[i, 0], y]
 
 
 @numba.njit(cache=True)
@@ -242,7 +258,7 @@ class Forest:
                  death_cost=HOPELESS, calib=None, max_depth=12, backup='self', prior_net=None,
                  deep_prior='uniform', per_wave=32, device='cuda', emu=None, real_events=False, real_value=None,
                  real_prior=False, dedup=False, floor=0.0, topk=12, value='w', noise=0.0, alpha=0.3, seed=0,
-                 imagine=False, v_death=4096.0):
+                 imagine=False, v_death=4096.0, vloss=False):
         self.m, self.dev, self.K, self.N = model, device, K, max_nodes
         self.emu, self.real_events, self.real_value, self.real_prior = emu, real_events, real_value, real_prior
         self.dedup = dedup
@@ -289,6 +305,8 @@ class Forest:
         # looked worse than a certain death, and even with the real game's deaths a dead end tied the
         # worst living leaf -- the all-oracle search died 3/32 where the C++ search (4096) won 24.
         self.v_death = np.float32(v_death)
+        self.use_vl = bool(vloss)
+        self.vl = np.zeros((K, max_nodes), np.int32)
         self.max_depth, self.self_mode, self.per_wave = max_depth, backup == 'self', per_wave
         c = model.g.conv.out_channels
         self.lat = torch.zeros((K * max_nodes, c, 11, 11), device=device, dtype=torch.float16)
@@ -425,7 +443,7 @@ class Forest:
             cnt = select_wave(active, budget, self.child, self.parent, self.depth, self.n, self.w, self.b,
                               self.term, self.pend, self.prior, self.act_in, self.size, self.N, self.max_depth,
                               self.params['fpu'], self.params['c_puct'], self.params['scale'], self.per_wave,
-                              self.self_mode, self.out, self.allow)
+                              self.self_mode, self.out, self.allow, self.vl, self.use_vl)
             if cnt == 0:
                 if not (active & (budget > 0) & (self.size < self.N - 1)).any():
                     break
@@ -485,7 +503,8 @@ class Forest:
             apply_wave(self.out, cnt, w, np.ascontiguousarray(p_ev[:, 1]),
                        np.ascontiguousarray(p_ev[:, 0]), pri, self.uniform and not self.real_prior, self.child, self.parent, self.n,
                        self.w, self.b, self.term, self.pend, self.prior, self.dead_p, self.goal_p,
-                       self.death_cost, self.self_mode, dup, self.floor, self.allow, self.topk, self.v_death)
+                       self.death_cost, self.self_mode, dup, self.floor, self.allow, self.topk, self.v_death,
+                       self.vl, self.use_vl)
 
     def _play_picks(self, kk, par, act, ch):
         """Play each imagined step for real: 0 running, 1 goal, 2 dead -- the search engine's rule
@@ -687,6 +706,8 @@ def main():
     ap.add_argument('--parallel', type=int, default=32, help='trees growing together')
     ap.add_argument('--per-wave', type=int, default=32)
     ap.add_argument('--death-cost', type=float, default=HOPELESS)
+    ap.add_argument('--vloss', action='store_true', help="the C++ search's virtual loss: a simulation in flight "
+                    "counts on its path (q x n/(n+pending)), so a wave fans out; use with --per-wave 128")
     ap.add_argument('--v-death', type=float, default=4096.0, help='what a node known to die costs (the C++ search: '
                     '4096); must exceed any living leaf, HOPELESS + death cost')
     ap.add_argument('--max-depth', type=int, default=0, help="0: the model's training unroll")
@@ -735,7 +756,7 @@ def main():
                     deep_prior=a.deep_prior, per_wave=a.per_wave,
                     emu=s if (a.real_events or a.dedup or ((a.real_value or a.real_prior) and not a.imagine)) else None, real_events=a.real_events,
                     real_prior=a.real_prior, dedup=a.dedup, floor=-1e9 if a.no_floor else 0.0, topk=a.topk,
-                    value=a.value, noise=a.noise, seed=a.seed, imagine=a.imagine, v_death=a.v_death,
+                    value=a.value, noise=a.noise, seed=a.seed, imagine=a.imagine, v_death=a.v_death, vloss=a.vloss,
                     real_value=load_rel(a.real_value)[0].cuda().eval() if a.real_value else None)
     levels = ROUTE if a.levels == 'all' else a.levels.split(',')
     delays = [int(x) for x in a.delays.split(',')]
