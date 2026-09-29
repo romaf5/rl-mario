@@ -869,6 +869,30 @@ top 3 and top 4 (4/32 with all twelve), dying everywhere.** Pruning by a prior t
 the net 55-60% of the time cuts away the moves that save Mario; depth bought this way costs more
 than it gives.
 
+## Stage B: MuZero's loop (2026-09-28/29; stage C paused at the user's call -- stage B first)
+
+Everything above trained the world model open-loop on other agents' data, its value copied from
+another net. MuZero's loop closes it: the latent agent plays (blatent --record: root noise, moves
+drawn from the visit counts), `mzdata` replays its games for the real screens and outcomes, and the
+model trains on them (`wmtrain --init --sp-frac 0.5`: the policy on the search's own visit counts,
+the dynamics and events on what really happened where the search went), the world data kept for
+grounding; `tools.wmcal`; the 32-game gate keeps a model only if it is no worse (`mzloop`).
+
+**MuZero's own value first: frames to go (`--tg`), n-step bootstrapped, so a consequence past the
+tree could reach the root (W = tg(leaf) + 4 depth - tg(root)).** wm20 = wm18 + the head, 8k steps on
+the route's frames to go: absolute error 66 frames -- and the search on it 0/32 (10% of the level;
+the same model on W 2/32). W taken from it was off by 53 frames against the W head's 4: noise,
+where siblings differ by a few. wm21 trained the differences too (`--w-tgdiff 4`): 6.4 frames --
+but the shared trunk paid (one-step death recall 86% -> 45%, absolute error 427) and the search
+went 0/32 again. The frames-to-go value is set aside until it can be learned without that cost.
+
+**Two tracks now.** (1) The loop on the W search (mz1, from wm18, 4/32): policy from visit counts,
+dynamics and events from its own games. (2) Is tree reuse the depth the latent search lacks? With
+every model part real the latent search made 11/32 against the C++ search's 26; reuse is the one
+structural difference left, and with real states it is exact: all oracles + `--reuse` measures its
+ceiling. If it is the missing piece, the latent form is reuse with re-imagination -- keep the tree
+and its visits, re-imagine every kept latent from the fresh real screen.
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the
