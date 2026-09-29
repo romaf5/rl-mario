@@ -999,6 +999,23 @@ most-visited move already proven dead (4096). The rest of the 9-against-24 is in
 (tree reuse, most likely), which a model cannot use. So the factorization again, on the matched
 search without reuse: all real / no real prior / no real events / no real value / the model.
 
+**That factorization was void**: virtual loss without reuse makes the tree broad and shallow, and at
+1-1's staircase Mario held run + jump for 700 decisions (a jump needs A pressed anew: release, then
+press -- two steps the shallow tree never saw); every variant 0/32. Reuse is what gives the C++
+search depth -- and for the model reuse fails however it is done: wm18 with virtual loss and reuse
+0/32, with reuse re-imagined 0/32 (checked exact: every kept node's value equals a fresh tree's for
+the same path, to 0.001). The kept visits lock the search onto whatever the model's errors favoured.
+
+**Doom, not death.** The losses keep having the same shape: the death is sealed decisions before it
+registers (a pit fall ~10), and a search must see every continuation die to know -- deep, broad, and
+what imagination cannot prove. But doom is a property of a state (Mario airborne over a pit with no
+ground in reach), and the survival nets separated all-die from all-live states easily; only the
+per-move distinction failed. So move the death event to the doom point: `wmdata --doom` walks back
+from each death to the last state from which some move then held input lasts 24 steps and ends the
+trajectory at the step into doom, labelled dead. (An oracle version, `blatent --real-doom`, was too
+slow to finish a game in 35 minutes.) A/B: 24k trajectories each from the same seeds, deaths at the
+doom point (world_doom) or where they register (world_ctrl); a world model on each, same recipe.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
