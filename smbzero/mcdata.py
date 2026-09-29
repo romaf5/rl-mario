@@ -51,6 +51,10 @@ def main():
     ap.add_argument('--frontier', type=float, default=0.0,
                     help="share of a seeded level's roots taken from its seeded lines just before their frontier, "
                          "the earliest root a branch has won from (Go-Explore's backward algorithm)")
+    ap.add_argument('--frontier-rate', type=float, default=0.0,
+                    help='move a frontier back only once branches from its window win this often (the backward '
+                         "algorithm's success threshold); 0: on any single win")
+    ap.add_argument('--frontier-min', type=int, default=8, help='branches from the window before the rate counts')
     ap.add_argument('--frontier-window', type=int, help='frontier roots from this many decisions before it '
                     '(default: --depth). The value learns the hard step from roots within the search\'s horizon of it')
     ap.add_argument('--seed-copies', type=int, default=1, help="a seeded line's continuation this many times per root, "
@@ -101,6 +105,7 @@ def main():
         print('[mcdata] %d seeded lines: %s' % (len(pool), ','.join(sorted({q[0] for q in pool}))), flush=True)
     n_seed = len(pool)
     front = [q[3] - 8 for q in pool]               # per seeded line: earliest root a branch won from
+    trial = [[] for _ in pool]                      # --frontier-rate: (root, won) of branches from the window
     if a.frontier_init:
         front = [int(x) for x in a.frontier_init.split(',')]
         assert len(front) == n_seed, (front, n_seed)
@@ -178,8 +183,17 @@ def main():
             b = bg.tag
             l, st0, acts, T, t, pidx = groups[owner[b]]
             stats['branch_wins'] += bool(bg.won)
-            if bg.won and pidx < n_seed:
-                front[pidx] = min(front[pidx], t)
+            if pidx < n_seed and not a.frontier_rate:
+                if bg.won:
+                    front[pidx] = min(front[pidx], t)
+            elif pidx < n_seed and front[pidx] - (a.frontier_window or a.depth) <= t < front[pidx]:
+                # One lucky win used to pull the frontier back past a place the value had not learned
+                # (4-2's vine: won once from 50 decisions in, bumped 0/8 from 21 out). Move back only
+                # once the window is won reliably, to the earliest root won from in it.
+                trial[pidx] = (trial[pidx] + [(t, bool(bg.won))])[-24:]
+                if len(trial[pidx]) >= a.frontier_min and np.mean([w for _, w in trial[pidx]]) >= a.frontier_rate:
+                    front[pidx] = min(x for x, w in trial[pidx] if w)
+                    trial[pidx] = []
             bwin[l][1] += 1; bwin[l][0] += bool(bg.won)
             if bg.won and len(pool) < 200:      # a branch that finished is a line of its own
                 pool.append((l, bstarts[b], np.array(bg.actions, np.uint8), len(bg.actions)))
