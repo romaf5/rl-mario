@@ -51,7 +51,7 @@ def _backup_p(k, x, child, parent, b, w, n, self_mode, term):
 
 @numba.njit(cache=True)
 def select_wave(active, budget, child, parent, depth, n, w, b, term, pend, prior, act_in, size,
-                max_nodes, max_depth, fpu, c_puct, scale, per_wave, self_mode, out):
+                max_nodes, max_depth, fpu, c_puct, scale, per_wave, self_mode, out, allow):
     """Up to per_wave picks per active tree. out[i] = (tree, parent node, action, new node).
     A pick into a settled node (terminal, or at the depth bound) is a revisit: backed up at once."""
     cnt = 0
@@ -71,6 +71,8 @@ def select_wave(active, budget, child, parent, depth, n, w, b, term, pend, prior
                 all_pend = True
                 for j in range(12):
                     c = child[k, x, j]
+                    if not allow[k, x, j]:
+                        continue
                     if c < 0:
                         all_pend = False
                     elif not pend[k, c] and term[k, c] != 3:
@@ -85,7 +87,7 @@ def select_wave(active, budget, child, parent, depth, n, w, b, term, pend, prior
                 best, a = np.float32(-1e30), -1
                 for j in range(12):
                     c = child[k, x, j]
-                    if c >= 0 and (pend[k, c] or term[k, c] == 3):
+                    if (c >= 0 and (pend[k, c] or term[k, c] == 3)) or not allow[k, x, j]:
                         continue
                     q, nc = np.float32(fpu), np.float32(0.0)
                     if c >= 0:
@@ -135,7 +137,7 @@ def select_wave(active, budget, child, parent, depth, n, w, b, term, pend, prior
 
 @numba.njit(cache=True)
 def apply_wave(out, cnt, wv, p_dead, p_goal, pri, uniform, child, parent, n, w, b, term, pend, prior,
-               dead_p, goal_p, death_cost, self_mode, dup, floor):
+               dead_p, goal_p, death_cost, self_mode, dup, floor, allow, topk):
     for i in range(cnt):
         k, c = out[i, 0], out[i, 3]
         pend[k, c] = False
@@ -145,6 +147,15 @@ def apply_wave(out, cnt, wv, p_dead, p_goal, pri, uniform, child, parent, n, w, 
             continue
         for j in range(12):
             prior[k, c, j] = np.float32(1.0 / 12) if uniform else pri[i, j]
+        if topk >= 12:
+            for j in range(12):
+                allow[k, c, j] = True
+        else:
+            order = np.argsort(-pri[i])
+            for j in range(12):
+                allow[k, c, j] = False
+            for j in range(topk):
+                allow[k, c, order[j]] = True
         if p_dead[i] > dead_p:                  # certain enough to stop looking
             term[k, c] = 2
             w[k, c] = HOPELESS
@@ -209,7 +220,7 @@ class Forest:
     def __init__(self, model, K, max_nodes=2048, c_puct=1.5, scale=32.0, fpu=0.5, dead_p=0.95, goal_p=0.9,
                  death_cost=HOPELESS, calib=None, max_depth=12, backup='self', prior_net=None,
                  deep_prior='uniform', per_wave=32, device='cuda', emu=None, real_events=False, real_value=None,
-                 real_prior=False, dedup=False, floor=0.0):
+                 real_prior=False, dedup=False, floor=0.0, topk=12):
         self.m, self.dev, self.K, self.N = model, device, K, max_nodes
         self.emu, self.real_events, self.real_value, self.real_prior = emu, real_events, real_value, real_prior
         self.dedup = dedup
@@ -217,6 +228,10 @@ class Forest:
         # floored it at 0 -- then every good line ties at 0 and the prior alone decides; the C++
         # search keeps it ("relative: below 0 is progress"). -inf: no floor.
         self.floor = np.float32(floor)
+        # topk < 12: below the root only each node's topk moves under the prior may be expanded --
+        # twelve ways at every node kept a 1000-simulation tree 5-7 deep
+        self.topk = int(topk)
+        self.allow = np.ones((K, max_nodes, 12), np.bool_)
         self.keys = np.zeros((K, max_nodes), np.int64)
         if emu is not None:
             self.states = [[None] * max_nodes for _ in range(K)]
@@ -292,6 +307,7 @@ class Forest:
             self.pend[k, 0] = False
             self.prior[k, 0] = pri[i]
             self.act_in[k, 0] = prevs[i]
+            self.allow[k, 0] = True
 
     def advance(self, k, a):
         """After move a: keep that child's subtree for the next decision (True), or nothing."""
@@ -318,7 +334,7 @@ class Forest:
             cnt = select_wave(active, budget, self.child, self.parent, self.depth, self.n, self.w, self.b,
                               self.term, self.pend, self.prior, self.act_in, self.size, self.N, self.max_depth,
                               self.params['fpu'], self.params['c_puct'], self.params['scale'], self.per_wave,
-                              self.self_mode, self.out)
+                              self.self_mode, self.out, self.allow)
             if cnt == 0:
                 if not (active & (budget > 0) & (self.size < self.N - 1)).any():
                     break
@@ -369,7 +385,7 @@ class Forest:
             apply_wave(self.out, cnt, w, np.ascontiguousarray(p_ev[:, 1]),
                        np.ascontiguousarray(p_ev[:, 0]), pri, self.uniform and not self.real_prior, self.child, self.parent, self.n,
                        self.w, self.b, self.term, self.pend, self.prior, self.dead_p, self.goal_p,
-                       self.death_cost, self.self_mode, dup, self.floor)
+                       self.death_cost, self.self_mode, dup, self.floor, self.allow, self.topk)
 
     def _play_picks(self, kk, par, act, ch):
         """Play each imagined step for real: 0 running, 1 goal, 2 dead -- the search engine's rule
@@ -563,6 +579,7 @@ def main():
     ap.add_argument('--real-events', action='store_true', help='oracle: deaths and finishes from the real game')
     ap.add_argument('--real-value', help='oracle: W from this relvalue.pt on the real screens')
     ap.add_argument('--real-prior', action='store_true', help='oracle: the net prior on the real screens below the root')
+    ap.add_argument('--topk', type=int, default=12, help='below the root, expand only the topk moves under the prior')
     ap.add_argument('--no-floor', action='store_true', help='keep W below 0 (the C++ search does)')
     ap.add_argument('--reuse', action='store_true', help="keep the played move's subtree (the C++ search does); "
                     '--sims then counts new visits')
@@ -586,13 +603,14 @@ def main():
                     death_cost=a.death_cost, calib=calib, max_depth=md, backup=a.backup, prior_net=pn,
                     deep_prior=a.deep_prior, per_wave=a.per_wave,
                     emu=s if (a.real_events or a.real_value or a.real_prior or a.dedup) else None, real_events=a.real_events,
-                    real_prior=a.real_prior, dedup=a.dedup, floor=-1e9 if a.no_floor else 0.0,
+                    real_prior=a.real_prior, dedup=a.dedup, floor=-1e9 if a.no_floor else 0.0, topk=a.topk,
                     real_value=load_rel(a.real_value)[0].cuda().eval() if a.real_value else None)
     levels = ROUTE if a.levels == 'all' else a.levels.split(',')
     delays = [int(x) for x in a.delays.split(',')]
     starts = [(l, d, s.frames(segs[l]['start'], d)) for l in levels for d in delays]
     caps = [int(a.cap * len(segs[l]['opt'])) for l, _, _ in starts]
     t0 = time.time()
+    assert not (a.reuse and a.topk < 12), 'reroot does not carry the top-k masks'
     vnet = None
     if a.veto_net:
         from .survival import load as load_surv
