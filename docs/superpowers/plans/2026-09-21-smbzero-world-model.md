@@ -958,6 +958,16 @@ emulator search strong, stage B does not need a learned one -- and every oracle 
 that carried it was handicapped. The clean question now: the latent search with every part real
 (events, value, prior, reuse, no depth bound) and no veto, against 24.
 
+**Answered: 3/32** (1-1 3/4, everything else dead or too long) -- against the C++ search's 24, and
+the same latent search's 12 with the veto. The veto hurts the C++ search and is all that keeps the
+latent one alive, so the two handle death differently. They did: the C++ search prices a death at
+v_death = 4096, far above any living line; the latent search priced it at HOPELESS = 512 -- while a
+living leaf costs up to W (<= 512) + p(dead) x 512. A line the model called 90% fatal cost ~960 and
+looked worse than a certain death (512), and with the real game's deaths a dead end tied the worst
+living leaf: the min backup walked into deaths. Every latent-search result so far carried this
+(model-only and oracle alike). Fixed (`--v-death`, default 4096); re-running the all-oracle search
+without the veto and wm18 on its own heads.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
