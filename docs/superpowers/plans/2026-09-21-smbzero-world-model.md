@@ -810,6 +810,13 @@ teacher-free gate** -- 1-1 4/4, 1-2 4/4, 4-1 4/4, 8-1 2/4, 8-2 4/4, 8-3 3/4 -- *
 0/4** (all too long) and the vine test 0/32; 8-4 still 0/4. With one 4-2 win in four and none in
 the next four, the rate is noise-level; next: 4-2 from 16 starts for both values, then round 4.
 
+**4-2 from 16 starts (delays 2-62): round 2's value 1/16 (delay 22, 59.8 s), round 3's 0/16.**
+Most games never bump the vine (12/16 and 14/16); about half run on past it to the end of the
+level (x 2800-3300), where the ordinary exit leads off the route, and wander there until the cap;
+of the games that do bump it (4 and 2), one climbs to world 8. The teacher-free value still
+mostly steers away from the vine route the prior knows (relv3 with the same prior: 4/4).
+Round 4 (mc9, player relv_mc23678) runs.
+
 **surv2 (60k boundary states added, half of each batch mixed): held-out mixed AUC 0.981, 93.9%
 of dying moves caught -- and 3/32 in play, dying as before; at the fatal-but-avoidable commits
 it let 8 of 10 through.** The held-out split was the flaw: states were drawn around one moment of
