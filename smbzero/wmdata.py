@@ -96,6 +96,7 @@ def main():
     ap.add_argument('--modes', default='route,route,sticky,random')
     ap.add_argument('--levels', default=','.join(ROUTE))
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--doom', action='store_true', help='a dying trajectory ends at the step into doom, labelled dead')
     ap.add_argument('--agent-net', help="net for the 'agent' mode")
     ap.add_argument('--agent-relvalue', help="learned value for the 'agent' mode")
     ap.add_argument('--agent-sims', type=int, default=200)
@@ -133,7 +134,7 @@ def main():
         rel, _ = load_rel(a.agent_relvalue)
         player = Player(s, RelEvaluator(net, rel, a.agent_games * 48), a.agent_games,
                         per_tree=48, value_mix=1.0, min_backup=True, relative=True)
-    t0, done, files = time.time(), 0, 0
+    t0, done, files, doomed = time.time(), 0, 0, 0
     frames, acts, outcome, forced, prog, offs, foffs, meta = [], [], [], [], [], [0], [0], []
     while done < a.trajectories:
         lvl = levels[int(rng.integers(len(levels)))]
@@ -185,6 +186,26 @@ def main():
         if n <= 1:
             continue
         action = action[:n]
+        out = np.asarray(out[:n]).copy()
+        if a.doom and out[-1] == 2:
+            # A death is sealed before it registers (a fall: ~10 decisions). Label the step that
+            # enters doom -- the first state from which no move then held input lasts 24 steps --
+            # as the death, and end the trajectory there: the model learns to see doom, not the end.
+            from .blatent import survives
+            sts = [start]
+            for i in range(n - 1):
+                _, nxt = s.replay(sts[-1], action[i:i + 1]); sts.append(nxt)
+            doom = n - 1
+            for t in range(n - 1, 0, -1):
+                if any(survives(s, sts[t], x, 24) for x in range(12)):
+                    break
+                doom = t - 1
+            if doom < 1:
+                continue
+            action, out = action[:doom + 1], out[:doom + 1]
+            out[-1] = 2
+            n = doom + 1
+            doomed += 1
         obs, _, _ = s.replay_obs(start, action)
         frames.append(np.concatenate([s.obs(start)[None], obs]))     # n + 1 frames
         prog.append(s.progress_along(start, ROUTE, segs[lvl]['opt'], action, ref_start=segs[lvl]['start']))
@@ -202,7 +223,8 @@ def main():
             files += 1
             frames, acts, outcome, forced, prog, offs, foffs, meta = [], [], [], [], [], [0], [0], []
             print('[wmdata] %d trajectories, %d shards (%.0f s)' % (done, files, time.time() - t0), flush=True)
-    print('[wmdata] done: %d trajectories in %d shards' % (done, files))
+    print('[wmdata] done: %d trajectories in %d shards%s' % (done, files, (' (%d deaths moved back to the doom point)'
+                                                                         % doomed) if a.doom else ''))
 
 
 if __name__ == '__main__':
