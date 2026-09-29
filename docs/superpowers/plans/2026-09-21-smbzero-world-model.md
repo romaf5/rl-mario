@@ -839,6 +839,12 @@ hard regions hopeless whatever Mario does (W 100-200 frames on every line near 4
 a world model that copies it plans worse than one that copies the route-trained value. A
 teacher-free stage B needs a sharper teacher-free value first.
 
+**Depth by pruning (blatent --topk: below the root only a node's top-k moves under the prior;
+at top 3 the 1000-simulation tree goes from 4.3 to 6.5 deep on average, 12 at most): wm18 0/32 at
+top 3 and top 4 (4/32 with all twelve), dying everywhere.** Pruning by a prior that agrees with
+the net 55-60% of the time cuts away the moves that save Mario; depth bought this way costs more
+than it gives.
+
 **The value head reads only imagined latents (`tools.wmprobe`, now with a 'seen' column).**
 wm13 on 1-1, 128 states, 12 steps ahead: scored on the latent it imagines along a line, W
 ranks the route against random, held and flipped lines correctly where the real game says the
