@@ -115,7 +115,7 @@ def h(x, eps=1e-3):
 
 def losses(model, obs, acts, ev, tgt_obs, r, valid, wt, wvalid,
            w_event=1.0, w_cons=1.0, w_waste=1.0, w_value=1.0, transform=False, prev=None, tgt_prev=None,
-           teacher=None, w_policy=1.0, value_teacher=None, mz=None, w_tg=1.0):
+           teacher=None, w_policy=1.0, value_teacher=None, mz=None, w_tg=1.0, w_tgdiff=0.0):
     if value_teacher is not None:
         # W from the agent's own experience, not the route. Frames-to-go along the search's route
         # passes every hazard at a safe moment, so it is blind to danger that arrives late --
@@ -176,6 +176,18 @@ def losses(model, obs, acts, ev, tgt_obs, r, valid, wt, wvalid,
         pred = torch.stack([model.f.tgv(l) for l in lat], 1).float()
         ltg = (F.smooth_l1_loss(h(pred), h(tg_t), reduction='none') * tg_m).sum() / tg_m.sum().clamp(min=1)
         total = total + w_tg * ltg
+        if w_tgdiff:
+            # The search only ever compares frames to go within one tree: 4k + tg(k) - tg(0) is the
+            # W it prices a leaf at. Trained on absolute targets alone that difference was off by 53
+            # frames (the W head: 4) -- noise, where siblings differ by a few. So train it directly.
+            kk = 4.0 * torch.arange(pred.shape[1], device=pred.device, dtype=pred.dtype)
+            pd = pred - pred[:, :1] + kk
+            td = tg_t - tg_t[:, :1] + kk
+            dm = tg_m * tg_m[:, :1]
+            ldiff = (F.smooth_l1_loss(h(pd), h(td), reduction='none') * dm).sum() / dm.sum().clamp(min=1)
+            total = total + w_tgdiff * ldiff
+            with torch.no_grad():
+                losses.tg_diff_mae = float(((pd - td).abs() * dm).sum() / dm.sum().clamp(min=1))
         with torch.no_grad():
             losses.tg_mae = float(((pred - tg_t).abs() * tg_m).sum() / tg_m.sum().clamp(min=1))
     return (total, le.item(), lc.item(), wmae.item())
@@ -225,6 +237,7 @@ def main():
                     help="train W and the per-step waste through MuZero's value transform")
     ap.add_argument('--tg', action='store_true', help="a frames-to-go head (MuZero's absolute value)")
     ap.add_argument('--w-tg', type=float, default=1.0)
+    ap.add_argument('--w-tgdiff', type=float, default=0.0, help='weight on frames-to-go differences within an unroll')
     ap.add_argument('--init', help='start from this checkpoint (new heads start fresh)')
     ap.add_argument('--sp-frac', type=float, default=0.0, help='share of each batch from self-play starts')
     ap.add_argument('--out', default=os.path.join(RUNS, 'wm0'))
@@ -271,7 +284,7 @@ def main():
             loss, le, lc, rmae = losses(model, obs, acts, ev, tgt, r, valid, wt, wv, w_cons=a.w_cons,
                                         w_event=a.w_event, transform=a.transform,
                                         prev=prev, tgt_prev=tprev, teacher=teacher, w_policy=a.w_policy,
-                                        value_teacher=value_teacher, mz=mz, w_tg=a.w_tg)
+                                        value_teacher=value_teacher, mz=mz, w_tg=a.w_tg, w_tgdiff=a.w_tgdiff)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -283,7 +296,8 @@ def main():
                              prec1=prec[0].tolist(), rec1=rec[0].tolist(),
                              precK=prec[-1].tolist(), recK=rec[-1].tolist()))
             log('[wm] step %5d event %.4f cons %.4f W error %.1f frames%s | 1 step ahead %s | %d steps ahead %s (%.0f s)'
-                % (step, le, lc, rmae, (' TG error %.0f frames' % losses.tg_mae) if hasattr(losses, 'tg_mae') else '',
+                % (step, le, lc, rmae, ((' TG error %.0f frames' % losses.tg_mae) if hasattr(losses, 'tg_mae') else '')
+                   + ((' (as W %.1f)' % losses.tg_diff_mae) if hasattr(losses, 'tg_diff_mae') else ''),
                    ' '.join('%s P%.0f/R%.0f' % (e, 100 * prec[0, i], 100 * rec[0, i]) for i, e in enumerate(EVENTS)),
                    a.unroll,
                    ' '.join('%s P%.0f/R%.0f' % (e, 100 * prec[-1, i], 100 * rec[-1, i]) for i, e in enumerate(EVENTS)),
