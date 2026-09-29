@@ -817,6 +817,13 @@ of the games that do bump it (4 and 2), one climbs to world 8. The teacher-free 
 mostly steers away from the vine route the prior knows (relv3 with the same prior: 4/4).
 Round 4 (mc9, player relv_mc23678) runs.
 
+**Round 4 (mc9, player relv_mc23678; value relv_mc236789): 21/32** -- 1-1 3/4, 1-2 4/4, 4-1 4/4,
+8-1 2/4, 8-2 4/4, 8-3 4/4, 4-2 and 8-4 0/4. **Vine test 5/32, all five from 11 decisions out (5 of
+8 there, round 2: 2 of 8), none from 21 or more.** The bump itself is learned; getting to it is
+not -- from further away the games still wander before the block or run past it toward the exit
+that leads off the route, a consequence hundreds of decisions away. Round 5 (mc10) queued, after
+4-2 from 16 starts at 1000 and 2000 simulations.
+
 **surv2 (60k boundary states added, half of each batch mixed): held-out mixed AUC 0.981, 93.9%
 of dying moves caught -- and 3/32 in play, dying as before; at the fatal-but-avoidable commits
 it let 8 of 10 through.** The held-out split was the flaw: states were drawn around one moment of
