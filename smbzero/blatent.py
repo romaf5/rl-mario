@@ -137,7 +137,7 @@ def select_wave(active, budget, child, parent, depth, n, w, b, term, pend, prior
 
 @numba.njit(cache=True)
 def apply_wave(out, cnt, wv, p_dead, p_goal, pri, uniform, child, parent, n, w, b, term, pend, prior,
-               dead_p, goal_p, death_cost, self_mode, dup, floor, allow, topk):
+               dead_p, goal_p, death_cost, self_mode, dup, floor, allow, topk, v_death):
     for i in range(cnt):
         k, c = out[i, 0], out[i, 3]
         pend[k, c] = False
@@ -158,7 +158,7 @@ def apply_wave(out, cnt, wv, p_dead, p_goal, pri, uniform, child, parent, n, w, 
                 allow[k, c, order[j]] = True
         if p_dead[i] > dead_p:                  # certain enough to stop looking
             term[k, c] = 2
-            w[k, c] = HOPELESS
+            w[k, c] = v_death
         elif p_goal[i] > goal_p:                # the model says it finished
             term[k, c] = 1
             w[k, c] = 0.0
@@ -242,7 +242,7 @@ class Forest:
                  death_cost=HOPELESS, calib=None, max_depth=12, backup='self', prior_net=None,
                  deep_prior='uniform', per_wave=32, device='cuda', emu=None, real_events=False, real_value=None,
                  real_prior=False, dedup=False, floor=0.0, topk=12, value='w', noise=0.0, alpha=0.3, seed=0,
-                 imagine=False):
+                 imagine=False, v_death=4096.0):
         self.m, self.dev, self.K, self.N = model, device, K, max_nodes
         self.emu, self.real_events, self.real_value, self.real_prior = emu, real_events, real_value, real_prior
         self.dedup = dedup
@@ -284,6 +284,11 @@ class Forest:
         self.prior_net, self.uniform = prior_net, (prior_net is not None and deep_prior == 'uniform')
         self.params = dict(c_puct=np.float32(c_puct), scale=np.float32(scale), fpu=np.float32(fpu))
         self.dead_p, self.goal_p, self.death_cost = np.float32(dead_p), np.float32(goal_p), np.float32(death_cost)
+        # A death must cost more than any living line. It cost HOPELESS (512) while a living leaf
+        # costs up to W (<= 512) + p(dead) x death_cost (<= 1024): a line the model thought 90% fatal
+        # looked worse than a certain death, and even with the real game's deaths a dead end tied the
+        # worst living leaf -- the all-oracle search died 3/32 where the C++ search (4096) won 24.
+        self.v_death = np.float32(v_death)
         self.max_depth, self.self_mode, self.per_wave = max_depth, backup == 'self', per_wave
         c = model.g.conv.out_channels
         self.lat = torch.zeros((K * max_nodes, c, 11, 11), device=device, dtype=torch.float16)
@@ -390,7 +395,7 @@ class Forest:
             pri = torch.softmax(pi.float(), 1).cpu().numpy()
             dead, goal = p[:, 1] > self.dead_p, p[:, 0] > self.goal_p
             self.term[kk, xx] = np.where(dead, 2, np.where(goal, 1, 0))
-            self.w[kk, xx] = np.where(dead, HOPELESS, np.where(goal, 0.0, wv)).astype(np.float32)
+            self.w[kk, xx] = np.where(dead, self.v_death, np.where(goal, 0.0, wv)).astype(np.float32)
             self.prior[kk, xx] = np.full(12, 1.0 / 12, np.float32) if self.uniform else pri
         for k in ks:
             rebackup(k, int(self.size[k]), self.child, self.w, self.b, self.term, self.self_mode)
@@ -480,7 +485,7 @@ class Forest:
             apply_wave(self.out, cnt, w, np.ascontiguousarray(p_ev[:, 1]),
                        np.ascontiguousarray(p_ev[:, 0]), pri, self.uniform and not self.real_prior, self.child, self.parent, self.n,
                        self.w, self.b, self.term, self.pend, self.prior, self.dead_p, self.goal_p,
-                       self.death_cost, self.self_mode, dup, self.floor, self.allow, self.topk)
+                       self.death_cost, self.self_mode, dup, self.floor, self.allow, self.topk, self.v_death)
 
     def _play_picks(self, kk, par, act, ch):
         """Play each imagined step for real: 0 running, 1 goal, 2 dead -- the search engine's rule
@@ -682,6 +687,8 @@ def main():
     ap.add_argument('--parallel', type=int, default=32, help='trees growing together')
     ap.add_argument('--per-wave', type=int, default=32)
     ap.add_argument('--death-cost', type=float, default=HOPELESS)
+    ap.add_argument('--v-death', type=float, default=4096.0, help='what a node known to die costs (the C++ search: '
+                    '4096); must exceed any living leaf, HOPELESS + death cost')
     ap.add_argument('--max-depth', type=int, default=0, help="0: the model's training unroll")
     ap.add_argument('--raw', action='store_true', help='ignore the checkpoint calibration')
     ap.add_argument('--cap', type=float, default=1.5, help='most decisions, as a multiple of the route')
@@ -728,7 +735,7 @@ def main():
                     deep_prior=a.deep_prior, per_wave=a.per_wave,
                     emu=s if (a.real_events or a.dedup or ((a.real_value or a.real_prior) and not a.imagine)) else None, real_events=a.real_events,
                     real_prior=a.real_prior, dedup=a.dedup, floor=-1e9 if a.no_floor else 0.0, topk=a.topk,
-                    value=a.value, noise=a.noise, seed=a.seed, imagine=a.imagine,
+                    value=a.value, noise=a.noise, seed=a.seed, imagine=a.imagine, v_death=a.v_death,
                     real_value=load_rel(a.real_value)[0].cuda().eval() if a.real_value else None)
     levels = ROUTE if a.levels == 'all' else a.levels.split(',')
     delays = [int(x) for x in a.delays.split(',')]
