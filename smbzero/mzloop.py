@@ -51,6 +51,8 @@ def main():
     ap.add_argument('--temp', type=float, default=0.5)
     ap.add_argument('--steps', type=int, default=3000)
     ap.add_argument('--lr', type=float, default=1e-4)
+    ap.add_argument('--search', default='--vloss --per-wave 128 --no-floor',
+                    help="the search's flags, for self-play and gates alike")
     ap.add_argument('--value-teacher', default=os.path.join(RUNS, 'relv3', 'relvalue.pt'),
                     help="the W head's teacher on every row ('' for the route)")
     ap.add_argument('--value', default='tg', choices=('w', 'tg'), help="the search's leaf price")
@@ -62,7 +64,7 @@ def main():
     logf = open(os.path.join(a.out, 'loop.log'), 'a')
     log = lambda m: (print(m, flush=True), logf.write(m + '\n'), logf.flush())
     blat = ['smbzero.blatent', '--prior-net', a.prior_net, '--deep-prior', 'model', '--backup', 'children',
-            '--value', a.value, '--sims', str(a.sims)]
+            '--value', a.value, '--sims', str(a.sims)] + a.search.split()
     # With the W search the root value is not frames to go, so self-play teaches the policy (the
     # search's visit counts) and the dynamics and events (what really happened where the search
     # goes) -- and the W and frames-to-go heads keep their route targets from the world data.
