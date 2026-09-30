@@ -1129,6 +1129,25 @@ harder (one step ahead R67 against R94 on the world data) but not getting easier
 R67/84/64/65, twelve R89/93/89/90, for iterations 0-3. The search keeps walking into deaths the
 model does not see coming, and 20k-30k decisions of them an iteration do not teach it to.
 
+**The search, not the model, is the ceiling -- and depth is what lifts it.** The all-oracle latent
+search (every part real) in a 2x2:
+
+| | depth 12 | depth 64 |
+|---|---|---|
+| no reuse, 1000 simulations | 3/32 | 3/32 (identical games) |
+| reuse, 300 simulations | 6/32 | **19/32** |
+
+A fresh tree of 1000 simulations never reaches depth 12 at all; only a tree accumulated over many
+moves gets deep, and depth is what finds the way past a death sealed long before it registers. The
+model agents -- 2-4/32, 1-1 won and dying early everywhere else -- play exactly like the no-reuse
+oracle (3/32, same profile): they are at the ceiling of the search they play with, and no amount of
+loop training can pass it. mz3 stopped after 9 iterations (2-3/32 throughout).
+
+**The model cannot yet go deep: wm27 imagined past its 12-step unroll** (world_ram): W off the teacher
+by 3.9 frames at depth 12, 6.4 at 16, 16.5 at 24, 35 at 32, 107 at 48; the death head fires on
+nothing real past 16. With reuse at depth 64 it dies at once (0/32). The trajectories run to 48 steps
+(66% reach it). wm29: wm27 fine-tuned with a 48-step unroll, then the oracle's deep-reuse search.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
