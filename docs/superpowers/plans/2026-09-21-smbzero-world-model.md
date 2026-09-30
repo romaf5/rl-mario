@@ -1051,6 +1051,14 @@ wm18, the policy and value teachers still reading the screen, the search's root 
 encoder now has the whole state -- positions, speeds, enemy kinds, the held button -- where the
 screen's encoder recovered it imperfectly (its policy head agreed with the net 60% even at depth 0).
 
+**wm27 (wm18's recipe, reading the RAM; world_ram, 40k steps): the parts much better -- the gate not.**
+Policy head against the net's top move 76% at depth 0 and 70-78% down to depth 12 (wm18 60% -> 53%);
+death one step ahead P37/R94 (wm18 P13-19/R82-86), twelve P38/R97, calibrated P98/R97; W 2.0 frames.
+Gate **3/32** (1-1 3/4 at 90% of the level, everything else dead), wm18 4. And that is the point: on
+this search without reuse the all-oracle agent -- every part real -- made 3-4/32 too. A better model
+cannot lift a score a perfect one does not reach; the latent search itself is the ceiling, and only
+reuse with virtual loss has lifted it (9/32, perfect parts) against the C++ search's 24.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
