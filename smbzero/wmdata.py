@@ -133,7 +133,10 @@ def main():
     if a.games:
         import glob as _glob, json as _json
         for f in sorted(_glob.glob(a.games)):
-            played_games += [g for g in _json.load(open(f)) if g.get('level') in segs and len(g.get('actions', [])) > 8]
+            gs = _json.load(open(f))
+            if isinstance(gs, list):              # game lists only (other JSONs are summaries)
+                played_games += [g for g in gs if isinstance(g, dict) and g.get('level') in segs
+                                 and 'delay' in g and len(g.get('actions', [])) > 8]
         print('[wmdata] %d played games to replay stretches of' % len(played_games), flush=True)
     if 'agent' in modes:
         from .net import RelEvaluator, load as load_net
