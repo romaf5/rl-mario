@@ -1059,6 +1059,18 @@ this search without reuse the all-oracle agent -- every part real -- made 3-4/32
 cannot lift a score a perfect one does not reach; the latent search itself is the ceiling, and only
 reuse with virtual loss has lifted it (9/32, perfect parts) against the C++ search's 24.
 
+**Where the latent and C++ searches part, found by playing full games.** The C++ player (300
+simulations, no veto) wins 8-3 from delays 5, 20, 50; the all-oracle latent search loses all four.
+The two play identical moves to decision 14 (delay 50: 59). Rebuilt there, each with its own reuse,
+the C++ root has 2052 -> 2419 -> 2784 visits over three decisions -- its trees hold 32768 nodes --
+and the latent root is pinned at 978: with reuse its capacity was 3 x 300 + 66 = 966 nodes, the kept
+subtree filled it, and each decision got next to no new simulations. **With 4096 nodes a tree: 14/32**
+(1-1 4/4, 4-1 3/4, 8-2 3/4, 1-2 2/4, 8-3 1/4, 8-4 1/4), from 9 -- capacity was a real piece of the
+gap to 24. wm27 with virtual loss: 2/32; with re-imagined reuse at 8192 nodes: 0/32 -- reuse still
+breaks the model. Since re-imagination recomputes every kept value exactly, what the model's kept
+tree carries is its visits: votes cast on the last screen's futures, which the model's values may now
+see otherwise. `--reuse-decay` keeps the tree's shape (its depth) and scales the old visits down.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves

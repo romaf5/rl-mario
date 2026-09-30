@@ -187,7 +187,7 @@ def apply_wave(out, cnt, wv, p_dead, p_goal, pri, uniform, child, parent, n, w, 
 
 
 @numba.njit(cache=True)
-def reroot(k, r, child, parent, depth, n, w, b, term, prior, act_in, keys, size, order):
+def reroot(k, r, child, parent, depth, n, w, b, term, prior, act_in, keys, size, order, decay):
     """Keep node r's subtree as tree k, r first (breadth-first order, written to `order`: the
     old index of each kept node). Costs move into r's frame: W from r = W from the old root
     minus r's own W (a death stays a death). Returns the number kept."""
@@ -216,7 +216,7 @@ def reroot(k, r, child, parent, depth, n, w, b, term, prior, act_in, keys, size,
             child[k, i, a] = new[c] if c >= 0 else -1
         parent[k, i] = new[par_t[o]] if i > 0 else -1
         depth[k, i] = dep_t[o] - 1
-        n[k, i] = n_t[o]
+        n[k, i] = max(int(n_t[o] * decay), 1) if i > 0 else n_t[o]
         term[k, i] = term_t[o]
         if term_t[o] >= 2 or w_t[o] >= HOPELESS:
             w[k, i] = w_t[o]
@@ -258,7 +258,7 @@ class Forest:
                  death_cost=HOPELESS, calib=None, max_depth=12, backup='self', prior_net=None,
                  deep_prior='uniform', per_wave=32, device='cuda', emu=None, real_events=False, real_value=None,
                  real_prior=False, dedup=False, floor=0.0, topk=12, value='w', noise=0.0, alpha=0.3, seed=0,
-                 imagine=False, v_death=4096.0, vloss=False, real_doom=False):
+                 imagine=False, v_death=4096.0, vloss=False, real_doom=False, reuse_decay=1.0):
         self.m, self.dev, self.K, self.N = model, device, K, max_nodes
         self.emu, self.real_events, self.real_value, self.real_prior = emu, real_events, real_value, real_prior
         self.dedup = dedup
@@ -306,6 +306,9 @@ class Forest:
         # worst living leaf -- the all-oracle search died 3/32 where the C++ search (4096) won 24.
         self.v_death = np.float32(v_death)
         self.use_vl = bool(vloss)
+        # reuse_decay < 1: a kept subtree keeps its shape (the depth reuse buys) but its visits count
+        # for less -- they were cast on the last screen's futures, which the model may now see otherwise
+        self.reuse_decay = float(reuse_decay)
         self.real_doom = real_doom
         self.vl = np.zeros((K, max_nodes), np.int32)
         self.max_depth, self.self_mode, self.per_wave = max_depth, backup == 'self', per_wave
@@ -427,7 +430,7 @@ class Forest:
             return False
         order = np.zeros(self.size[k], np.int32)
         cnt = reroot(k, c, self.child, self.parent, self.depth, self.n, self.w, self.b, self.term, self.prior,
-                     self.act_in, self.keys, self.size, order)
+                     self.act_in, self.keys, self.size, order, np.float32(self.reuse_decay))
         o = torch.from_numpy(order[:cnt].astype(np.int64) + k * self.N).to(self.dev)
         self.lat[k * self.N: k * self.N + cnt] = self.lat[o].clone()
         if self.emu is not None:
@@ -740,6 +743,8 @@ def main():
     ap.add_argument('--no-floor', action='store_true', help='keep W below 0 (the C++ search does)')
     ap.add_argument('--reimagine', action='store_true', help='with --reuse: imagine the kept subtree again '
                     'from the new real screen every decision (its visits kept, its futures fresh)')
+    ap.add_argument('--reuse-decay', type=float, default=1.0, help="with --reuse: kept visits x this (0: keep the "
+                    "tree's shape, not its votes)")
     ap.add_argument('--max-nodes', type=int, default=0, help='nodes per tree (0: 3x --sims with --reuse, else --sims)')
     ap.add_argument('--reuse', action='store_true', help="keep the played move's subtree (the C++ search does); "
                     '--sims then counts new visits')
@@ -769,7 +774,7 @@ def main():
                     emu=s if (a.real_events or a.dedup or ((a.real_value or a.real_prior) and not a.imagine)) else None, real_events=a.real_events,
                     real_prior=a.real_prior, dedup=a.dedup, floor=-1e9 if a.no_floor else 0.0, topk=a.topk,
                     value=a.value, noise=a.noise, seed=a.seed, imagine=a.imagine, v_death=a.v_death, vloss=a.vloss,
-                    real_doom=a.real_doom,
+                    real_doom=a.real_doom, reuse_decay=a.reuse_decay,
                     real_value=load_rel(a.real_value)[0].cuda().eval() if a.real_value else None)
     levels = ROUTE if a.levels == 'all' else a.levels.split(',')
     delays = [int(x) for x in a.delays.split(',')]
