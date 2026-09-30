@@ -1209,6 +1209,15 @@ unroll), gated with a fresh search -- the shallow search the doom oracle is bein
 Beside it, wm31: a bigger model (latent 64, 4 dynamics blocks) from scratch, whether wm30 barely
 moved for lack of capacity.
 
+**Doom fixes the shallow search: the fresh all-oracle search with real doom wins 4 of the 6 games
+finished on 8-2 and 4-1 -- levels it lost 0/8 without it** (4-1 delays 5, 35, 50: 56, 41, 56 s;
+8-2 delay 50: 54 s; 4-1 delay 20 and 8-2 delay 20 died, at decisions 221 and 387 -- without doom
+168 and 29). Slow wins (the C++ search takes ~37 s), but wins, from a tree 4-6 steps deep: a leaf
+that knows the state is lost is what the shallow search was missing, not depth. This is MuZero's
+own premise -- the value carries the consequences -- and it moves stage B's target from "imagine 48
+steps exactly" to "know, from the state, when it is lost": a property of one state, which the RAM
+holds exactly (positions, speeds, what is below). wm32 (RAM, doom labels) is the model version.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
