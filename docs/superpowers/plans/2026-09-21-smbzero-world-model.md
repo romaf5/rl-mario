@@ -1188,6 +1188,19 @@ lines (t0):
 t0: 25,779 trajectories, 974k steps (8002 end in a death), 24% of the steps the trees' own lines.
 Held out for wm30: t1 (64 more games, another seed).
 
+**wm30 (wm29 + t0, 10k steps): deep 1/32, fresh 3/32 -- the lines did not move it.** On the held-out
+lines (t1) it gained little: W off the teacher 5.6 frames at depth 12 (wm29 6.0), 13.3 at 32 (15.0);
+the prior agrees 55% at 12 (53%); deaths one step ahead R67 (67). A million steps of the search's own
+lines taught the model about as much as another million of anything.
+
+**Back to why even a perfect model fails on a fresh search (3/32).** A fresh tree of 1000 simulations
+is 4-6 steps deep on average; a death sealed ten steps before it registers (a jump into a pit) is
+beyond it unless the leaf value already knows the state is lost -- and relv3 prices frames wasted
+against the route, not doom. MuZero's own answer is exactly that: the value, learned from outcomes,
+carries the consequences, so a shallow search suffices. Test with the oracle: the fresh all-oracle
+search with real doom (`--real-doom`: a leaf from which no move then held input lasts 24 steps is a
+death) on the two levels it lost 0/4 each (8-2, 4-1).
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
