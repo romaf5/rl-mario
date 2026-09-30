@@ -260,7 +260,7 @@ class Forest:
                  death_cost=HOPELESS, calib=None, max_depth=12, backup='self', prior_net=None,
                  deep_prior='uniform', per_wave=32, device='cuda', emu=None, real_events=False, real_value=None,
                  real_prior=False, dedup=False, floor=0.0, topk=12, value='w', noise=0.0, alpha=0.3, seed=0,
-                 imagine=False, v_death=4096.0, vloss=False, real_doom=False, reuse_decay=1.0):
+                 imagine=False, v_death=4096.0, vloss=False, real_doom=False, reuse_decay=1.0, fresh_votes=False):
         self.m, self.dev, self.K, self.N = model, device, K, max_nodes
         self.emu, self.real_events, self.real_value, self.real_prior = emu, real_events, real_value, real_prior
         self.dedup = dedup
@@ -311,6 +311,11 @@ class Forest:
         # reuse_decay < 1: a kept subtree keeps its shape (the depth reuse buys) but its visits count
         # for less -- they were cast on the last screen's futures, which the model may now see otherwise
         self.reuse_decay = float(reuse_decay)
+        # fresh_votes: the move is chosen by this decision's own visits -- the kept ones still steer
+        # the search down the kept tree, but a line the new screen shows worse is not played on votes
+        # cast before it was seen
+        self.fresh_votes = fresh_votes
+        self.n_kept = np.zeros((K, 12), np.int64)
         self.real_doom = real_doom
         self.vl = np.zeros((K, max_nodes), np.int32)
         self.max_depth, self.self_mode, self.per_wave = max_depth, backup == 'self', per_wave
@@ -366,6 +371,8 @@ class Forest:
         self.lat[torch.as_tensor(ks * self.N, device=self.dev)] = s.half()
         self.root_lat[torch.as_tensor(ks, device=self.dev)] = s.half()
         for i, k in enumerate(ks):
+            kids = self.child[k, 0]
+            self.n_kept[k] = [self.n[k, c] if keep[i] and c >= 0 else 0 for c in kids]
             if not keep[i]:
                 self.child[k, 0] = -1
                 self.n[k, 0] = 1
@@ -575,11 +582,18 @@ class Forest:
         return w.float().cpu().numpy().astype(np.float32)
 
     def choose(self, k):
-        """Most visited root move, ties to the best cost (latent.py's choose without the veto)."""
+        """Most visited root move, ties to the best cost (latent.py's choose without the veto) --
+        never a move known to die while one is not: with reuse a kept child can hold thousands of
+        visits cast before the new screen showed it dead (the C++ search never has such a child:
+        the emulator tells death when the child is made, before any visit)."""
         kids = self.child[k, 0]
-        n = np.array([self.n[k, c] if c >= 0 else 0 for c in kids])
+        n = self.visits(k).astype(np.int64)
         b = np.array([self.b[k, c] if c >= 0 else np.inf for c in kids])
-        if not n.sum():
+        dead = np.array([c >= 0 and self.term[k, c] == 2 for c in kids])
+        live = (n > 0) & ~dead
+        if live.any():
+            n = np.where(live, n, -1)
+        elif not n.sum():
             return 1
         return int(np.lexsort((np.where(np.isinf(b), 1e9, b), -n))[0])
 
@@ -588,8 +602,12 @@ class Forest:
         return float(max(self.tg_root[k] + self.b[k, 0], 0.0))
 
     def visits(self, k):
+        """Root visits by move (with fresh_votes, only this decision's)."""
         kids = self.child[k, 0]
-        return np.array([self.n[k, c] if c >= 0 else 0 for c in kids], np.int32)
+        n = np.array([self.n[k, c] if c >= 0 else 0 for c in kids], np.int64)
+        if self.fresh_votes:
+            n = np.maximum(n - self.n_kept[k], 0)
+        return n.astype(np.int32)
 
 
 def survives(s, state, a, horizon):
@@ -747,6 +765,8 @@ def main():
                     'from the new real screen every decision (its visits kept, its futures fresh)')
     ap.add_argument('--reuse-decay', type=float, default=1.0, help="with --reuse: kept visits x this (0: keep the "
                     "tree's shape, not its votes)")
+    ap.add_argument('--fresh-votes', action='store_true', help="with --reuse: the move by this decision's visits, "
+                    "not the kept ones")
     ap.add_argument('--max-nodes', type=int, default=0, help='nodes per tree (0: 3x --sims with --reuse, else --sims)')
     ap.add_argument('--reuse', action='store_true', help="keep the played move's subtree (the C++ search does); "
                     '--sims then counts new visits')
@@ -776,7 +796,7 @@ def main():
                     emu=s if (a.real_events or a.dedup or ((a.real_value or a.real_prior) and not a.imagine)) else None, real_events=a.real_events,
                     real_prior=a.real_prior, dedup=a.dedup, floor=-1e9 if a.no_floor else 0.0, topk=a.topk,
                     value=a.value, noise=a.noise, seed=a.seed, imagine=a.imagine, v_death=a.v_death, vloss=a.vloss,
-                    real_doom=a.real_doom, reuse_decay=a.reuse_decay,
+                    real_doom=a.real_doom, reuse_decay=a.reuse_decay, fresh_votes=a.fresh_votes,
                     real_value=load_rel(a.real_value)[0].cuda().eval() if a.real_value else None)
     levels = ROUTE if a.levels == 'all' else a.levels.split(',')
     delays = [int(x) for x in a.delays.split(',')]

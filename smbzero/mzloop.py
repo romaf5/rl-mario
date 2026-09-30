@@ -17,6 +17,7 @@ from .common import DATA, ROUTE, RUNS
 
 PY = sys.executable
 WORLD = ','.join(os.path.join(DATA, d, '*.npz') for d in ('world', 'world_agent', 'world_sib2', 'world_app'))
+WORLD_RAM = os.path.join(DATA, 'world_ram', 'p*', '*.npz')
 
 
 def run(args, log, tries=2):
@@ -58,6 +59,10 @@ def main():
     ap.add_argument('--value', default='tg', choices=('w', 'tg'), help="the search's leaf price")
     ap.add_argument('--w-tgdiff', type=float, default=4.0, help='frames-to-go differences within an unroll')
     ap.add_argument('--window', type=int, default=5, help='iterations of self-play kept for training')
+    ap.add_argument('--ram', action='store_true', help='a model reading the RAM (world_ram data, RAM in the shards)')
+    ap.add_argument('--accept', default='gate', choices=('gate', 'always'),
+                    help="gate: a candidate replaces the model only if it gates at least as well; always: "
+                         "MuZero's way, every candidate goes on (best.pt still keeps the best gate)")
     ap.add_argument('--out', default=os.path.join(RUNS, 'mz0'))
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
@@ -68,10 +73,15 @@ def main():
     # With the W search the root value is not frames to go, so self-play teaches the policy (the
     # search's visit counts) and the dynamics and events (what really happened where the search
     # goes) -- and the W and frames-to-go heads keep their route targets from the world data.
-    tg_w = ['--w-tg', '1', '--w-tgdiff', str(a.w_tgdiff)] if a.value == 'tg' else ['--w-tg', '0']
+    tg_w = ['--tg', '--w-tg', '1', '--w-tgdiff', str(a.w_tgdiff)] if a.value == 'tg' else []
+    world = WORLD_RAM if a.ram else WORLD
+    ram = ['--ram'] if a.ram else []
     best = os.path.join(a.out, 'best.pt')
+    cur = os.path.join(a.out, 'cur.pt') if a.accept == 'always' else best    # what plays and trains on
     if not os.path.exists(best):
         shutil.copy(a.init, best)
+        if cur != best:
+            shutil.copy(a.init, cur)
         dt = run(blat + ['--model', best, '--cap', '2.5', '--out', os.path.join(a.out, 'gate_init.json')],
                  os.path.join(a.out, 'gate_init.log'))
         w0, p0 = score(os.path.join(a.out, 'gate_init.json'))
@@ -88,20 +98,20 @@ def main():
         # self-play: every level, random start delays (the gate's own delays are not special)
         delays = ','.join(str(x) for x in sorted(rng.choice(61, a.games_per_level, replace=False)))
         sp = os.path.join(d, 'selfplay.json')
-        run(blat + ['--model', best, '--cap', '2.5', '--delays', delays, '--noise', str(a.noise), '--temp',
+        run(blat + ['--model', cur, '--cap', '2.5', '--delays', delays, '--noise', str(a.noise), '--temp',
                     str(a.temp), '--record', '--seed', str(it), '--out', sp], os.path.join(d, 'selfplay.log'))
         spw, spp = score(sp)
         shards = os.path.join(DATA, 'mz', os.path.basename(a.out), 'it%02d' % it)
-        run(['smbzero.mzdata', '--games', sp, '--out', shards], os.path.join(d, 'mzdata.log'))
+        run(['smbzero.mzdata', '--games', sp, '--out', shards] + ram, os.path.join(d, 'mzdata.log'))
         keep = ','.join(os.path.join(DATA, 'mz', os.path.basename(a.out), 'it%02d' % j, '*.npz')
                         for j in range(max(0, it - a.window + 1), it + 1))
         cand = os.path.join(d, 'wm')
-        run(['smbzero.wmtrain', '--data', WORLD + ',' + keep, '--steps', str(a.steps), '--lr', str(a.lr),
-             '--unroll', '12', '--w-cons', '2.0', '--transform', '--edge', '--pi-mlp', '--tg'] + tg_w + [
-             '--distill', a.prior_net, '--w-policy', '4', '--sp-frac', '0.5', '--init', best, '--out', cand]
+        run(['smbzero.wmtrain', '--data', world + ',' + keep, '--steps', str(a.steps), '--lr', str(a.lr),
+             '--unroll', '12', '--w-cons', '2.0', '--transform', '--edge', '--pi-mlp'] + tg_w + ram + [
+             '--distill', a.prior_net, '--w-policy', '4', '--sp-frac', '0.5', '--init', cur, '--out', cand]
             + (['--value-teacher', a.value_teacher] if a.value_teacher else []),
             os.path.join(d, 'train.log'))
-        run(['smbzero.tools.wmcal', '--model', os.path.join(cand, 'wm.pt'), '--data', WORLD, '--unroll', '12',
+        run(['smbzero.tools.wmcal', '--model', os.path.join(cand, 'wm.pt'), '--data', world, '--unroll', '12',
              '--rows', '8192'], os.path.join(d, 'wmcal.log'))
         gate = os.path.join(d, 'gate.json')
         run(blat + ['--model', os.path.join(cand, 'wm.pt'), '--cap', '2.5', '--out', gate], os.path.join(d, 'gate.log'))
@@ -110,8 +120,11 @@ def main():
         if kept:
             shutil.copy(os.path.join(cand, 'wm.pt'), best)
             best_score = sc
+        if cur != best:
+            shutil.copy(os.path.join(cand, 'wm.pt'), cur)
         log('[mz] it %02d: self-play %d/%d won, %.0f%% | gate %d/32, %.0f%% of the level -> %s (best %d/32, %.0f%%) (%.0f s)'
-            % (it, spw, 8 * a.games_per_level, 100 * spp, sc[0], 100 * sc[1], 'kept' if kept else 'sent back',
+            % (it, spw, 8 * a.games_per_level, 100 * spp, sc[0], 100 * sc[1],
+               'best' if kept else 'sent back' if cur == best else 'kept (not best)',
                best_score[0], 100 * best_score[1], time.time() - t0))
         json.dump(dict(score=list(sc), best=list(best_score), kept=kept), open(os.path.join(d, 'done'), 'w'))
 

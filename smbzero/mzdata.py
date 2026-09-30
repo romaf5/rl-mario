@@ -43,6 +43,7 @@ def main():
     ap.add_argument('--nstep', type=int, default=10)
     ap.add_argument('--threads', type=int, default=16)
     ap.add_argument('--shard', type=int, default=8192, help='decisions per shard')
+    ap.add_argument('--ram', action='store_true', help="also keep the game's RAM at every frame (for --ram models)")
     a = ap.parse_args()
     os.makedirs(a.out, exist_ok=True)
     games = []
@@ -70,8 +71,14 @@ def main():
         v = np.array(g['visits'][:n], np.float32)
         pi = v / np.maximum(v.sum(1, keepdims=True), 1)
         tg = targets(n, end, np.array(g['root_tg'][:n], np.float32), a.nstep)
-        return dict(frames=frames, acts=acts, outcome=outc, forced=e.forced_along(start, acts), prog=prog,
-                    pi=pi, tgt=tg, meta=(ROUTE.index(g['level']), 9), end=end)
+        r = dict(frames=frames, acts=acts, outcome=outc, forced=e.forced_along(start, acts), prog=prog,
+                 pi=pi, tgt=tg, meta=(ROUTE.index(g['level']), 9), end=end)
+        if a.ram:                                   # the RAM at each of the n + 1 frames
+            st_, rr = start, [e.ram(start)]
+            for i in range(n):
+                _, st_ = e.replay(st_, acts[i:i + 1]); rr.append(e.ram(st_))
+            r['ram'] = np.stack(rr)
+        return r
 
     t0 = time.time()
     buf, files, ends = [], 0, {'goal': 0, 'dead': 0, 'cap': 0}
@@ -92,7 +99,8 @@ def main():
                             pi=np.concatenate([r['pi'] for r in buf]),
                             tgt=np.concatenate([r['tgt'] for r in buf]),
                             offs=np.array(offs, np.int64), foffs=np.array(foffs, np.int64),
-                            meta=np.array([r['meta'] for r in buf], np.int32))
+                            meta=np.array([r['meta'] for r in buf], np.int32),
+                            **({'ram': np.concatenate([r['ram'] for r in buf])} if a.ram else {}))
         files += 1
         buf = []
 
