@@ -30,7 +30,7 @@ def collect(model, data, rows, device='cuda', batch=256):
         b = data.batch(r, device)
         obs, acts, ev, prev = b[0], b[1], b[2], b[8]
         with torch.autocast('cuda', dtype=torch.bfloat16):
-            _, evs, _, _, _ = model.unroll(obs, acts, prev)
+            _, evs, _, _, _ = model.unroll(b[14] if model.ram_in else obs, acts, prev)
         L.append(torch.stack(evs, 1).float().cpu())
         T.append(ev.float().cpu())
     return torch.cat(L), torch.cat(T)

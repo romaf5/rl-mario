@@ -40,6 +40,28 @@ class Representation(nn.Module):
         return norm_latent(self.stages(x.float() / 255.0))
 
 
+RAM_KEEP = np.r_[0:0x100, 0x300:0x800]              # the RAM's game-state bytes: not the stack or sprite buffer
+
+
+class RamRepresentation(nn.Module):
+    """The game's RAM -> a latent shaped like the screen's (C x 11 x 11), so the dynamics, heads and
+    search stay as they are. The bytes enter as bits: positions, counters and object types alike."""
+    def __init__(self, latent=LATENT_C, hidden=2048):
+        super().__init__()
+        self.latent = latent
+        self.fc1 = nn.Linear(len(RAM_KEEP) * 8, hidden)
+        self.fc2 = nn.Linear(hidden, hidden)
+        self.fc3 = nn.Linear(hidden, latent * 11 * 11)
+        self.register_buffer('keep', torch.as_tensor(RAM_KEEP, dtype=torch.long), persistent=False)
+
+    def forward(self, ram):
+        r = ram[:, self.keep].long()
+        bits = ((r[..., None] >> torch.arange(8, device=ram.device)) & 1).flatten(1).float()
+        h = F.relu(self.fc1(bits))
+        h = F.relu(self.fc2(h)) + h
+        return self.fc3(h).view(-1, self.latent, 11, 11)
+
+
 def norm_latent(s):
     """Scale each latent to [0, 1] (MuZero: keeps the unroll from drifting in scale)."""
     b = s.shape[0]
@@ -152,10 +174,13 @@ class Projector(nn.Module):
 
 class WorldModel(nn.Module):
     def __init__(self, latent=LATENT_C, prev=False, edge=False, pi_mlp=False, tg=False, pi_conv=False, dec=False,
-                 dyn_blocks=2):
+                 dyn_blocks=2, ram=False):
         super().__init__()
         chans = (32, 64, latent) if latent > 48 else (32, 48, latent) if latent >= 48 else (16, 32, latent)
-        self.h = Representation(chans)
+        # ram: the model reads the game's RAM, not the screen (the policy and value teachers still
+        # read the screen; only the model's own input changes)
+        self.ram_in = ram
+        self.h = RamRepresentation(latent) if ram else Representation(chans)
         self.g = Dynamics(latent, edge, dyn_blocks)
         self.f = Prediction(latent, pi_mlp=pi_mlp, tg=tg, pi_conv=pi_conv)
         self.proj = Projector(latent)
@@ -173,8 +198,9 @@ class WorldModel(nn.Module):
             nn.init.zeros_(self.prev.weight)
 
     def encode(self, obs, prev=None):
-        """The real frames (and, if the model takes it, the action before them) -> latent."""
-        z = self.h.stages(obs.float() / 255.0)
+        """The real frames -- or the RAM (B, 2048) for a RAM model -- (and, if the model takes it, the
+        action before them) -> latent."""
+        z = self.h(obs) if self.ram_in else self.h.stages(obs.float() / 255.0)
         if self.prev is not None and prev is not None:
             z = z + self.prev(prev)[:, :, None, None]
         return norm_latent(z)
@@ -231,6 +257,7 @@ def load(path, device='cuda'):
     m = WorldModel(latent, prev='prev.weight' in ck['state'], edge=edge, pi_mlp='f.pfc.weight' in ck['state'],
                    tg='f.g1.weight' in ck['state'], pi_conv='f.pconv.0.weight' in ck['state'],
                    dec='dec.net.0.weight' in ck['state'],
-                   dyn_blocks=2 + len({k.split('.')[2] for k in ck['state'] if k.startswith('g.more.')}))
+                   dyn_blocks=2 + len({k.split('.')[2] for k in ck['state'] if k.startswith('g.more.')}),
+                   ram='h.fc1.weight' in ck['state'])
     m.load_state_dict(ck['state'])
     return m.to(device), ck

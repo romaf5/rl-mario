@@ -326,7 +326,7 @@ class Forest:
         self.out = np.zeros((K * per_wave, 4), np.int32)
 
     @torch.no_grad()
-    def reset(self, ks, stacks, prevs, states=None, levels=None, keep=None):
+    def reset(self, ks, stacks, prevs, states=None, levels=None, keep=None, rams=None):
         """Trees ks from the real screens (len(ks), 4, 84, 84) and the moves before them (with an
         oracle, also the real states and level names). keep[i]: the tree was rerooted on this
         move and keeps its subtree -- the root itself is still encoded fresh from the screen."""
@@ -347,8 +347,9 @@ class Forest:
                     self.root_e[int(k)] = e[i]
         x = torch.from_numpy(np.ascontiguousarray(stacks)).to(self.dev)
         pv = torch.as_tensor(np.asarray(prevs, np.int64), device=self.dev)
+        xin = torch.from_numpy(np.ascontiguousarray(rams)).to(self.dev) if self.m.ram_in else x
         with torch.autocast('cuda', dtype=torch.float16):
-            s, pi, _ = self.m.initial(x, pv)
+            s, pi, _ = self.m.initial(xin, pv)
             if self.prior_net is not None:
                 pi, _ = self.prior_net(x)
         pri = torch.softmax(pi.float(), 1).cpu().numpy()
@@ -627,7 +628,8 @@ def play(s, forest, starts, sims, caps, log=None, veto=0, reuse=False, veto_net=
         forest.reset(ks, np.stack([stack[slot[k]] for k in ks]),
                      [games[slot[k]]['actions'][-1] if games[slot[k]]['actions'] else NO_PREV for k in ks],
                      states=[state[slot[k]] for k in ks], levels=[games[slot[k]]['level'] for k in ks],
-                     keep=[kept[k] for k in ks])
+                     keep=[kept[k] for k in ks],
+                     rams=np.stack([s.ram(state[slot[k]]) for k in ks]) if forest.m.ram_in else None)
         if reimagine:
             forest.reimagine([k for k in ks if kept[k]])
         forest.run(ks, sims)

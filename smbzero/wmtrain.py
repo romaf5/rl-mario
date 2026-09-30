@@ -18,7 +18,7 @@ class Trajectories:
     """Shards of smbzero/data/world, with an index of usable unroll starts."""
     def __init__(self, pattern, unroll):
         F_, A, O, Fo, P, starts, lvl = [], [], [], [], [], [], []
-        PI, PM, TG, SP = [], [], [], []
+        PI, PM, TG, SP, RM = [], [], [], [], []
         fo = ao = 0
         for p in sorted(sum((glob.glob(q) for q in pattern.split(',')), [])):
             z = np.load(p)
@@ -31,6 +31,7 @@ class Trajectories:
             PM.append(np.full(len(z['acts']), sp, bool))
             TG.append(z["tgt"].astype(np.float32) if sp else np.maximum(z["prog"], 0).astype(np.float32))
             n_starts = len(z['acts'])
+            RM.append(z['ram'] if 'ram' in z.files else None)
             SP.append(np.full(n_starts, sp, bool))
             offs, foffs = z['offs'], z['foffs']
             for i in range(len(offs) - 1):
@@ -53,6 +54,7 @@ class Trajectories:
         self.pi_m = torch.from_numpy(np.concatenate(PM))
         self.tg = torch.from_numpy(np.concatenate(TG))
         self.sp = np.concatenate(SP)                # per unroll start: from self-play
+        self.rams = torch.from_numpy(np.concatenate(RM)) if all(r is not None for r in RM) else None
 
     def __len__(self):
         return len(self.starts)
@@ -97,10 +99,15 @@ class Trajectories:
         fa = fi[:, None] + k
         tg_m = torch.from_numpy((fa <= fend[:, None]).astype(np.float32))
         tg_t = self.tg[torch.from_numpy(np.minimum(fa, fend[:, None]))]
+        if self.rams is not None:                   # the RAM at the start and after each step
+            ram0 = self.rams[torch.from_numpy(fi)].to(device)
+            tgt_ram = self.rams[torch.from_numpy(nxt.reshape(-1))].to(device)
+        else:
+            ram0 = tgt_ram = None
         return (obs.to(device), acts.to(device), ev.to(device), tgt_obs.to(device),
                 r.to(device), valid.to(device), w.to(device), wvalid.to(device),
                 prev.to(device), tgt_prev.to(device),
-                pi_t.to(device), pi_m.to(device), tg_t.to(device), tg_m.to(device))
+                pi_t.to(device), pi_m.to(device), tg_t.to(device), tg_m.to(device), ram0, tgt_ram)
 
 
 def h(x, eps=1e-3):
@@ -115,7 +122,8 @@ def h(x, eps=1e-3):
 
 def losses(model, obs, acts, ev, tgt_obs, r, valid, wt, wvalid,
            w_event=1.0, w_cons=1.0, w_waste=1.0, w_value=1.0, transform=False, prev=None, tgt_prev=None,
-           teacher=None, w_policy=1.0, value_teacher=None, mz=None, w_tg=1.0, w_tgdiff=0.0, w_rec=0.0):
+           teacher=None, w_policy=1.0, value_teacher=None, mz=None, w_tg=1.0, w_tgdiff=0.0, w_rec=0.0,
+           model_obs=None, model_tgt=None):
     if value_teacher is not None:
         # W from the agent's own experience, not the route. Frames-to-go along the search's route
         # passes every hazard at a safe moment, so it is blind to danger that arrives late --
@@ -128,14 +136,15 @@ def losses(model, obs, acts, ev, tgt_obs, r, valid, wt, wvalid,
             deps = torch.arange(1, K + 1, device=obs.device).repeat(B)
             wv = value_teacher(tgt_obs, roots, deps).float().view(B, K)
         wt = torch.cat([torch.zeros(B, 1, device=obs.device), wv], 1).clamp(0, 512)
-    lat, evs, rs, pis, ws = model.unroll(obs, acts, prev)
+    # a RAM model reads the RAM (model_obs, model_tgt); its teachers still read the screens (obs, tgt_obs)
+    lat, evs, rs, pis, ws = model.unroll(obs if model_obs is None else model_obs, acts, prev)
     e = torch.stack(evs, 1)                                  # (B, K, 3)
     pos = ev.sum((0, 1)).clamp(min=1)
     weight = (ev.numel() / 3 / pos).clamp(max=50)            # events are rare: weight them up
     le = F.binary_cross_entropy_with_logits(e, ev, pos_weight=weight)
     # (B, K, ...) flattened batch-major, the order tgt_obs is built in -- cat(dim=0)
     # would be depth-major and pair each latent with another sample's frames.
-    lc = consistency(model, torch.stack(lat[1:], 1).flatten(0, 1), tgt_obs, tgt_prev)
+    lc = consistency(model, torch.stack(lat[1:], 1).flatten(0, 1), tgt_obs if model_tgt is None else model_tgt, tgt_prev)
     pred_r = torch.stack(rs, 1)                              # the frames each step throws away
     if transform:
         lr = (F.smooth_l1_loss(h(pred_r.float()), h(r), reduction='none') * valid).sum() / valid.sum().clamp(min=1)
@@ -216,7 +225,7 @@ def gate(model, data, rows, device='cuda', batch=256):
         b = data.batch(r, device)
         obs, acts, ev, prev = b[0], b[1], b[2], b[8]
         with torch.autocast('cuda', dtype=torch.bfloat16):
-            _, evs, _, _, _ = model.unroll(obs, acts, prev)
+            _, evs, _, _, _ = model.unroll(b[14] if model.ram_in else obs, acts, prev)
         p = (torch.stack(evs, 1).float().sigmoid() > 0.5).cpu().numpy()
         t = ev.cpu().numpy() > 0.5
         tp += (p & t).sum(0); fp += (p & ~t).sum(0); fn += (~p & t).sum(0)
@@ -252,6 +261,7 @@ def main():
     ap.add_argument('--w-tg', type=float, default=1.0)
     ap.add_argument('--w-tgdiff', type=float, default=0.0, help='weight on frames-to-go differences within an unroll')
     ap.add_argument('--latent', type=int, default=48, help='latent channels')
+    ap.add_argument('--ram', action='store_true', help="the model reads the game's RAM, not the screen (data: wmdata --ram)")
     ap.add_argument('--dyn-blocks', type=int, default=2, help='residual blocks in the transition')
     ap.add_argument('--dec', action='store_true', help='the model draws its frames (reconstruction loss)')
     ap.add_argument('--w-rec', type=float, default=0.0)
@@ -272,7 +282,7 @@ def main():
            ' '.join('%s %.2f%%' % (e, 100 * v) for e, v in zip(EVENTS,
                     [(data.out == 1).float().mean(), (data.out == 2).float().mean(), data.forced.mean()]))))
     model = WorldModel(a.latent, prev=a.prev, edge=a.edge, pi_mlp=a.pi_mlp, tg=a.tg, pi_conv=a.pi_conv, dec=a.dec,
-                       dyn_blocks=a.dyn_blocks).cuda()
+                       dyn_blocks=a.dyn_blocks, ram=a.ram).cuda()
     if a.init:
         ck0 = torch.load(a.init, map_location='cuda', weights_only=False)
         own = model.state_dict()                  # a head whose shape changed starts fresh too
@@ -298,14 +308,15 @@ def main():
         nsp = int(a.batch * a.sp_frac) if len(tr_sp) else 0
         rows = (np.concatenate([rng.choice(tr_sp, nsp), rng.choice(tr_w if len(tr_w) else tr, a.batch - nsp)])
                 if nsp else rng.choice(tr, a.batch))
-        obs, acts, ev, tgt, r, valid, wt, wv, prev, tprev, pi_t, pi_m, tg_t, tg_m = data.batch(rows, 'cuda')
+        obs, acts, ev, tgt, r, valid, wt, wv, prev, tprev, pi_t, pi_m, tg_t, tg_m, ram0, tram = data.batch(rows, 'cuda')
         mz = (pi_t, pi_m, tg_t, tg_m) if (a.tg or a.sp_frac) else None
         with torch.autocast('cuda', dtype=torch.bfloat16):
             loss, le, lc, rmae = losses(model, obs, acts, ev, tgt, r, valid, wt, wv, w_cons=a.w_cons,
                                         w_event=a.w_event, transform=a.transform,
                                         prev=prev, tgt_prev=tprev, teacher=teacher, w_policy=a.w_policy,
                                         value_teacher=value_teacher, mz=mz, w_tg=a.w_tg, w_tgdiff=a.w_tgdiff,
-                                        w_rec=a.w_rec)
+                                        w_rec=a.w_rec, model_obs=ram0 if a.ram else None,
+                                        model_tgt=tram if a.ram else None)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
