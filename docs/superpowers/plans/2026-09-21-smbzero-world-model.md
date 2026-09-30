@@ -1148,6 +1148,20 @@ by 3.9 frames at depth 12, 6.4 at 16, 16.5 at 24, 35 at 32, 107 at 48; the death
 nothing real past 16. With reuse at depth 64 it dies at once (0/32). The trajectories run to 48 steps
 (66% reach it). wm29: wm27 fine-tuned with a 48-step unroll, then the oracle's deep-reuse search.
 
+**wm29 at 2000 steps already imagines deep far better** -- W off the teacher 3.9/5.3/8.8/12.7/22.1
+frames at depth 12/16/24/32/48 (wm27 3.9/6.4/16.5/35/107) -- **and still loses: 1/32 with deep
+reuse**, dying at 1-8% of most levels. At 8-4 the trace shows why the trees stay 2-5 deep: nearly
+every line from the root is priced as a certain death (4096), so simulations keep landing on
+settled nodes -- and over 48 imagined steps a small false-alarm rate per step cuts almost every line.
+
+**Which part breaks the deep search** (wm29 at 2000 steps; reuse, depth 48, 300 simulations, one part
+the model's, the rest real; all real 17/32): the model's **events 13/32**, the model's **value 4/32**.
+The value is the part the deep search cannot live with. **A mean backup** (AlphaZero's Q instead of
+the best line's cost, death priced 512 so one death does not swamp a mean) does not rescue it: the
+model's value 3/32, all real 10/32 (from 17), the model alone 1/32. The min stays. The factorization
+above kept stale latents (plain reuse lets a kept node's imagined depth grow past the 48 trained);
+`--reimagine` now imagines only the model's parts again and keeps an oracle's.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves

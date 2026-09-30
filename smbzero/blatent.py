@@ -35,6 +35,16 @@ HOPELESS = 512.0
 
 @numba.njit(cache=True)
 def _backup_p(k, x, child, parent, b, w, n, self_mode, term):
+    """self_mode: 0 children (b = the best child's), 1 self (min of the node's own and the best
+    child's), 2 mean (AlphaZero's Q: the mean leaf value of the simulations through the node --
+    the min over thousands of noisy leaves follows the luckiest error; a mean does not)."""
+    if self_mode == 2:
+        v = w[k, x]
+        while x >= 0:
+            n[k, x] += 1
+            b[k, x] += (v - b[k, x]) / np.float32(n[k, x])
+            x = parent[k, x]
+        return
     while x >= 0:
         best, any_ = np.float32(1e30), False
         for a in range(12):
@@ -44,7 +54,7 @@ def _backup_p(k, x, child, parent, b, w, n, self_mode, term):
                 if b[k, c] < best:
                     best = b[k, c]
         if any_:
-            b[k, x] = min(w[k, x], best) if self_mode else best
+            b[k, x] = min(w[k, x], best) if self_mode == 1 else best
         n[k, x] += 1
         x = parent[k, x]
 
@@ -234,12 +244,22 @@ def reroot(k, r, child, parent, depth, n, w, b, term, prior, act_in, keys, size,
 
 
 @numba.njit(cache=True)
-def rebackup(k, cnt, child, w, b, term, self_mode):
+def rebackup(k, cnt, child, w, b, term, self_mode, n):
     """b of nodes 0..cnt-1 of tree k from their (re-imagined) own values, leaves up: nodes are in
-    breadth-first order, so every child comes after its parent."""
+    breadth-first order, so every child comes after its parent. (Mean: the node's own value and
+    its children's means, weighted by their visits.)"""
     for x in range(cnt - 1, -1, -1):
         if term[k, x] != 0:
             b[k, x] = w[k, x]
+            continue
+        if self_mode == 2:
+            tot, cntv = w[k, x], np.float32(1.0)
+            for a in range(12):
+                c = child[k, x, a]
+                if c >= 0 and term[k, c] != 3:
+                    tot += b[k, c] * n[k, c]
+                    cntv += n[k, c]
+            b[k, x] = tot / cntv
             continue
         best, any_ = np.float32(1e30), False
         for a in range(12):
@@ -249,7 +269,7 @@ def rebackup(k, cnt, child, w, b, term, self_mode):
                 if b[k, c] < best:
                     best = b[k, c]
         if any_:
-            b[k, x] = min(w[k, x], best) if self_mode else best
+            b[k, x] = min(w[k, x], best) if self_mode == 1 else best
         else:
             b[k, x] = w[k, x]
 
@@ -318,7 +338,7 @@ class Forest:
         self.n_kept = np.zeros((K, 12), np.int64)
         self.real_doom = real_doom
         self.vl = np.zeros((K, max_nodes), np.int32)
-        self.max_depth, self.self_mode, self.per_wave = max_depth, backup == 'self', per_wave
+        self.max_depth, self.self_mode, self.per_wave = max_depth, {'children': 0, 'self': 1, 'mean': 2}[backup], per_wave
         c = model.g.conv.out_channels
         self.lat = torch.zeros((K * max_nodes, c, 11, 11), device=device, dtype=torch.float16)
         self.root_lat = torch.zeros((K, c, 11, 11), device=device, dtype=torch.float16)
@@ -426,11 +446,19 @@ class Forest:
             wv = np.clip(w.float().cpu().numpy(), self.floor, HOPELESS) + p[:, 1] * self.death_cost
             pri = torch.softmax(pi.float(), 1).cpu().numpy()
             dead, goal = p[:, 1] > self.dead_p, p[:, 0] > self.goal_p
-            self.term[kk, xx] = np.where(dead, 2, np.where(goal, 1, 0))
+            # an oracle's part is the real game's and does not move with imagination: only the
+            # model's parts are imagined again (the real values were moved into this root's frame)
+            if self.real_events:
+                dead, goal = self.term[kk, xx] == 2, self.term[kk, xx] == 1
+            else:
+                self.term[kk, xx] = np.where(dead, 2, np.where(goal, 1, 0))
+            if self.real_value is not None:
+                wv = self.w[kk, xx]
             self.w[kk, xx] = np.where(dead, self.v_death, np.where(goal, 0.0, wv)).astype(np.float32)
-            self.prior[kk, xx] = np.full(12, 1.0 / 12, np.float32) if self.uniform else pri
+            if not self.real_prior:
+                self.prior[kk, xx] = np.full(12, 1.0 / 12, np.float32) if self.uniform else pri
         for k in ks:
-            rebackup(k, int(self.size[k]), self.child, self.w, self.b, self.term, self.self_mode)
+            rebackup(k, int(self.size[k]), self.child, self.w, self.b, self.term, self.self_mode, self.n)
 
     def advance(self, k, a):
         """After move a: keep that child's subtree for the next decision (True), or nothing."""
@@ -749,7 +777,7 @@ def main():
     ap.add_argument('--deep-prior', default='uniform', choices=('uniform', 'model'))
     ap.add_argument('--scale', type=float, default=32.0)
     ap.add_argument('--c-puct', type=float, default=1.5)
-    ap.add_argument('--backup', default='self', choices=('self', 'children'))
+    ap.add_argument('--backup', default='self', choices=('self', 'children', 'mean'))
     ap.add_argument('--real-events', action='store_true', help='oracle: deaths and finishes from the real game')
     ap.add_argument('--real-value', help='oracle: W from this relvalue.pt on the real screens')
     ap.add_argument('--real-prior', action='store_true', help='oracle: the net prior on the real screens below the root')
