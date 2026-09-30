@@ -1071,6 +1071,20 @@ breaks the model. Since re-imagination recomputes every kept value exactly, what
 tree carries is its visits: votes cast on the last screen's futures, which the model's values may now
 see otherwise. `--reuse-decay` keeps the tree's shape (its depth) and scales the old visits down.
 
+**Decay: wm27 with reuse keeping only the shape 2/32, half the visits 3/32** -- no longer broken, no
+better than no reuse. **The oracle at 16384 nodes: 13/32** (14 at 4096) -- capacity saturated, 10 short.
+**4-2 shows what is left.** The C++ player (300 simulations, no veto) wins it 4/4 in ~29 s, 362
+decisions -- the search route's 359; the oracle latent search runs out of time 4/4, the two parting at
+decisions 51-92. Rebuilt at delay 5's decision 86-88: the C++ root holds ~20,000 visits, accumulated
+by reuse over dozens of decisions, and its best line is worth -64 frames (a deep plan through the
+vine); the latent root holds 2266-3933 and sees -20 at best. The C++ search wins the long levels by
+growing one deep tree across many moves -- and that is what a model with a root-relative value cannot
+do: when the root moves every kept W changes, and the kept visits become votes on a question no
+longer asked. An absolute value (frames to go) does not move with the root, so reuse would stay
+consistent. On the screen frames-to-go was hopelessly noisy (its differences off by 53 frames); the
+RAM holds Mario's exact position and the level, on which frames to go nearly depends. wm28: wm27 +
+the frames-to-go head (absolute and difference losses).
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
