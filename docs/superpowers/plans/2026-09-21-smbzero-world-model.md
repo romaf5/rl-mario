@@ -1016,6 +1016,19 @@ trajectory at the step into doom, labelled dead. (An oracle version, `blatent --
 slow to finish a game in 35 minutes.) A/B: 24k trajectories each from the same seeds, deaths at the
 doom point (world_doom) or where they register (world_ctrl); a world model on each, same recipe.
 
+**Doom A/B: wm25 (doom labels) 0/32, wm26 (death labels) 1/32.** 7571 deaths were moved to their
+doom points; both models calibrate well (twelve steps P98/R98, P99/R97) -- and neither plays: doom
+labels did not help, and both fall below wm18 (4/32), whose data included the agent's own play
+(world_agent), which this data (route, sticky, random, approach) lacks.
+
+**Where stage B stands (2026-09-29).** The latent search now matches the C++ search decision for
+decision (virtual loss; head to head with real history). With every part real it makes 9/32 (with
+reuse) against the C++ search's 24; the model alone stays at 0-4/32 through every change to the
+model tried here -- a frames-to-go value (0/32), a better policy head (4), a bigger model (1), drawn
+frames scored by the real nets (0-1), a learned veto (memorised), doom labels (0), and four loop
+iterations on the old search (flat). What is left untried at scale is MuZero's loop on the corrected
+search: mz2, from wm18, eight iterations, running.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
