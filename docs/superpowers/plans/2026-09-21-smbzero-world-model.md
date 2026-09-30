@@ -1093,6 +1093,35 @@ are, the all-oracle search with reuse (300 simulations, 16384 nodes, depth 64): 
 (4-2 0 -> 2/4, 8-1 0 -> 2/4, 4-1 3 -> 4, 8-3 1 -> 2). Every reuse result above without
 `--reimagine` carried it; re-imagined reuse recomputes the values and was not affected.
 
+**The rest of the C++ search's rules, all-oracle with reuse (300 simulations):** + sibling dedup
+(`--dedup`: a child whose real state equals a brother's is never visited again) **19/32**; + depth
+1000 and 32768 nodes as well **19/32** (8-4 won once). The C++ search: 24. What still differs: it
+skips the search on forced decisions, and a leaf's value is capped at 4096 there, 512 here.
+
+**wm28 (wm27 + frames to go, absolute and difference losses): 2/32 (tg), 3/32 (w); with reuse 0/32.**
+Reading the RAM did not make the absolute value accurate: frames to go 203 frames off at 40k steps,
+its differences 6.7 (the W head 2.7). And the extra loss cost the rest of the model: events 0.30
+against wm27's 0.08, death one step ahead P7/R44 (wm27 P37/R94), calibrated it never fires. So wm28
+does not test the idea cleanly -- but wm27, with good death heads, stalls at 3/32 all the same.
+
+**Why reuse kills a model agent (0/32, dead in the first 5-13% of a level).** Played beside a fresh
+search at every decision (4-1, delay 5): the kept root carries 3,000-8,000 visits in a tree of ~2,000
+nodes -- most are revisits of settled nodes at the depth bound (12), each adding a visit and no new
+information. The most-visited move then wins on momentum while its value is 5-10 frames worse than a
+brother's, decision after decision, until Mario dies. The perfect oracle survives this because its
+values are exact; the model's are noisy by about that much. Neither fix moved the gate: never playing
+a move known to die changed no game at all; choosing by this decision's own visits (`--fresh-votes`)
+2/32 (tg) and 1/32 (w) -- no worse than no reuse, no better. And the model does not scale with
+simulations either (wm17: 300 -> 3, 1000 -> 2, 3000 -> 4/32).
+
+**So the RAM world model has failed the gate (wm27 3/32, wm28 2-3/32) and stage B moves to the
+user's fallback: MuZero's loop, scaled up.** The model's parts all measure well on the data they were
+trained on, and the agent dies anyway -- the classic sign that the search leads it into states the
+data never covered. Self-play is what covers them: the loop trains the dynamics and events on the
+search's own games, deaths included. mz3: from wm27 (RAM), W search, 192 self-play games an iteration
+(8 levels x 24 random delays, noise 0.25, temperature 0.5), 3000 steps of training at half self-play,
+every candidate kept (MuZero's way, no gate; best.pt keeps the best gate), 40 iterations.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
