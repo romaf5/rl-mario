@@ -1237,6 +1237,18 @@ unroll) on the held-out search lines: W off the teacher 6.1 frames at depth 12 (
 (55%), deaths worse. **wm33's doom head learns fast:** at 4k steps, lost states P55/R83 at the real
 root, P46/R79 one step imagined, P37/R88 at 12, P40/R92 at 24 (threshold 0.5).
 
+**wm33 in the fresh search: 0/32 with the head at 0.5 and 0.8, 1/32 without it -- and 1/32 at 0.9,
+0.97, 0.99 once it only speaks above its threshold** (its probabilities, trained with lost states
+weighted up, had been priced as partial deaths: hundreds of frames on ordinary states). At strict
+thresholds it is precise (P93-98) on the doom-state data, and changes no game. **Why, on 8-2 delay 5:**
+at decisions 25-26 the real game says only the four left-moves (6-9) keep Mario savable; the head,
+one imagined step from the real RAM, gives all twelve 0.53-0.71, then 0.78-0.90 -- the lost ones
+and the saving ones alike. It knows the situation is dangerous, not which move escapes; a move later
+it is 0.98 for all, rightly and too late. The data never showed that distinction: every trajectory
+takes one move from each state. `wmdata --siblings 12 --doom-states`: twelve trajectories from one
+state differing in the first move, each flagged -- "from here these moves lose and those survive".
+wm34 = wm33 + that data.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
