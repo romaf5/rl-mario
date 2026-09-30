@@ -1201,6 +1201,14 @@ carries the consequences, so a shallow search suffices. Test with the oracle: th
 search with real doom (`--real-doom`: a leaf from which no move then held input lasts 24 steps is a
 death) on the two levels it lost 0/4 each (8-2, 4-1).
 
+**First sign (partial, 84 minutes in -- each decision costs ~15 s of doom checks):** without doom all
+four 8-2 games died at decision 29-30; with it none has ended yet. 4-1 delay 20 still died, later
+(221 decisions against 168). On that sign: RAM doom data (`wmdata --doom --ram`, 12 x 2000
+trajectories, deaths moved back to the doom point) and wm32 = wm29 fine-tuned on it (48-step
+unroll), gated with a fresh search -- the shallow search the doom oracle is being tested on.
+Beside it, wm31: a bigger model (latent 64, 4 dynamics blocks) from scratch, whether wm30 barely
+moved for lack of capacity.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
