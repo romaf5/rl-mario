@@ -280,7 +280,7 @@ class Forest:
                  death_cost=HOPELESS, calib=None, max_depth=12, backup='self', prior_net=None,
                  deep_prior='uniform', per_wave=32, device='cuda', emu=None, real_events=False, real_value=None,
                  real_prior=False, dedup=False, floor=0.0, topk=12, value='w', noise=0.0, alpha=0.3, seed=0,
-                 imagine=False, v_death=4096.0, vloss=False, real_doom=False, reuse_decay=1.0, fresh_votes=False):
+                 imagine=False, v_death=4096.0, vloss=False, real_doom=False, reuse_decay=1.0, fresh_votes=False, doom_p=0.0):
         self.m, self.dev, self.K, self.N = model, device, K, max_nodes
         self.emu, self.real_events, self.real_value, self.real_prior = emu, real_events, real_value, real_prior
         self.dedup = dedup
@@ -337,6 +337,7 @@ class Forest:
         self.fresh_votes = fresh_votes
         self.n_kept = np.zeros((K, 12), np.int64)
         self.real_doom = real_doom
+        self.doom_p = doom_p if getattr(model.f, 'has_doom', False) else 0.0    # 0: the doom head unused
         self.vl = np.zeros((K, max_nodes), np.int32)
         self.max_depth, self.self_mode, self.per_wave = max_depth, {'children': 0, 'self': 1, 'mean': 2}[backup], per_wave
         c = model.g.conv.out_channels
@@ -443,6 +444,8 @@ class Forest:
                 ki = min(d - 1, len(self.calib) - 1)
                 lg = lg / self.calib[ki, :, 0] + self.calib[ki, :, 1]
             p = 1.0 / (1.0 + np.exp(-np.clip(lg, -30.0, 30.0)))
+            if self.doom_p:
+                p[:, 1] = self._doomed(s2, p[:, 1])
             wv = np.clip(w.float().cpu().numpy(), self.floor, HOPELESS) + p[:, 1] * self.death_cost
             pri = torch.softmax(pi.float(), 1).cpu().numpy()
             dead, goal = p[:, 1] > self.dead_p, p[:, 0] > self.goal_p
@@ -515,6 +518,8 @@ class Forest:
                 ki = np.clip(dep_np - 1, 0, len(self.calib) - 1)
                 lg = lg / self.calib[ki, :, 0] + self.calib[ki, :, 1]
             p_ev = (1.0 / (1.0 + np.exp(-np.clip(lg, -30.0, 30.0)))).astype(np.float32)
+            if self.doom_p:
+                p_ev[:, 1] = self._doomed(s2, p_ev[:, 1])
             pri = torch.softmax(pi.float(), 1).cpu().numpy().astype(np.float32)
             w = w.float().cpu().numpy().astype(np.float32)
             dup = np.zeros(cnt, np.bool_)
@@ -547,6 +552,13 @@ class Forest:
                        self.w, self.b, self.term, self.pend, self.prior, self.dead_p, self.goal_p,
                        self.death_cost, self.self_mode, dup, self.floor, self.allow, self.topk, self.v_death,
                        self.vl, self.use_vl)
+
+    def _doomed(self, s2, p_dead):
+        """The doom head on the imagined latents: a state it calls lost (above doom_p) is a death,
+        as the doom oracle's is; below, its probability is priced like a death's."""
+        with torch.no_grad(), torch.autocast('cuda', dtype=torch.float16):
+            pd = torch.sigmoid(self.m.f.doomv(s2).float()).cpu().numpy()
+        return np.maximum(p_dead, np.where(pd > self.doom_p, 1.0, pd)).astype(np.float32)
 
     def _play_picks(self, kk, par, act, ch):
         """Play each imagined step for real: 0 running, 1 goal, 2 dead -- the search engine's rule
@@ -817,6 +829,8 @@ def main():
                     "tree's shape, not its votes)")
     ap.add_argument('--fresh-votes', action='store_true', help="with --reuse: the move by this decision's visits, "
                     "not the kept ones")
+    ap.add_argument('--doom-p', type=float, default=0.0, help="a model with a doom head: a node it calls lost "
+                    "above this is a death (0: unused)")
     ap.add_argument('--max-nodes', type=int, default=0, help='nodes per tree (0: 3x --sims with --reuse, else --sims)')
     ap.add_argument('--reuse', action='store_true', help="keep the played move's subtree (the C++ search does); "
                     '--sims then counts new visits')
@@ -846,7 +860,7 @@ def main():
                     emu=s if (a.real_events or a.dedup or ((a.real_value or a.real_prior) and not a.imagine)) else None, real_events=a.real_events,
                     real_prior=a.real_prior, dedup=a.dedup, floor=-1e9 if a.no_floor else 0.0, topk=a.topk,
                     value=a.value, noise=a.noise, seed=a.seed, imagine=a.imagine, v_death=a.v_death, vloss=a.vloss,
-                    real_doom=a.real_doom, reuse_decay=a.reuse_decay, fresh_votes=a.fresh_votes,
+                    real_doom=a.real_doom, reuse_decay=a.reuse_decay, fresh_votes=a.fresh_votes, doom_p=a.doom_p,
                     real_value=load_rel(a.real_value)[0].cuda().eval() if a.real_value else None)
     levels = ROUTE if a.levels == 'all' else a.levels.split(',')
     delays = [int(x) for x in a.delays.split(',')]

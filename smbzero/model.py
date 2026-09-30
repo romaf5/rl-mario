@@ -99,9 +99,17 @@ class Dynamics(nn.Module):
 
 
 class Prediction(nn.Module):
-    def __init__(self, c=LATENT_C, hidden=256, pi_mlp=False, tg=False, pi_conv=False):
+    def __init__(self, c=LATENT_C, hidden=256, pi_mlp=False, tg=False, pi_conv=False, doom=False):
         super().__init__()
         self.fc = nn.Linear(c * 11 * 11, hidden)
+        # doom: is this state already lost -- no move, then held input, lasts 24 steps? A property
+        # of one state (what the RAM holds exactly), which a shallow search cannot see: a death is
+        # sealed ~10 steps before it registers and a fresh tree is 4-6 deep. Its own features.
+        self.has_doom = doom
+        if doom:
+            self.dfc = nn.Linear(c * 11 * 11, hidden)
+            self.d1 = nn.Linear(hidden, hidden)
+            self.d2 = nn.Linear(hidden, 1)
         # tg: frames to go from this latent -- MuZero's value, absolute and bootstrapped, so a
         # consequence past the tree's reach (a Piranha Plant 24 steps out, the vine) can flow back
         # to the root. The search then prices a leaf at W = tg(leaf) + 4 depth - tg(root).
@@ -134,6 +142,10 @@ class Prediction(nn.Module):
               self.pi(self.pfc(s.flatten(1))) if self.pi_mlp else self.pi(e))
         return pi, self.w2(F.relu(self.w1(z))).squeeze(1) * 16.0
 
+
+    def doomv(self, s):
+        """latent -> logit that the state is lost"""
+        return self.d2(F.relu(self.d1(F.relu(self.dfc(s.flatten(1)))))).squeeze(1)
 
     def tgv(self, s):
         """latent -> frames to go (>= 0)"""
@@ -174,7 +186,7 @@ class Projector(nn.Module):
 
 class WorldModel(nn.Module):
     def __init__(self, latent=LATENT_C, prev=False, edge=False, pi_mlp=False, tg=False, pi_conv=False, dec=False,
-                 dyn_blocks=2, ram=False):
+                 dyn_blocks=2, ram=False, doom=False):
         super().__init__()
         chans = (32, 64, latent) if latent > 48 else (32, 48, latent) if latent >= 48 else (16, 32, latent)
         # ram: the model reads the game's RAM, not the screen (the policy and value teachers still
@@ -182,7 +194,7 @@ class WorldModel(nn.Module):
         self.ram_in = ram
         self.h = RamRepresentation(latent) if ram else Representation(chans)
         self.g = Dynamics(latent, edge, dyn_blocks)
-        self.f = Prediction(latent, pi_mlp=pi_mlp, tg=tg, pi_conv=pi_conv)
+        self.f = Prediction(latent, pi_mlp=pi_mlp, tg=tg, pi_conv=pi_conv, doom=doom)
         self.proj = Projector(latent)
         # dec: the model draws the frame each latent stands for (Dreamer's reconstruction), so the
         # latent keeps the sprites the policy and value nets read -- a decoder on a latent never
@@ -258,6 +270,6 @@ def load(path, device='cuda'):
                    tg='f.g1.weight' in ck['state'], pi_conv='f.pconv.0.weight' in ck['state'],
                    dec='dec.net.0.weight' in ck['state'],
                    dyn_blocks=2 + len({k.split('.')[2] for k in ck['state'] if k.startswith('g.more.')}),
-                   ram='h.fc1.weight' in ck['state'])
+                   ram='h.fc1.weight' in ck['state'], doom='f.dfc.weight' in ck['state'])
     m.load_state_dict(ck['state'])
     return m.to(device), ck

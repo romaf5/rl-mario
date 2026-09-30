@@ -100,6 +100,9 @@ def main():
     ap.add_argument('--games', help="glob of game JSONs (blatent/latent --out: level, delay, actions) for the "
                     "'replay' mode: a stretch of a game the agents really played")
     ap.add_argument('--doom', action='store_true', help='a dying trajectory ends at the step into doom, labelled dead')
+    ap.add_argument('--doom-states', action='store_true',
+                    help="keep the whole trajectory and flag every state from the doom point on ('doom', n + 1): "
+                         "a state from which no move then held input lasts 24 steps is lost")
     ap.add_argument('--agent-net', help="net for the 'agent' mode")
     ap.add_argument('--agent-relvalue', help="learned value for the 'agent' mode")
     ap.add_argument('--agent-sims', type=int, default=200)
@@ -148,7 +151,7 @@ def main():
                         per_tree=48, value_mix=1.0, min_backup=True, relative=True)
     t0, done, files, doomed = time.time(), 0, 0, 0
     frames, acts, outcome, forced, prog, offs, foffs, meta = [], [], [], [], [], [0], [0], []
-    rams = []
+    rams, dflags = [], []
     while done < a.trajectories:
         lvl = levels[int(rng.integers(len(levels)))]
         mode = modes[int(rng.integers(len(modes)))]
@@ -209,6 +212,19 @@ def main():
             continue
         action = action[:n]
         out = np.asarray(out[:n]).copy()
+        dflag = np.zeros(n + 1, np.uint8)
+        if a.doom_states and out[-1] == 2:        # flag the lost states, keep the trajectory whole
+            from .blatent import survives
+            sts = [start]
+            for i in range(n - 1):
+                _, nxt = s.replay(sts[-1], action[i:i + 1]); sts.append(nxt)
+            first = n                            # the death itself is lost
+            for t in range(n - 1, 0, -1):
+                if any(survives(s, sts[t], x, 24) for x in range(12)):
+                    break
+                first = t
+            dflag[first:] = 1
+            doomed += 1
         if a.doom and out[-1] == 2:
             # A death is sealed before it registers (a fall: ~10 decisions). Label the step that
             # enters doom -- the first state from which no move then held input lasts 24 steps --
@@ -236,7 +252,7 @@ def main():
                 _, st_ = s.replay(st_, action[i:i + 1]); rr.append(s.ram(st_))
             rams.append(np.stack(rr))
         prog.append(s.progress_along(start, ROUTE, segs[lvl]['opt'], action, ref_start=segs[lvl]['start']))
-        acts.append(action); outcome.append(out); forced.append(s.forced_along(start, action))
+        acts.append(action); outcome.append(out); forced.append(s.forced_along(start, action)); dflags.append(dflag)
         offs.append(offs[-1] + n); foffs.append(foffs[-1] + n + 1)
         meta.append((ROUTE.index(lvl), modes.index(mode)))
         done += 1
@@ -246,10 +262,11 @@ def main():
                                 outcome=np.concatenate(outcome), forced=np.concatenate(forced),
                                 prog=np.concatenate(prog),
                                 offs=np.array(offs, np.int64), foffs=np.array(foffs, np.int64),
-                                meta=np.array(meta, np.int32), **({'ram': np.concatenate(rams)} if a.ram else {}))
+                                meta=np.array(meta, np.int32), **({'ram': np.concatenate(rams)} if a.ram else {}),
+                                **({'doom': np.concatenate(dflags)} if a.doom_states else {}))
             files += 1
             frames, acts, outcome, forced, prog, offs, foffs, meta = [], [], [], [], [], [0], [0], []
-            rams = []
+            rams, dflags = [], []
             print('[wmdata] %d trajectories, %d shards (%.0f s)' % (done, files, time.time() - t0), flush=True)
     print('[wmdata] done: %d trajectories in %d shards%s' % (done, files, (' (%d deaths moved back to the doom point)'
                                                                          % doomed) if a.doom else ''))
