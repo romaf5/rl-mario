@@ -1161,6 +1161,18 @@ the best line's cost, death priced 512 so one death does not swamp a mean) does 
 model's value 3/32, all real 10/32 (from 17), the model alone 1/32. The min stays. The factorization
 above kept stale latents (plain reuse lets a kept node's imagined depth grow past the 48 trained);
 `--reimagine` now imagines only the model's parts again and keeps an oracle's.
+With it: the model's **value 3/32**, the model's **prior 3/32** (events 13, all real 17). Both of
+the model's judgements of a node break the deep search, each alone.
+
+**Why, most likely: the search imagines lines no trajectory took.** The model is trained on routes,
+explore paths and agents' games -- sensible moves -- and measured there; 48 steps down the search's
+own lines (jump, back, jump) its latent drifts, and the value and the prior read the drift. The min
+backup follows the luckiest of thousands of such leaves, the tree's shape follows the prior. So
+train on those lines: `treedata` plays the deep search from random points of each level, draws
+root-to-leaf lines from each tree by visit counts, extends them with held random moves to 48 steps
+and replays them in the emulator (frames, RAM, events) -- the game stepped only to make training
+data. MuZero grounds only the played move; here the imagined branches are grounded too. t0: 256
+games x 40 decisions x 3 lines from wm29; wm30 = wm29 + t0, 48-step unroll.
 
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from

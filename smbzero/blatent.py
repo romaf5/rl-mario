@@ -629,6 +629,24 @@ class Forest:
         """The search's frames to go at the root: the model's own guess plus the best line found."""
         return float(max(self.tg_root[k] + self.b[k, 0], 0.0))
 
+    def lines(self, k, n, rng):
+        """n root-to-leaf lines of tree k, each walked down by visit counts (a child drawn in
+        proportion to its visits): the futures the search spent its simulations imagining."""
+        out = []
+        for _ in range(n):
+            x, line = 0, []
+            while True:
+                kids = [(a, c) for a, c in enumerate(self.child[k, x]) if c >= 0 and self.term[k, c] != 3]
+                if not kids:
+                    break
+                v = np.array([max(int(self.n[k, c]), 1) for _, c in kids], np.float64)
+                a, c = kids[int(rng.choice(len(kids), p=v / v.sum()))]
+                line.append(int(a))
+                x = c
+            if line:
+                out.append(line)
+        return out
+
     def visits(self, k):
         """Root visits by move (with fresh_votes, only this decision's)."""
         kids = self.child[k, 0]
@@ -650,7 +668,7 @@ def survives(s, state, a, horizon):
 
 def play(s, forest, starts, sims, caps, log=None, veto=0, reuse=False, veto_net=None, veto_p=0.5,
          reimagine=False,
-         temp=0.0, record=False):
+         temp=0.0, record=False, lines=0):
     """Play every start to its end; K at a time, a finished game's tree goes to the next start.
     starts: [(level, delay, state)]; caps: max decisions per start. The real game is stepped
     only by the moves chosen. Returns one dict per start."""
@@ -691,6 +709,10 @@ def play(s, forest, starts, sims, caps, log=None, veto=0, reuse=False, veto_net=
                 if n.sum() > 0:
                     p = n ** (1.0 / temp); p /= p.sum()
                     picks[k] = int(forest.rng.choice(12, p=p))
+        if lines:                                   # treedata: the lines each tree imagined
+            for k in ks:
+                g = games[slot[k]]
+                g.setdefault('lines', []).append([len(g['actions']), forest.lines(k, lines, forest.rng)])
         if record:
             for k in ks:
                 g = games[slot[k]]
