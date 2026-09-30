@@ -1219,6 +1219,19 @@ own premise -- the value carries the consequences -- and it moves stage B's targ
 steps exactly" to "know, from the state, when it is lost": a property of one state, which the RAM
 holds exactly (positions, speeds, what is below). wm32 (RAM, doom labels) is the model version.
 
+**wm32 (wm29 on the doom-truncated RAM data): fresh 3/32, deep 1/32 -- 8-2 still dies at 6%.** Its
+death event, moved to the doom point, almost never fires (calibrated one step ahead P100/R12): it
+learns doom as a property of a move, where the survival nets had found the per-move question hard
+and the per-state one easy. **Doom from the real RAM is learnable:** a plain MLP on the RAM's bits,
+the doom point against every other state, held out by trajectory: AUC 0.98, and 0.90 against the
+still-savable state one step before it -- the hardest pair there is. But the truncated data holds
+one lost state per death, the hardest one. So (the user: focus on the world model): `wmdata
+--doom-states` keeps the whole trajectory and flags every state from the doom point to the death
+(1-7 per death; a pit ~6); the model gets a doom head (`--doom`: the state is lost, on its own
+features, at the real root and every imagined step); the search makes a node it calls lost a death
+(`--doom-p`) -- catching it a few steps late still works, the tree then sees every line through it
+die. wm33: wm29 + the doom head on world_ram + 40k doom-state trajectories, 24-step unroll.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
