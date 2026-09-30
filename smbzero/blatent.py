@@ -555,10 +555,12 @@ class Forest:
 
     def _doomed(self, s2, p_dead):
         """The doom head on the imagined latents: a state it calls lost (above doom_p) is a death,
-        as the doom oracle's is; below, its probability is priced like a death's."""
+        as the doom oracle's is; below, nothing -- its probabilities are trained with lost states
+        weighted up fifty-fold, and priced as deaths they put hundreds of frames on ordinary states
+        (0/32 at 0.5 and 0.8, 1/32 without it). It speaks only where it is precise."""
         with torch.no_grad(), torch.autocast('cuda', dtype=torch.float16):
             pd = torch.sigmoid(self.m.f.doomv(s2).float()).cpu().numpy()
-        return np.maximum(p_dead, np.where(pd > self.doom_p, 1.0, pd)).astype(np.float32)
+        return np.where(pd > self.doom_p, np.float32(1.0), p_dead).astype(np.float32)
 
     def _play_picks(self, kk, par, act, ch):
         """Play each imagined step for real: 0 running, 1 goal, 2 dead -- the search engine's rule
