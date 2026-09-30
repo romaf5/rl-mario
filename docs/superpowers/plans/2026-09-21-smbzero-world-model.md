@@ -1029,6 +1029,28 @@ frames scored by the real nets (0-1), a learned veto (memorised), doom labels (0
 iterations on the old search (flat). What is left untried at scale is MuZero's loop on the corrected
 search: mz2, from wm18, eight iterations, running.
 
+mz2: iteration 0 gate 3/32, iteration 1 2/32 (self-play 0/64), both sent back -- stopped for RAM.
+
+## Stage B on the RAM (2026-09-29, the user's call)
+
+Every pixel-model failure came back to imagined futures not being exact enough. The RAM is the game's
+exact state, so the agent reads the 2 KB RAM at play time instead of the screen (still no emulator
+lookahead). Data: `wmdata --ram` (the RAM at every frame) and a `replay` mode (stretches of 1760 games
+our agents played), 32k trajectories, 1.5M frames (world_ram).
+
+**The RAM predicted directly (`ramwm`: its 1536 game-state bytes as bits, an MLP with a per-bit skip,
+unrolled 12 on its own predictions), held-out trajectories, 40k steps:** changed bits still wrong
+19/22/26/35% at depths 1/4/8/12; Mario's x within 8 px 89% at depth 1 and 58% at 12 (median error
+0-3 px), y within 8 px 86-67%; enemy flags exact 97-85% -- and deaths, read off the predicted RAM by
+the engine's own rule, P0/R0 at every depth: the dying states' bit patterns are too rare for the model
+ever to produce one.
+
+**So the RAM as input instead (`--ram`, wm27).** An MLP from the RAM's bits to a latent shaped like the
+screen's (48 x 11 x 11); everything downstream -- dynamics, heads, calibration, the search -- as for
+wm18, the policy and value teachers still reading the screen, the search's root the real RAM. The
+encoder now has the whole state -- positions, speeds, enemy kinds, the held button -- where the
+screen's encoder recovered it imperfectly (its policy head agreed with the net 60% even at depth 0).
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
