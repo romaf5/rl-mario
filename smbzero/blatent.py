@@ -740,6 +740,7 @@ def main():
     ap.add_argument('--no-floor', action='store_true', help='keep W below 0 (the C++ search does)')
     ap.add_argument('--reimagine', action='store_true', help='with --reuse: imagine the kept subtree again '
                     'from the new real screen every decision (its visits kept, its futures fresh)')
+    ap.add_argument('--max-nodes', type=int, default=0, help='nodes per tree (0: 3x --sims with --reuse, else --sims)')
     ap.add_argument('--reuse', action='store_true', help="keep the played move's subtree (the C++ search does); "
                     '--sims then counts new visits')
     ap.add_argument('--dedup', action='store_true', help="oracle: prune a child whose real state equals a brother's")
@@ -760,7 +761,9 @@ def main():
     if a.prior_net:
         from .net import load as load_net
         pn = load_net(a.prior_net)[0].eval()
-    forest = Forest(model, a.parallel, max_nodes=(3 if a.reuse else 1) * a.sims + 2 * a.per_wave + 2, c_puct=a.c_puct, scale=a.scale,
+    # A kept subtree fills the tree: at 3x the simulations, 8-3's kept trees filled all 966 nodes and
+    # the search got almost no new simulations (the C++ search keeps 32768 and its root grows past 2000)
+    forest = Forest(model, a.parallel, max_nodes=a.max_nodes or ((3 if a.reuse else 1) * a.sims + 2 * a.per_wave + 2), c_puct=a.c_puct, scale=a.scale,
                     death_cost=a.death_cost, calib=calib, max_depth=md, backup=a.backup, prior_net=pn,
                     deep_prior=a.deep_prior, per_wave=a.per_wave,
                     emu=s if (a.real_events or a.dedup or ((a.real_value or a.real_prior) and not a.imagine)) else None, real_events=a.real_events,
