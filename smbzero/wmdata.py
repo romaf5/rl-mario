@@ -96,6 +96,9 @@ def main():
     ap.add_argument('--modes', default='route,route,sticky,random')
     ap.add_argument('--levels', default=','.join(ROUTE))
     ap.add_argument('--seed', type=int, default=0)
+    ap.add_argument('--ram', action='store_true', help="also keep the game's RAM at every frame (n + 1 per trajectory)")
+    ap.add_argument('--games', help="glob of game JSONs (blatent/latent --out: level, delay, actions) for the "
+                    "'replay' mode: a stretch of a game the agents really played")
     ap.add_argument('--doom', action='store_true', help='a dying trajectory ends at the step into doom, labelled dead')
     ap.add_argument('--agent-net', help="net for the 'agent' mode")
     ap.add_argument('--agent-relvalue', help="learned value for the 'agent' mode")
@@ -126,6 +129,12 @@ def main():
                     lost.append((m_.group(1), s.frames(segs[m_.group(1)]['start'], g['delay']),
                                  np.array(g['actions'], np.uint8)))
         print('[wmdata] %d lost games to branch from' % len(lost), flush=True)
+    played_games = []
+    if a.games:
+        import glob as _glob, json as _json
+        for f in sorted(_glob.glob(a.games)):
+            played_games += [g for g in _json.load(open(f)) if g.get('level') in segs and len(g.get('actions', [])) > 8]
+        print('[wmdata] %d played games to replay stretches of' % len(played_games), flush=True)
     if 'agent' in modes:
         from .net import RelEvaluator, load as load_net
         from .play import Player
@@ -136,11 +145,21 @@ def main():
                         per_tree=48, value_mix=1.0, min_backup=True, relative=True)
     t0, done, files, doomed = time.time(), 0, 0, 0
     frames, acts, outcome, forced, prog, offs, foffs, meta = [], [], [], [], [], [0], [0], []
+    rams = []
     while done < a.trajectories:
         lvl = levels[int(rng.integers(len(levels)))]
         mode = modes[int(rng.integers(len(modes)))]
         if sibs:                          # a sibling carries its own level: lvl above was redrawn,
             lvl, mode, start, action = sibs.pop()     # and progress against another level's
+        elif mode == 'replay':                    # a stretch of a game an agent really played
+            g = played_games[int(rng.integers(len(played_games)))]
+            lvl = g['level']
+            ga = np.array(g['actions'], np.uint8)
+            t = int(rng.integers(0, max(len(ga) - 4, 1)))
+            _, start = s.replay(s.frames(segs[lvl]['start'], int(g['delay'])), ga[:t])
+            action = ga[t:t + a.length]
+            if len(action) < a.length:
+                action = np.concatenate([action, rng.integers(0, 12, a.length - len(action)).astype(np.uint8)])
         elif mode == 'failures':
             lvl, st0, lacts = lost[int(rng.integers(len(lost)))]
             back = int(rng.integers(2, min(16, len(lacts)) + 1))     # a death one step out is dropped below
@@ -208,6 +227,11 @@ def main():
             doomed += 1
         obs, _, _ = s.replay_obs(start, action)
         frames.append(np.concatenate([s.obs(start)[None], obs]))     # n + 1 frames
+        if a.ram:                                  # the RAM at each of the n + 1 frames
+            st_, rr = start, [s.ram(start)]
+            for i in range(len(action)):
+                _, st_ = s.replay(st_, action[i:i + 1]); rr.append(s.ram(st_))
+            rams.append(np.stack(rr))
         prog.append(s.progress_along(start, ROUTE, segs[lvl]['opt'], action, ref_start=segs[lvl]['start']))
         acts.append(action); outcome.append(out); forced.append(s.forced_along(start, action))
         offs.append(offs[-1] + n); foffs.append(foffs[-1] + n + 1)
@@ -219,9 +243,10 @@ def main():
                                 outcome=np.concatenate(outcome), forced=np.concatenate(forced),
                                 prog=np.concatenate(prog),
                                 offs=np.array(offs, np.int64), foffs=np.array(foffs, np.int64),
-                                meta=np.array(meta, np.int32))
+                                meta=np.array(meta, np.int32), **({'ram': np.concatenate(rams)} if a.ram else {}))
             files += 1
             frames, acts, outcome, forced, prog, offs, foffs, meta = [], [], [], [], [], [0], [0], []
+            rams = []
             print('[wmdata] %d trajectories, %d shards (%.0f s)' % (done, files, time.time() - t0), flush=True)
     print('[wmdata] done: %d trajectories in %d shards%s' % (done, files, (' (%d deaths moved back to the doom point)'
                                                                          % doomed) if a.doom else ''))
