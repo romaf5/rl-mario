@@ -1232,6 +1232,11 @@ features, at the real root and every imagined step); the search makes a node it 
 (`--doom-p`) -- catching it a few steps late still works, the tree then sees every line through it
 die. wm33: wm29 + the doom head on world_ram + 40k doom-state trajectories, 24-step unroll.
 
+**Capacity is not it: wm31** (latent 64, four dynamics blocks, from scratch, 20k steps at a 48-step
+unroll) on the held-out search lines: W off the teacher 6.1 frames at depth 12 (wm30 5.6), prior 50%
+(55%), deaths worse. **wm33's doom head learns fast:** at 4k steps, lost states P55/R83 at the real
+root, P46/R79 one step imagined, P37/R88 at 12, P40/R92 at 24 (threshold 0.5).
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
