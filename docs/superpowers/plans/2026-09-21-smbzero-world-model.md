@@ -1209,8 +1209,9 @@ unroll), gated with a fresh search -- the shallow search the doom oracle is bein
 Beside it, wm31: a bigger model (latent 64, 4 dynamics blocks) from scratch, whether wm30 barely
 moved for lack of capacity.
 
-**Doom fixes the shallow search: the fresh all-oracle search with real doom wins 4 of the 6 games
-finished on 8-2 and 4-1 -- levels it lost 0/8 without it** (4-1 delays 5, 35, 50: 56, 41, 56 s;
+**Doom fixes the shallow search: the fresh all-oracle search with real doom wins 5/8 on 8-2 and
+4-1 (4-1 3/4 at 84% of the level, 8-2 2/4 at 75%) -- 0/8 without it (31%, 6%)** (final; 8-2 delay 5
+won in 73 s, delay 35 ran out of time; below, the first six games) (4-1 delays 5, 35, 50: 56, 41, 56 s;
 8-2 delay 50: 54 s; 4-1 delay 20 and 8-2 delay 20 died, at decisions 221 and 387 -- without doom
 168 and 29). Slow wins (the C++ search takes ~37 s), but wins, from a tree 4-6 steps deep: a leaf
 that knows the state is lost is what the shallow search was missing, not depth. This is MuZero's
