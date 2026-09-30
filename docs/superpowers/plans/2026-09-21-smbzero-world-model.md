@@ -1122,6 +1122,13 @@ search's own games, deaths included. mz3: from wm27 (RAM), W search, 192 self-pl
 (8 levels x 24 random delays, noise 0.25, temperature 0.5), 3000 steps of training at half self-play,
 every candidate kept (MuZero's way, no gate; best.pt keeps the best gate), 40 iterations.
 
+**mz3 at 1.5 hours (4 iterations, ~21 min each): flat.** Gates 2 (start) -> 2, 3, 3, 0/32 (22-26% of
+the level); self-play 4-7 of 192 won, 15-17%. The test of the loop's premise -- model k on iteration
+k+1's self-play, games it has not trained on -- shows deaths on the search's own paths are indeed
+harder (one step ahead R67 against R94 on the world data) but not getting easier: one step ahead
+R67/84/64/65, twelve R89/93/89/90, for iterations 0-3. The search keeps walking into deaths the
+model does not see coming, and 20k-30k decisions of them an iteration do not teach it to.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
