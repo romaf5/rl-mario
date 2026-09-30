@@ -1085,6 +1085,14 @@ consistent. On the screen frames-to-go was hopelessly noisy (its differences off
 RAM holds Mario's exact position and the level, on which frames to go nearly depends. wm28: wm27 +
 the frames-to-go head (absolute and difference losses).
 
+**A bug in reuse: every kept value was floored at 0 on each move.** `reroot` moved the kept subtree
+into the new root's frame and clamped it at 0 whatever `--no-floor` said -- so each move tied every
+kept line better than the new root's own estimate (the deep plans reuse exists to keep; the C++
+search's -64 through the vine is one) and the prior alone ranked them again. Floored as new leaves
+are, the all-oracle search with reuse (300 simulations, 16384 nodes, depth 64): **17/32**, from 13
+(4-2 0 -> 2/4, 8-1 0 -> 2/4, 4-1 3 -> 4, 8-3 1 -> 2). Every reuse result above without
+`--reimagine` carried it; re-imagined reuse recomputes the values and was not affected.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves

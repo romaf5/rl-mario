@@ -187,10 +187,12 @@ def apply_wave(out, cnt, wv, p_dead, p_goal, pri, uniform, child, parent, n, w, 
 
 
 @numba.njit(cache=True)
-def reroot(k, r, child, parent, depth, n, w, b, term, prior, act_in, keys, size, order, decay):
+def reroot(k, r, child, parent, depth, n, w, b, term, prior, act_in, keys, size, order, decay, floor):
     """Keep node r's subtree as tree k, r first (breadth-first order, written to `order`: the
     old index of each kept node). Costs move into r's frame: W from r = W from the old root
-    minus r's own W (a death stays a death). Returns the number kept."""
+    minus r's own W (a death stays a death), floored as new leaves are -- with no floor a line
+    better than r's own estimate stays better (the C++ search keeps it; flooring here at 0 tied
+    every such kept line at each move). Returns the number kept."""
     m = size[k]
     order[0] = r
     cnt, head = 1, 0
@@ -221,8 +223,8 @@ def reroot(k, r, child, parent, depth, n, w, b, term, prior, act_in, keys, size,
         if term_t[o] >= 2 or w_t[o] >= HOPELESS:
             w[k, i] = w_t[o]
         else:
-            w[k, i] = max(w_t[o] - delta, np.float32(0.0))
-        b[k, i] = b_t[o] if b_t[o] >= HOPELESS else max(b_t[o] - delta, np.float32(0.0))
+            w[k, i] = max(w_t[o] - delta, floor)
+        b[k, i] = b_t[o] if b_t[o] >= HOPELESS else max(b_t[o] - delta, floor)
         for a in range(12):
             prior[k, i, a] = pri_t[o, a]
         act_in[k, i] = ai_t[o]
@@ -430,7 +432,7 @@ class Forest:
             return False
         order = np.zeros(self.size[k], np.int32)
         cnt = reroot(k, c, self.child, self.parent, self.depth, self.n, self.w, self.b, self.term, self.prior,
-                     self.act_in, self.keys, self.size, order, np.float32(self.reuse_decay))
+                     self.act_in, self.keys, self.size, order, np.float32(self.reuse_decay), self.floor)
         o = torch.from_numpy(order[:cnt].astype(np.int64) + k * self.N).to(self.dev)
         self.lat[k * self.N: k * self.N + cnt] = self.lat[o].clone()
         if self.emu is not None:
