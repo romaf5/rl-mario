@@ -1174,6 +1174,20 @@ and replays them in the emulator (frames, RAM, events) -- the game stepped only 
 data. MuZero grounds only the played move; here the imagined branches are grounded too. t0: 256
 games x 40 decisions x 3 lines from wm29; wm30 = wm29 + t0, 48-step unroll.
 
+**wm29 (15k steps at a 48-step unroll): fresh 3/32, deep reuse re-imagined 2/32 (1000 simulations
+3/32), plain 0/32.** Deep imagination kept improving only a little after 2000 steps (W at depth 48
+off by 19.4 frames). **And the drift is real** -- wm29 on the world data against the search's own
+lines (t0):
+
+| wm29 | world data | the search's lines (t0) |
+|---|---|---|
+| prior agrees with the net, depth 1 / 12 / 48 | 82 / 71 / 49% | 70 / 55 / 42% |
+| W off the teacher, depth 1 / 12 / 32 | 1.0 / 4.0 / 10.7 | 1.4 / 5.9 / 14.0 frames |
+| death one step ahead, recall | 94% | 65% |
+
+t0: 25,779 trajectories, 974k steps (8002 end in a death), 24% of the steps the trees' own lines.
+Held out for wm30: t1 (64 more games, another seed).
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
