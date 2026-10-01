@@ -132,7 +132,7 @@ def h(x, eps=1e-3):
 def losses(model, obs, acts, ev, tgt_obs, r, valid, wt, wvalid,
            w_event=1.0, w_cons=1.0, w_waste=1.0, w_value=1.0, transform=False, prev=None, tgt_prev=None,
            teacher=None, w_policy=1.0, value_teacher=None, mz=None, w_tg=1.0, w_tgdiff=0.0, w_rec=0.0,
-           model_obs=None, model_tgt=None, doom=None, w_doom=1.0):
+           model_obs=None, model_tgt=None, doom=None, w_doom=1.0, w_latent=0.0):
     if value_teacher is not None:
         # W from the agent's own experience, not the route. Frames-to-go along the search's route
         # passes every hazard at a safe moment, so it is blind to danger that arrives late --
@@ -154,6 +154,17 @@ def losses(model, obs, acts, ev, tgt_obs, r, valid, wt, wvalid,
     # (B, K, ...) flattened batch-major, the order tgt_obs is built in -- cat(dim=0)
     # would be depth-major and pair each latent with another sample's frames.
     lc = consistency(model, torch.stack(lat[1:], 1).flatten(0, 1), tgt_obs if model_tgt is None else model_tgt, tgt_prev)
+    if w_latent:
+        # the imagined latent itself must be the real next state's: the doom head reads the real
+        # RAM's latent right (at 8-2 the saving moves lowest) and one imagined step of it wrong (all
+        # twelve alike) -- the projection consistency keeps what the projector needs, not what the
+        # heads read
+        with torch.no_grad():
+            tz = model.encode(tgt_obs if model_tgt is None else model_tgt, tgt_prev).float()
+        pz = torch.stack(lat[1:], 1).flatten(0, 1).float()
+        vm = valid.reshape(-1)
+        llat = (((pz - tz) ** 2).mean((1, 2, 3)) * vm).sum() / vm.sum().clamp(min=1)
+        losses.latent = float(llat.detach())
     pred_r = torch.stack(rs, 1)                              # the frames each step throws away
     if transform:
         lr = (F.smooth_l1_loss(h(pred_r.float()), h(r), reduction='none') * valid).sum() / valid.sum().clamp(min=1)
@@ -167,6 +178,8 @@ def losses(model, obs, acts, ev, tgt_obs, r, valid, wt, wvalid,
     with torch.no_grad():
         wmae = ((pred_w.float() - wt).abs() * wvalid).sum() / wvalid.sum().clamp(min=1)
     total = w_event * le + w_cons * lc + w_waste * lr + w_value * lw
+    if w_latent:
+        total = total + w_latent * llat
     if teacher is not None:
         # The policy head had never been trained, so the latent search explored from random
         # weights; given the policy net's prior at the root it went from 4% to 7% of 8-1. Here
@@ -288,6 +301,7 @@ def main():
     ap.add_argument('--latent', type=int, default=48, help='latent channels')
     ap.add_argument('--doom', action='store_true', help="a head that says the state is lost (data: wmdata --doom-states)")
     ap.add_argument('--w-doom', type=float, default=1.0)
+    ap.add_argument('--w-latent', type=float, default=0.0, help="the imagined latent itself against the real next state's")
     ap.add_argument('--ram', action='store_true', help="the model reads the game's RAM, not the screen (data: wmdata --ram)")
     ap.add_argument('--dyn-blocks', type=int, default=2, help='residual blocks in the transition')
     ap.add_argument('--dec', action='store_true', help='the model draws its frames (reconstruction loss)')
@@ -344,7 +358,7 @@ def main():
                                         value_teacher=value_teacher, mz=mz, w_tg=a.w_tg, w_tgdiff=a.w_tgdiff,
                                         w_rec=a.w_rec, model_obs=ram0 if a.ram else None,
                                         model_tgt=tram if a.ram else None,
-                                        doom=(dm_t, dm_m) if a.doom else None, w_doom=a.w_doom)
+                                        doom=(dm_t, dm_m) if a.doom else None, w_doom=a.w_doom, w_latent=a.w_latent)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
@@ -359,6 +373,7 @@ def main():
                 % (step, le, lc, rmae, ((' TG error %.0f frames' % losses.tg_mae) if hasattr(losses, 'tg_mae') else '')
                    + ((' (as W %.1f)' % losses.tg_diff_mae) if hasattr(losses, 'tg_diff_mae') else '')
                    + ((' frame error %.1f/255' % losses.rec) if hasattr(losses, 'rec') else '')
+                   + ((' latent MSE %.4f' % losses.latent) if hasattr(losses, 'latent') else '')
                    + ((' | lost at depth 0/1/12/%d %s' % (a.unroll, ' '.join('P%.0f/R%.0f' % (100 * gate.doom[0][j], 100 * gate.doom[1][j])
                                                                               for j in (0, 1, min(12, a.unroll), a.unroll))))
                       if getattr(gate, 'doom', None) is not None else ''),
