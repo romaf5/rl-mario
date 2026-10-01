@@ -1263,6 +1263,20 @@ at every death, branch all twelve moves from the last savable state (the move ta
 fatal, and some other saves Mario) -- every death becomes one such group (99 of 120 trajectories in
 the smoke test). 64k trajectories; wm35 = wm34 + them.
 
+**The fatal move is learnable from the RAM -- with data aimed at it.** world_ram_crit: 4117 groups,
+4042 of them holding both kinds (44.7% of the moves lost). The same classifier on the real RAM after
+each move, held out by group:
+
+| critical moments trained on | ranks a saving move above a fatal one | its most trusted move saves Mario |
+|---|---|---|
+| 179 (sibling data, all of it) | 0.62-0.74 | -- |
+| ~1000 (25%) | 0.849 | 90% |
+| ~2000 (50%) | 0.871 | 93% |
+| ~4000 (100%) | 0.908 | 95% |
+
+Still climbing at 4000: more of this data should buy more. Next: does the world model's doom head,
+trained on it (wm35), carry it into the search?
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
