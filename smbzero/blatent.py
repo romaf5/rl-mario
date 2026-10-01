@@ -280,7 +280,7 @@ class Forest:
                  death_cost=HOPELESS, calib=None, max_depth=12, backup='self', prior_net=None,
                  deep_prior='uniform', per_wave=32, device='cuda', emu=None, real_events=False, real_value=None,
                  real_prior=False, dedup=False, floor=0.0, topk=12, value='w', noise=0.0, alpha=0.3, seed=0,
-                 imagine=False, v_death=4096.0, vloss=False, real_doom=False, reuse_decay=1.0, fresh_votes=False, doom_p=0.0):
+                 imagine=False, v_death=4096.0, vloss=False, real_doom=False, reuse_decay=1.0, fresh_votes=False, doom_p=0.0, doom_calib=None):
         self.m, self.dev, self.K, self.N = model, device, K, max_nodes
         self.emu, self.real_events, self.real_value, self.real_prior = emu, real_events, real_value, real_prior
         self.dedup = dedup
@@ -338,6 +338,7 @@ class Forest:
         self.n_kept = np.zeros((K, 12), np.int64)
         self.real_doom = real_doom
         self.doom_p = doom_p if getattr(model.f, 'has_doom', False) else 0.0    # 0: the doom head unused
+        self.doom_calib = doom_calib if self.doom_p else None
         self.vl = np.zeros((K, max_nodes), np.int32)
         self.max_depth, self.self_mode, self.per_wave = max_depth, {'children': 0, 'self': 1, 'mean': 2}[backup], per_wave
         c = model.g.conv.out_channels
@@ -591,7 +592,15 @@ class Forest:
         weighted up fifty-fold, and priced as deaths they put hundreds of frames on ordinary states
         (0/32 at 0.5 and 0.8, 1/32 without it). It speaks only where it is precise."""
         with torch.no_grad(), torch.autocast('cuda', dtype=torch.float16):
-            pd = torch.sigmoid(self.m.f.doomv(s2).float()).cpu().numpy()
+            lg = self.m.f.doomv(s2).float()
+        if self.doom_calib is not None:
+            # calibrated (tools: doomfit), the head is priced like the death event: p x the death
+            # cost, a death above dead_p -- at a critical moment the fatal moves read ~0.6-0.8 and
+            # the saving ones ~0.05, which no threshold of 0.9 ever acted on
+            T, b = self.doom_calib
+            pc = torch.sigmoid(lg / T + b).cpu().numpy()
+            return np.maximum(p_dead, pc).astype(np.float32)
+        pd = torch.sigmoid(lg).cpu().numpy()
         return np.where(pd > self.doom_p, np.float32(1.0), p_dead).astype(np.float32)
 
     def _play_picks(self, kk, par, act, ch):
@@ -872,6 +881,8 @@ def main():
                     "not the kept ones")
     ap.add_argument('--doom-p', type=float, default=0.0, help="a model with a doom head: a node it calls lost "
                     "above this is a death (0: unused)")
+    ap.add_argument('--doom-price', action='store_true', help="with --doom-p: price the doom head's calibrated "
+                    "probability like a death's (the checkpoint's doom_calib) instead of a threshold")
     ap.add_argument('--imag-veto', type=int, default=0, help="before a move is played, some button then held "
                     "must survive this many steps in the model (stage A's commit check, imagined; 0: off)")
     ap.add_argument('--max-nodes', type=int, default=0, help='nodes per tree (0: 3x --sims with --reuse, else --sims)')
@@ -903,7 +914,7 @@ def main():
                     emu=s if (a.real_events or a.dedup or ((a.real_value or a.real_prior) and not a.imagine)) else None, real_events=a.real_events,
                     real_prior=a.real_prior, dedup=a.dedup, floor=-1e9 if a.no_floor else 0.0, topk=a.topk,
                     value=a.value, noise=a.noise, seed=a.seed, imagine=a.imagine, v_death=a.v_death, vloss=a.vloss,
-                    real_doom=a.real_doom, reuse_decay=a.reuse_decay, fresh_votes=a.fresh_votes, doom_p=a.doom_p,
+                    real_doom=a.real_doom, reuse_decay=a.reuse_decay, fresh_votes=a.fresh_votes, doom_p=a.doom_p, doom_calib=ck.get('doom_calib') if a.doom_price else None,
                     real_value=load_rel(a.real_value)[0].cuda().eval() if a.real_value else None)
     levels = ROUTE if a.levels == 'all' else a.levels.split(',')
     delays = [int(x) for x in a.delays.split(',')]

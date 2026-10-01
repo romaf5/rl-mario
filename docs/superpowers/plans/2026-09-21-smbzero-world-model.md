@@ -1287,6 +1287,15 @@ top move saves Mario 89%), 0.69 one step imagined (77%). The consistency loss ma
 the latent, not what the heads read. `--w-latent`: the imagined latent itself against the real next
 state's encoding. wm36 = wm35 + it (weight 20), on the critical data.
 
+**wm36: imagined step 0.722 / 80% (wm35 0.691 / 77%), real 0.843 / 90%; latent MSE 0.0118 ->
+0.0081; gate 3/32 at 0.97 and 0.9.** Another gap: at a critical moment the fatal moves read ~0.6-0.8
+and the saving ones ~0.05 -- the ranking the search needs, which no threshold of 0.9 acts on. So the
+head is calibrated (`doomfit`: one temperature and bias on held-out doom and critical data, T 1.11 b
+-0.90; above 0.5 P85/R74) and priced like the death event (`--doom-price`: p x the death cost, a
+death above 0.95): **1/32 at a death cost of 512, 3/32 at 256** -- 4-1 reaches 47% of the level
+(25-33% before) and wins once, 1-1 turns cautious (four times too long), 8-4 dies at 1% either way.
+wm37: wm36 + the second critical batch (~9k moments in all), latent weight 40.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
