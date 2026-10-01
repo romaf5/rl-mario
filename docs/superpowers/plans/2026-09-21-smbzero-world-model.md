@@ -1277,6 +1277,16 @@ each move, held out by group:
 Still climbing at 4000: more of this data should buy more. Next: does the world model's doom head,
 trained on it (wm35), carry it into the search?
 
+**wm35 (wm34 + the critical data): the doom head sharp (lost P83/R85 at the root, P78/R87 at 24
+steps), the gate not: 3/32, 1/32 with the imagined commit check.** The 8-2 trace says where it is
+lost now: at decision 44 the real game says only standing still (0, 10, 11) is safe; the doom head on
+the *real* RAM after each move scores those three 0.05-0.06, the lowest of the twelve -- and on *one
+imagined step* from the real RAM, all twelve 0.56-0.64. The head knows; the dynamics loses the move's
+effect. On 1009 held-out critical moments: ranking saving below fatal 0.83 on the real next RAM (its
+top move saves Mario 89%), 0.69 one step imagined (77%). The consistency loss matches a projection of
+the latent, not what the heads read. `--w-latent`: the imagined latent itself against the real next
+state's encoding. wm36 = wm35 + it (weight 20), on the critical data.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
