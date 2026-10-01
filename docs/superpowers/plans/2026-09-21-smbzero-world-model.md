@@ -1296,6 +1296,12 @@ death above 0.95): **1/32 at a death cost of 512, 3/32 at 256** -- 4-1 reaches 4
 (25-33% before) and wins once, 1-1 turns cautious (four times too long), 8-4 dies at 1% either way.
 wm37: wm36 + the second critical batch (~9k moments in all), latent weight 40.
 
+**wm37: imagined 0.739 / 80%, real 0.854 / 91%; gate 4/32 at 0.97 (1-1 4/4), 3/32 priced.** The
+fatal-move judgement creeps up with critical data (imagined top move 77 -> 80 -> 80%, real 89 -> 90
+-> 91%) -- but a level holds many such moments: at 80% each, ten in a row pass about one time in ten,
+where the doom oracle never misses. Overnight: a third critical batch (24-step branches), and wm38 =
+wm37 trained twice as long on both batches (latent weight 60, doom weight 3).
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
