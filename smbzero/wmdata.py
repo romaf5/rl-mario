@@ -100,6 +100,10 @@ def main():
     ap.add_argument('--games', help="glob of game JSONs (blatent/latent --out: level, delay, actions) for the "
                     "'replay' mode: a stretch of a game the agents really played")
     ap.add_argument('--doom', action='store_true', help='a dying trajectory ends at the step into doom, labelled dead')
+    ap.add_argument('--critical', action='store_true',
+                    help="with --doom-states: at every death, branch all 12 moves from the last savable state -- "
+                         "the move taken there was fatal and some other saves Mario, the one distinction the "
+                         "doom head never saw (179 of 4000 sibling groups held it)")
     ap.add_argument('--doom-states', action='store_true',
                     help="keep the whole trajectory and flag every state from the doom point on ('doom', n + 1): "
                          "a state from which no move then held input lasts 24 steps is lost")
@@ -117,7 +121,7 @@ def main():
     levels = a.levels.split(',')
     for l in levels:                                   # keep each level's reference: one replay per call
         s.set_progress_route(ROUTE, segs[l]['opt'], segs[l]['start'])
-    modes = a.modes.split(',')
+    modes = a.modes.split(',') + (['critical'] if a.critical else [])
     rng = np.random.default_rng(a.seed)
     player, queue, sibs = None, [], []
     lost = []                                   # (level, start, actions) of games that ended in a death
@@ -154,7 +158,7 @@ def main():
     rams, dflags = [], []
     while done < a.trajectories:
         lvl = levels[int(rng.integers(len(levels)))]
-        mode = modes[int(rng.integers(len(modes)))]
+        mode = modes[int(rng.integers(len(modes) - (1 if a.critical else 0)))]   # 'critical' only by branching
         if sibs:                          # a sibling carries its own level: lvl above was redrawn,
             lvl, mode, start, action = sibs.pop()     # and progress against another level's
         elif mode == 'replay':                    # a stretch of a game an agent really played
@@ -225,6 +229,13 @@ def main():
                 first = t
             dflag[first:] = 1
             doomed += 1
+            if a.critical and mode != 'critical' and 1 <= first - 1 < len(sts):
+                crit = sts[first - 1]                # savable, and the move taken there was fatal
+                for b in range(12):
+                    cont = [b]
+                    while len(cont) < a.length:      # then a random move, held 1-8 steps
+                        cont += [int(rng.integers(0, 12))] * int(rng.integers(1, 9))
+                    sibs.append((lvl, 'critical', crit, np.array(cont[:a.length], np.uint8)))
         if a.doom and out[-1] == 2:
             # A death is sealed before it registers (a fall: ~10 decisions). Label the step that
             # enters doom -- the first state from which no move then held input lasts 24 steps --

@@ -553,6 +553,38 @@ class Forest:
                        self.death_cost, self.self_mode, dup, self.floor, self.allow, self.topk, self.v_death,
                        self.vl, self.use_vl)
 
+    @torch.no_grad()
+    def imagined_survivors(self, ks, horizon=24, p_line=0.5):
+        """Stage A's commit check, played in the model: for each root move, does some button then
+        held for horizon - 1 steps survive -- the doom oracle's own test, imagined. A line dies if
+        its chance of no death (the calibrated death event, step by step) falls below p_line.
+        -> (len(ks), 12) bool."""
+        ks = np.asarray(ks)
+        n = len(ks)
+        first = torch.arange(12, device=self.dev).repeat_interleave(12).repeat(n)        # a
+        held = torch.arange(12, device=self.dev).repeat(12).repeat(n)                    # then c
+        s0 = self.root_lat[torch.from_numpy(ks).to(self.dev)].repeat_interleave(144, 0)
+        prev = torch.from_numpy(self.act_in[ks, 0].astype(np.int64)).to(self.dev).repeat_interleave(144)
+        alive = torch.ones(len(s0), device=self.dev)
+        z = s0
+        for t in range(horizon):
+            a = first if t == 0 else held
+            with torch.autocast('cuda', dtype=torch.float16):
+                z, ev, _ = self.m.g(z, a, prev)
+            lg = ev.float()[:, 1]
+            if self.calib is not None:
+                ki = min(t, len(self.calib) - 1)
+                lg = lg / float(self.calib[ki, 1, 0]) + float(self.calib[ki, 1, 1])
+            pdd = torch.sigmoid(lg)
+            if self.doom_p:
+                with torch.autocast('cuda', dtype=torch.float16):
+                    pdm = torch.sigmoid(self.m.f.doomv(z).float())
+                pdd = torch.where(pdm > self.doom_p, torch.ones_like(pdd), pdd)
+            alive = alive * (1 - pdd)
+            prev = a
+        ok = (alive > p_line).view(n, 12, 12).any(-1)
+        return ok.cpu().numpy()
+
     def _doomed(self, s2, p_dead):
         """The doom head on the imagined latents: a state it calls lost (above doom_p) is a death,
         as the doom oracle's is; below, nothing -- its probabilities are trained with lost states
@@ -682,7 +714,7 @@ def survives(s, state, a, horizon):
 
 def play(s, forest, starts, sims, caps, log=None, veto=0, reuse=False, veto_net=None, veto_p=0.5,
          reimagine=False,
-         temp=0.0, record=False, lines=0):
+         temp=0.0, record=False, lines=0, imag_veto=0):
     """Play every start to its end; K at a time, a finished game's tree goes to the next start.
     starts: [(level, delay, state)]; caps: max decisions per start. The real game is stepped
     only by the moves chosen. Returns one dict per start."""
@@ -732,6 +764,13 @@ def play(s, forest, starts, sims, caps, log=None, veto=0, reuse=False, veto_net=
                 g = games[slot[k]]
                 g.setdefault('visits', []).append(forest.visits(k).tolist())
                 g.setdefault('root_tg', []).append(round(forest.root_value(k), 1))
+        if imag_veto:                               # stage A's commit check, imagined in the model
+            ok = forest.imagined_survivors(ks, imag_veto)
+            for j, k in enumerate(ks):
+                n = forest.visits(k)
+                order = [picks[k]] + [int(x) for x in np.argsort(-n, kind='stable') if n[x] > 0 and x != picks[k]]
+                order += [x for x in range(12) if x not in order]
+                picks[k] = next((x for x in order if ok[j, x]), picks[k])
         if veto_net is not None:                    # stage A's commit check, learned: no game touched
             with torch.no_grad(), torch.autocast('cuda', dtype=torch.float16):
                 lp = veto_net(torch.from_numpy(np.stack([stack[slot[k]] for k in ks])).cuda(),
@@ -833,6 +872,8 @@ def main():
                     "not the kept ones")
     ap.add_argument('--doom-p', type=float, default=0.0, help="a model with a doom head: a node it calls lost "
                     "above this is a death (0: unused)")
+    ap.add_argument('--imag-veto', type=int, default=0, help="before a move is played, some button then held "
+                    "must survive this many steps in the model (stage A's commit check, imagined; 0: off)")
     ap.add_argument('--max-nodes', type=int, default=0, help='nodes per tree (0: 3x --sims with --reuse, else --sims)')
     ap.add_argument('--reuse', action='store_true', help="keep the played move's subtree (the C++ search does); "
                     '--sims then counts new visits')
@@ -875,7 +916,7 @@ def main():
         from .survival import load as load_surv
         vnet = load_surv(a.veto_net)[0]
     games = play(s, forest, starts, a.sims, caps, log=lambda m: print(m, flush=True), veto=a.real_veto,
-                 reuse=a.reuse, reimagine=a.reimagine, veto_net=vnet, veto_p=a.veto_p, temp=a.temp, record=a.record)
+                 reuse=a.reuse, reimagine=a.reimagine, imag_veto=a.imag_veto, veto_net=vnet, veto_p=a.veto_p, temp=a.temp, record=a.record)
     for g in games:                                # how far through the level: the route is only the ruler
         seg = segs[g['level']]
         s.set_progress_route(ROUTE, seg['opt'], seg['start'])

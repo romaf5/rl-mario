@@ -46,6 +46,7 @@ class Trajectories:
                     lvl.append(z['meta'][i, 0])                              # show it at the last step
             fo += len(z['frames']); ao += len(z['acts'])
         self.frames = torch.from_numpy(np.concatenate(F_))
+        del F_                                       # the frames are most of it: never hold them twice
         self.acts = torch.from_numpy(np.concatenate(A).astype(np.int64))
         self.out = torch.from_numpy(np.concatenate(O).astype(np.int64))
         self.forced = torch.from_numpy(np.concatenate(Fo).astype(np.float32))
@@ -58,6 +59,7 @@ class Trajectories:
         self.tg = torch.from_numpy(np.concatenate(TG))
         self.sp = np.concatenate(SP)                # per unroll start: from self-play
         self.rams = torch.from_numpy(np.concatenate(RM)) if all(r is not None for r in RM) else None
+        del RM
         self.doom, self.doom_k = torch.from_numpy(np.concatenate(DM)), torch.from_numpy(np.concatenate(DK))
 
     def __len__(self):
