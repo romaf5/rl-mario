@@ -7,8 +7,10 @@ Guidance for Claude Code (claude.ai/code) in this repository.
 Super Mario Bros solved by search: a C++ engine explores each level of the warp route
 (1-1, 1-2, 4-1, 4-2, 8-1, 8-2, 8-3, 8-4) until it finds an exit (Go-Explore), then a beam
 A* search makes that route as fast as it can. Every route is replayed in stable-retro, the
-reference emulator, frame by frame, and rendered as a video. Next: SMBZero, a neural
-policy trained from the search (expert iteration) that also plays with random start delays.
+reference emulator, frame by frame, and rendered as a video. SMBZero: a policy net + MCTS trained from the search (expert iteration)
+and its own games, on a learned relative value -- 26/32 level runs, a full game won (stage A);
+with a teacher-free value 20/32 (stage C). Stage B (planning in a learned world model) is paused;
+its code is in git tag `stage-b`.
 
 The PPO / GRPO / retro-chain training code that preceded this lives in git tag `pre-cleanup`.
 
@@ -42,6 +44,9 @@ Long jobs: launch detached (`setsid nohup ... &`), with `PYTHONUNBUFFERED=1` and
   `src/route` (segments, outcomes), `src/explore` (Go-Explore), `src/optimize` (beam A*,
   `progress.h` = its rank), `src/api.cpp` (C API, `include/smbsearch.h`), `src/cli.cpp`.
   Python: `python/smbsearch` (ctypes wrapper), `tools/` (solve, verify, render), `tests/`.
+- `smbzero/`: the net (`net.py`), MCTS play (`play.py`, `eval.py`), the learned relative value
+  (`relvalue.py`), expert iteration (`loop.py`, `zeroloop.py`), teacher-free data (`mcdata.py`),
+  `tools/levels.py` (the 32-run gate: `--net smbzero/runs/zero8/net.pt --relvalue smbzero/runs/relv3/relvalue.pt`).
 - `retro_integration/`: stable-retro integration (data.json, per-level states, the ROM once
   restored; `gen_states.py` regenerates the states).
 

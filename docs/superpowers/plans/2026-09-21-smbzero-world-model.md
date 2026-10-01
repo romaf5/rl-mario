@@ -1,5 +1,13 @@
 # SMBZero next: value network and world model (plan, 2026-09-21)
 
+> **Status 2026-10-01: stage B paused by the user.** The world-model agent stayed at 1-4/32; its code
+> was removed from master and lives in git tag `stage-b` (model, wmtrain, wmdata, blatent, mzloop,
+> treedata, survival, ramwm and their tools). Last finding: the search needs a doom-aware leaf
+> (all-oracle fresh + real doom 5/8 on 8-2/4-1 vs 0/8); at critical moments the model picks a
+> saving move 86% of the time from its imagined next state (92% from the real one), rising with
+> critical-moment data (`wmdata --critical`) -- the gate needs ~99%.
+
+
 ## The rule from here on
 
 **At evaluation the agent touches the game only by playing it**: every 4 frames it sees the

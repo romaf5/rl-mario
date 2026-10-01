@@ -6,5 +6,4 @@ Pillow
 imageio
 imageio-ffmpeg
 torch                   # SMBZero policy / value network
-numba                   # SMBZero: the batched latent search walks its trees compiled
 tensorboard             # SMBZero training curves

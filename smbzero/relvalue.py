@@ -20,7 +20,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 from .common import DATA, RUNS, V_SCALE
 from .net import _Stage
-from .wmtrain import h
+
+
+def h(x, eps=1e-3):
+    """MuZero's value transform: the search decides between lines a few frames apart, invisible
+    to a loss on the raw scale; through h, 0 and 4 frames are 1.2 apart and 512 is 21.6."""
+    return torch.sign(x) * (torch.sqrt(x.abs() + 1) - 1) + eps * x
+
 
 HOPELESS = 512.0
 
