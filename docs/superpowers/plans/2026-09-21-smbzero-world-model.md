@@ -1249,6 +1249,20 @@ takes one move from each state. `wmdata --siblings 12 --doom-states`: twelve tra
 state differing in the first move, each flagged -- "from here these moves lose and those survive".
 wm34 = wm33 + that data.
 
+**wm34: 3/32 (0.97), 2/32 (0.9) -- and the head still cannot tell the moves apart, even on the
+real RAM.** At 8-2 decision 26 the doom head on the real RAM after each move: the fatal moves
+0.85-0.98, the saving left-moves 0.76-0.88 -- no cut. **The stage-A commit check imagined in the
+model** (`--imag-veto 24`: before a move is played, some button then held must survive 24 steps of
+the model's own dynamics and death events -- the doom oracle's test, without the emulator): wm34 2/32,
+wm29 1/32; on the all-oracle search the real check had lifted 3 -> 11/32. **Why: the data hardly
+holds the moment that matters.** Of 4000 sibling groups (twelve moves from one state) only 179
+contain both a fatal and a saving move; a classifier on the real RAM ranks the saving moves above
+the fatal ones within a group 0.62/0.74/0.70 at 25/50/100% of the data -- learned barely, and not
+on a curve more of the same data climbs. **So aim the data at that moment: `wmdata --critical`**:
+at every death, branch all twelve moves from the last savable state (the move taken there was
+fatal, and some other saves Mario) -- every death becomes one such group (99 of 120 trajectories in
+the smoke test). 64k trajectories; wm35 = wm34 + them.
+
 **The learned veto from thousands of hazards (surv3).** `survival make --rollouts 16000`: a level, a
 start delay, a stretch of its route, then held inputs at random until Mario dies -- 80k states from
 distinct situations, split by situation. Held-out mixed states: AUC 0.72, 57% of dying moves
